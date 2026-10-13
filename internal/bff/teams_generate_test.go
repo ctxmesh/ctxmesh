@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // validTeamYAML is the minimal AgentTeam YAML the fake model returns when all
@@ -104,15 +104,15 @@ func seedRegistry(t *testing.T, ns, registryName string, members []string, draft
 
 	objs := make([]client.Object, 0, 1+len(members))
 	// The AgentRegistry with status.members populated.
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: registryName, Namespace: ns},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId: registryName,
 			MemberSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{"registry": registryName},
 			},
 		},
-		Status: agentsv1alpha1.AgentRegistryStatus{
+		Status: agentsv1beta1.AgentRegistryStatus{
 			Members: members,
 		},
 	}
@@ -128,13 +128,13 @@ func seedRegistry(t *testing.T, ns, registryName string, members []string, draft
 		if m == "orchestrator-bot" {
 			role = "orchestrator"
 		}
-		ad := &agentsv1alpha1.AgentDeployment{
+		ad := &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      m,
 				Namespace: ns,
 				Labels:    labels,
 			},
-			Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Spec: agentsv1beta1.AgentDeploymentSpec{
 				Image: "img:1",
 				Role:  role,
 			},
@@ -470,7 +470,7 @@ func TestGenerateTeamForbiddenRegistryIs403(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, isReg := obj.(*agentsv1alpha1.AgentRegistry); isReg {
+				if _, isReg := obj.(*agentsv1beta1.AgentRegistry); isReg {
 					return forbiddenErr(key.Name)
 				}
 				return cl.Get(ctx, key, obj, opts...)

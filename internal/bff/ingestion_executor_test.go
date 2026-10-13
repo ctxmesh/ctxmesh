@@ -30,9 +30,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -74,7 +74,7 @@ func (m *mockEmbedder) EmbedBatch(_ context.Context, _ string, texts []string) (
 	}
 	if m.failStatus != 0 && m.failRemain > 0 {
 		m.failRemain--
-		return nil, 0, &credplane.EmbedError{Status: m.failStatus, Snippet: "mock"}
+		return nil, 0, &embedding.EmbedError{Status: m.failStatus, Snippet: "mock"}
 	}
 	if len(texts) == 0 {
 		return nil, 0, nil
@@ -93,20 +93,20 @@ func (m *mockEmbedder) EmbedBatch(_ context.Context, _ string, texts []string) (
 	return out, m.dim, nil
 }
 
-var _ credplane.Embedder = (*mockEmbedder)(nil)
+var _ embedding.Embedder = (*mockEmbedder)(nil)
 
 // ── test scaffolding ────────────────────────────────────────────────────────────────────────────────────────
 
 // newIngestionTestServer builds a Server with a mem run store, a mem knowledge store, a mem object store, and the
 // given embedder — the full ingestion pipeline wired with no external dependency.
-func newIngestionTestServer(t *testing.T, embedder credplane.Embedder) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
+func newIngestionTestServer(t *testing.T, embedder embedding.Embedder) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
 	t.Helper()
 	return newIngestionTestServerWithStore(t, embedder, knowledge.NewMemStore())
 }
 
 // newIngestionTestServerWithStore is newIngestionTestServer with a caller-supplied knowledge.Store — used by the
 // m80.2 bounded-buffering proof to wrap the mem store in an Upsert-batch-size recorder.
-func newIngestionTestServerWithStore(t *testing.T, embedder credplane.Embedder, ks knowledge.Store) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
+func newIngestionTestServerWithStore(t *testing.T, embedder embedding.Embedder, ks knowledge.Store) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
 	t.Helper()
 	os := objectstore.NewMemObjectStore()
 	s := NewServer(Options{
@@ -471,7 +471,7 @@ func TestExecuteIngestion_UnreadableSpecStillProjectsFailed(t *testing.T) {
 // newIngestionTestServerWithTenantStore is newIngestionTestServer with the namespace→tenant mirror wired,
 // so the executor's storage hard-cap gate reads the controller's PROJECTED at-cap flag (ADR 0011-clean).
 func newIngestionTestServerWithTenantStore(
-	t *testing.T, embedder credplane.Embedder, nsStore namespacetenant.Store,
+	t *testing.T, embedder embedding.Embedder, nsStore namespacetenant.Store,
 ) (*Server, knowledge.Store, *objectstore.MemObjectStore) {
 	t.Helper()
 	os := objectstore.NewMemObjectStore()

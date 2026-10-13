@@ -23,35 +23,36 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func TestRawContentURL(t *testing.T) {
 	cases := []struct {
 		name    string
-		src     agentsv1alpha1.GitPromptSource
+		src     agentsv1beta1.GitPromptSource
 		want    string
 		wantErr bool
 	}{
 		{
 			name: "github repo with .git suffix",
-			src:  agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"},
+			src:  agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"},
 			want: "https://raw.githubusercontent.com/acme/prompts/main/support/greeting-v1.md",
 		},
 		{
 			name: "github repo, leading slash on path trimmed",
-			src:  agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "v2", Path: "/greeting.md"},
+			src:  agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "v2", Path: "/greeting.md"},
 			want: "https://raw.githubusercontent.com/acme/prompts/v2/greeting.md",
 		},
 		{
 			name:    "non-github host unsupported",
-			src:     agentsv1alpha1.GitPromptSource{Repo: "https://gitlab.com/acme/prompts.git", Ref: "main", Path: "p.md"},
+			src:     agentsv1beta1.GitPromptSource{Repo: "https://gitlab.com/acme/prompts.git", Ref: "main", Path: "p.md"},
 			wantErr: true,
 		},
 		{
 			name:    "incomplete pointer",
-			src:     agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "", Path: "p.md"},
+			src:     agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts", Ref: "", Path: "p.md"},
 			wantErr: true,
 		},
 	}
@@ -97,7 +98,7 @@ func newFakeResolver(status int, body, token string) *HTTPResolver {
 }
 
 func TestHTTPResolverResolve(t *testing.T) {
-	src := agentsv1alpha1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"}
+	src := agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/prompts.git", Ref: "main", Path: "support/greeting-v1.md"}
 
 	t.Run("200 returns content + deterministic version", func(t *testing.T) {
 		content := "You are Acme Support. Greet the customer warmly."
@@ -132,11 +133,42 @@ func TestHTTPResolverResolve(t *testing.T) {
 
 	t.Run("unsupported host maps to ErrNotFound (pointer error)", func(t *testing.T) {
 		r := NewHTTPResolver("")
-		_, err := r.Resolve(context.Background(), agentsv1alpha1.GitPromptSource{
+		_, err := r.Resolve(context.Background(), agentsv1beta1.GitPromptSource{
 			Repo: "https://gitlab.com/acme/p.git", Ref: "main", Path: "p.md",
 		})
 		if !errors.Is(err, ErrNotFound) {
 			t.Fatalf("want ErrNotFound for unsupported host, got %v", err)
 		}
 	})
+}
+
+// A resolver with MaxBytes refuses a longer file instead of truncating it, sends no token, and keeps
+// the default transport's proxy settings.
+func TestHTTPResolverWithOptions(t *testing.T) {
+	src := agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/skills", Ref: "v1", Path: "a/SKILL.md"}
+	serving := func(body string, sawAuth *bool) *HTTPResolver {
+		h := NewHTTPResolverWithOptions(HTTPResolverOptions{MaxBytes: 4, DialTimeout: time.Second})
+		h.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			*sawAuth = r.Header.Get("Authorization") != ""
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})
+		return h
+	}
+
+	var sawAuth bool
+	got, err := serving("abcd", &sawAuth).Resolve(context.Background(), src)
+	if err != nil || got.Content != "abcd" {
+		t.Fatalf("a file at the limit resolves whole: %q, %v", got.Content, err)
+	}
+	if sawAuth {
+		t.Fatal("a resolver built with options sends no token")
+	}
+	if _, err := serving("abcde", &sawAuth).Resolve(context.Background(), src); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("a file over the limit is ErrTooLarge, not truncated: %v", err)
+	}
+
+	tr, ok := NewHTTPResolverWithOptions(HTTPResolverOptions{DialTimeout: time.Second}).client.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatal("the transport keeps http.ProxyFromEnvironment, so HTTPS_PROXY is honoured")
+	}
 }

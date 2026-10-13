@@ -1,0 +1,7 @@
+{
+  "name": "my-agent-code-search",
+  "namespace": "default",
+  "agentRef": "my-agent",
+  "registryRef": "search-mcp",
+  "toolName": "code-search"
+}

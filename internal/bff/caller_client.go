@@ -18,6 +18,7 @@ package bff
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -117,8 +118,11 @@ const msgTokenRejected = "unauthorized: token rejected by the API server"
 // unauthorized caller sees a real 403/401 instead of an empty list swallowed as
 // success. isRBAC is false for anything else (transient/API errors), which the
 // handler then treats as a 500. Read denials must never masquerade as "no data".
+// A list cursor this server did not issue is the caller's error, a 400.
 func classifyReadError(err error) (status int, msg string, isRBAC bool) {
 	switch {
+	case errors.Is(err, errInvalidListCursor):
+		return http.StatusBadRequest, "invalid cursor: start the list again without one", true
 	case apierrors.IsForbidden(err):
 		return http.StatusForbidden, "forbidden: not allowed to read the requested resources", true
 	case apierrors.IsUnauthorized(err):

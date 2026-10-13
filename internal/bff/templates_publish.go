@@ -26,7 +26,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
@@ -135,7 +135,7 @@ func (s *Server) handlePublishTemplate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// (1) Caller-scoped GET the agent — this IS the authorization (parity with `kubectl get`).
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if gErr := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); gErr != nil {
 		s.writeGetError(w, gErr, kindAgent)
 		return
@@ -211,7 +211,7 @@ func (s *Server) handleUnpublishTemplate(w http.ResponseWriter, r *http.Request)
 	// Authorize the caller against the ORIGIN agent (caller-scoped GET). A caller who cannot read the
 	// agent cannot unpublish its template — a stranger's 403/404 surfaces honestly. (A tombstone is the
 	// unpublish; the read gate here is the ownership/authorization proof, mirroring publish.)
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if gErr := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); gErr != nil {
 		s.writeGetError(w, gErr, kindAgent)
 		return

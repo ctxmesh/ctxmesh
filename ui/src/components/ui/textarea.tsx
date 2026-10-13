@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-// shadcn/ui Textarea — the multi-line field (the config-builder's prompt input).
+// shadcn/ui Textarea — the multi-line field (a system prompt, an agent.yaml).
 // Same token surface as Input (M151 §5.3): `bg-card` because fields sit on the
 // card plane, `border-input` because that border is the only thing that reads
 // as a control against near-identical card/page grounds, and no shadow because

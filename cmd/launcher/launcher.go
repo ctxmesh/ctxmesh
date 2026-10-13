@@ -216,14 +216,14 @@ func loadConfig(lookup func(string) string) (Config, error) {
 // objectStoreConfig is the blob-offload configuration for the async path
 // (m7.6b). Parsed from env alongside the launcher Config.
 type objectStoreConfig struct {
-	// Addr is OBJECT_STORE_ADDR — the MinIO host:port. Empty ⇒ offload is
+	// Addr is OBJECT_STORE_ADDR — the object store's S3 host:port. Empty ⇒ offload is
 	// DISABLED (no offloader constructed): oversize async payloads are not
 	// offloaded and pass through capped, exactly as before this feature.
 	Addr string
 	// AccessKey / SecretKey are the dev object-store credentials
 	// (OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY). Deterministic dev-only
-	// fixed values injected by the controller as STATIC env (no valueFrom — the
-	// Knative ksvc constraint); NEVER a real credential.
+	// fixed values injected by the controller as STATIC env (public constants,
+	// ADR 0083); NEVER a real credential.
 	AccessKey string
 	SecretKey string
 }
@@ -232,7 +232,7 @@ type objectStoreConfig struct {
 //
 // Environment variables:
 //
-//	OBJECT_STORE_ADDR (gate): the MinIO host:port. Empty ⇒ offload is disabled
+//	OBJECT_STORE_ADDR (gate): the object store's S3 host:port. Empty ⇒ offload is disabled
 //	  (no offloader is built); every other object-store env is then irrelevant.
 //	OBJECT_STORE_ACCESS_KEY / OBJECT_STORE_SECRET_KEY: the dev credentials.
 //
@@ -383,16 +383,17 @@ func shouldSpan(path string) bool {
 // own spec.env + standard OS vars + the SDK's MEMORY_PORT/FEEDBACK_PORT/AGENT_* markers), so a strict
 // allowlist would break user apps. Any NEW platform SECRET injected into the launcher container MUST be added
 // here. Verified against the SDK (sdk/): it reads none of these directly (memory/feedback go through the
-// launcher's local ports; MEMORY_PORT — always injected — carries the "memory wired" signal). Moving these
-// creds off literal env to secretKeyRef mounts is the complementary, deferred hardening (brain m52.B1b).
+// launcher's local ports; MEMORY_PORT — always injected — carries the "memory wired" signal). The Langfuse
+// scores keys arrive by secretKeyRef (ADR 0148) but are still env on this container, so they are scrubbed too.
 var platformSecretEnv = map[string]bool{
-	"OBJECT_STORE_ACCESS_KEY":    true, // dev MinIO credential (launcher-only: blob offload)
-	"OBJECT_STORE_SECRET_KEY":    true, // dev MinIO credential
+	"OBJECT_STORE_ACCESS_KEY":    true, // dev object-store credential (launcher-only: blob offload)
+	"OBJECT_STORE_SECRET_KEY":    true, // dev object-store credential
 	"LANGFUSE_SCORES_PUBLIC_KEY": true, // Langfuse scores keypair (launcher-only: feedback submission)
 	"LANGFUSE_SCORES_SECRET_KEY": true, // Langfuse scores secret
-	"LANGFUSE_OTLP_AUTH":         true, // OTLP Basic-auth header (telemetry export)
-	// path to the pod's projected SA token — pod-identity is the launcher's, not the child's:
-	"STATELAYER_TOKEN_PATH": true,
+	// paths to the pod's projected SA tokens — pod identity is the launcher's, not the child's:
+	"STATELAYER_TOKEN_PATH":    true,
+	"BFF_POD_TOKEN_PATH":       true,
+	"TOKEN_SERVICE_TOKEN_PATH": true,
 }
 
 // buildChildEnv returns the environment slice for the spawned agent (child) process. Every var is inherited

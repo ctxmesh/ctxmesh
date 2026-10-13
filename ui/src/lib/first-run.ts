@@ -13,7 +13,8 @@
  *
  * Keyed by workspace, because the checklist asks "have you run an agent HERE". A single global
  * flag would check the step off in a namespace the user has never run anything in, which is the
- * same wrong answer in the other direction.
+ * same wrong answer in the other direction. All workspaces is every workspace, so there a run seen
+ * in any of them counts.
  */
 
 /** Namespaced so it cannot collide with the session token or a page's own key on this origin. */
@@ -39,11 +40,50 @@ export function markRunCompleted(namespace: string): void {
   }
 }
 
-/** Whether a run has been seen to complete in this workspace on this browser. */
+/**
+ * Whether a run has been seen to complete in this workspace on this browser. The empty namespace
+ * is All workspaces, which a run in any workspace satisfies: chats record the namespace they ran
+ * in, so nothing records under the all-workspaces key itself.
+ */
 export function hasCompletedRun(namespace: string): boolean {
   try {
-    return window.localStorage.getItem(storageKey(namespace)) === "1";
+    const storage = window.localStorage;
+    if (namespace) return storage.getItem(storageKey(namespace)) === "1";
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key?.startsWith(`${KEY_PREFIX}:`) && storage.getItem(key) === "1") return true;
+    }
+    return false;
   } catch {
     return false;
   }
+}
+
+/** An agent as the fleet list reports it — enough to find the newest. */
+export interface FirstRunAgent {
+  name: string;
+  namespace: string;
+  createdAt?: string;
+}
+
+/**
+ * Where the checklist's "Run your agent" step sends a person: the Playground with the agent they
+ * just created already picked, so the first thing they see is a chat with it rather than an empty
+ * form. "Just created" is the newest agent the fleet list carries. With no creation times to go by,
+ * a single agent is still unambiguous; otherwise the step opens the Playground's picker.
+ */
+export function firstRunPlaygroundLink(agents: FirstRunAgent[], playground: string): string {
+  let newest: FirstRunAgent | undefined;
+  let newestAt = -Infinity;
+  for (const a of agents) {
+    const at = a.createdAt ? Date.parse(a.createdAt) : NaN;
+    if (Number.isFinite(at) && at > newestAt) {
+      newest = a;
+      newestAt = at;
+    }
+  }
+  if (!newest && agents.length === 1) newest = agents[0];
+  if (!newest) return playground;
+  const q = new URLSearchParams({ agent: newest.name, ns: newest.namespace });
+  return `${playground}?${q.toString()}`;
 }

@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { ForbiddenInline } from "@/components/kit";
 import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib/api";
+import { settleNotice, useSettlingTrace } from "@/lib/trace-settle";
 
 // RunInspector — the NATIVE, on-theme run summary for one trace (first-agent-flow
 // §5, m14.11). It reads GET /api/traces/{id}/detail (a FLAT span list + rollup)
@@ -21,8 +22,9 @@ import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib
 // attempt to reveal. A `status: "error"` (Level ERROR) span shows the error dot.
 
 // spanKind classifies a flat span into a display kind for its color/label: the
-// GENERATION observations are LLM calls; a SPAN named like a tool call is a tool
-// span (the aha — its tokens/cost are visible); the root (no parent) is the run.
+// GENERATION observations are LLM calls; a TOOL observation is a tool call (the
+// platform's tool span arrives from Langfuse typed TOOL); the root is the run.
+// A tool call has no token usage of its own — the generation that chose it does.
 type SpanKind = "run" | "llm" | "tool" | "internal";
 
 const KIND_DOT: Record<SpanKind, string> = {
@@ -35,8 +37,8 @@ const KIND_DOT: Record<SpanKind, string> = {
 function classifySpan(span: SpanSummary, isRoot: boolean): SpanKind {
   if (isRoot) return "run";
   if (span.type === "GENERATION") return "llm";
-  // A non-generation SPAN that isn't the root is a tool/step call. The tool span
-  // is the one that carries the aha — surface it as a distinct "tool" kind.
+  if (span.type === "TOOL") return "tool";
+  // Traces recorded before Langfuse typed tool calls carry them as plain SPANs.
   if (span.type === "SPAN") return "tool";
   return "internal";
 }
@@ -195,19 +197,27 @@ export function RunInspector({ traceId }: { traceId: string }) {
     return () => controller.abort();
   }, [traceId]);
 
-  const nodes = React.useMemo(
-    () => (state.kind === "ready" ? buildTree(state.detail.spans) : []),
-    [state],
-  );
+  // A fresh run's trace lands in pieces (the root first, the generation and tool spans seconds
+  // later), so the loaded trace is re-read, bounded, until it matches what the run recorded.
+  const settling = useSettlingTrace(traceId, state.kind === "ready" ? state.detail : null);
+  const detail = settling.detail;
+  const notice = settleNotice(settling.status);
+
+  const nodes = React.useMemo(() => (detail ? buildTree(detail.spans) : []), [detail]);
   const window = React.useMemo(
-    () => (state.kind === "ready" ? traceWindow(state.detail.spans) : { start: 0, span: 1 }),
-    [state],
+    () => (detail ? traceWindow(detail.spans) : { start: 0, span: 1 }),
+    [detail],
   );
 
-  // Default selection: the first tool span, else the root, else the first node.
+  // Default selection: the first real tool call (TOOL), else the first span the
+  // SPAN fallback calls a tool, else the root, else the first node. It is recomputed as
+  // spans arrive, so a tool span that lands after the first read becomes the selection;
+  // a span the user picked stays picked for as long as it is in the trace.
   const effectiveSelected = React.useMemo(() => {
-    if (selectedId) return selectedId;
-    const tool = nodes.find((n) => n.kind === "tool");
+    if (selectedId && nodes.some((n) => n.span.id === selectedId)) return selectedId;
+    const tool =
+      nodes.find((n) => n.kind === "tool" && n.span.type === "TOOL") ??
+      nodes.find((n) => n.kind === "tool");
     if (tool) return tool.span.id;
     return nodes[0]?.span.id ?? null;
   }, [selectedId, nodes]);
@@ -270,11 +280,25 @@ export function RunInspector({ traceId }: { traceId: string }) {
     );
   }
 
-  const { rollup } = state.detail;
+  const { rollup } = detail ?? state.detail;
   const active = nodes.find((n) => n.span.id === effectiveSelected) ?? null;
 
   return (
     <div className="space-y-3" data-testid="run-inspector">
+      {settling.status?.kind === "settling" && (
+        <p className="text-xs text-muted-foreground" role="status" data-testid="run-inspector-settling">
+          Spans are still arriving from the trace backend — this view updates as they land.
+        </p>
+      )}
+      {notice && (
+        <p
+          className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-xs text-muted-foreground"
+          role="status"
+          data-testid="run-inspector-incomplete"
+        >
+          {notice}
+        </p>
+      )}
       <div className="grid gap-4 lg:grid-cols-[1fr_20rem]">
         {/* ── Span tree + waterfall ─────────────────────────────────────── */}
         <div className="overflow-hidden rounded-lg border bg-card shadow-card">
@@ -394,8 +418,8 @@ export function RunInspector({ traceId }: { traceId: string }) {
   );
 }
 
-// SpanDetail renders one selected span: identity + timing + (for a generation)
-// tokens/cost, then input/output — or a REDACTED marker over the structure when
+// SpanDetail renders one selected span: identity + timing + tokens (only when the
+// span reports usage — a generation does, a tool call does not) + cost, then input/output — or a REDACTED marker over the structure when
 // the content was scrubbed (never a blank, never a reveal attempt).
 function SpanDetail({ node }: { node: TreeNode }) {
   const s = node.span;

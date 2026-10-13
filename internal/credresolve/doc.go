@@ -20,13 +20,17 @@ limitations under the License.
 // grant-Secret WIRE FORMAT (label/data-key schema, coordinate layout, user-hash)
 // so the consent WRITER (the BFF) and every credential READER agree byte-for-byte.
 //
-// It is deliberately STANDALONE (no dependency on package bff or on any CRD) so
-// the two-tier OBO topology (ADR 0030) can import it from where the credential is
-// actually needed:
+// It is deliberately STANDALONE (no dependency on package bff, on any CRD, or on a
+// Kubernetes client) so the two-tier OBO topology (ADR 0030) can import it from where
+// the credential is actually needed:
 //
-//   - the per-pod injecting egress sidecar (embeds a K8sBackend for the first cut),
-//   - the central token service (runs a K8sBackend behind an internal API),
+//   - the per-pod injecting egress sidecar (the resolver interface; it calls the token service),
+//   - the central token service (runs secretbackend.Backend, which reads the grant Secrets),
 //   - the BFF (delegates its grant schema + OAuth refresh here, no duplication).
+//
+// Grants are stored by its subpackages: secretbackend keeps them in Kubernetes Secrets, and storage
+// builds whichever backend the token service is configured with. They are subpackages so the
+// sidecar's import graph stays free of client-go (cmd/egress-sidecar has a test for it).
 //
 // Design invariants (ADR 0029 §5/§7, ADR 0030):
 //

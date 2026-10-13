@@ -63,8 +63,8 @@ type errKBString string
 
 func (e errKBString) Error() string { return string(e) }
 
-// Forwarded-payload JSON keys — they MUST match the token-service knowledgeSearchRequest tags
-// (internal/credplane/knowledge.go): the launcher builds this request, the token-service decodes it.
+// Forwarded-payload JSON keys — they MUST match the token-service's retrieval.SearchRequest tags
+// (internal/controlplane/knowledge/retrieval): the launcher builds this request, the token-service decodes it.
 const (
 	wireKeyNamespace      = "namespace"
 	wireKeyEmbeddingModel = "embeddingModel"
@@ -98,7 +98,9 @@ type kbGrant struct {
 
 type knowledgeProxy struct {
 	tokenServiceURL string
-	namespace       string
+	// tokenPath is this pod's projected token for the token service (TOKEN_SERVICE_TOKEN_PATH, ADR 0154).
+	tokenPath string
+	namespace string
 	// roster is the parsed KNOWLEDGE_BASES env: kbName → grant. It is the un-forgeable
 	// membership gate (mirroring DELEGATE_ROSTER) — a model/SDK cannot add entries here.
 	// nil means KNOWLEDGE_BASES was unset or unparseable (fail-safe: all KBs refused).
@@ -156,6 +158,7 @@ func newKnowledgeProxy(logf func(string, ...any), tracer trace.Tracer) *knowledg
 	}
 	p := &knowledgeProxy{
 		tokenServiceURL: strings.TrimRight(tsURL, "/"),
+		tokenPath:       tokenServiceTokenPath(logf),
 		namespace:       ns,
 		roster:          parseKnowledgeRoster(os.Getenv("KNOWLEDGE_BASES")),
 		client:          &http.Client{Timeout: 30 * time.Second, CheckRedirect: refuseRedirect},
@@ -166,13 +169,11 @@ func newKnowledgeProxy(logf func(string, ...any), tracer trace.Tracer) *knowledg
 	// capability public key + audience the platform already provisions (mirrors newLongTermProxy).
 	// Without it, a per-user KB search is refused (never degraded to org-wide, which would leak
 	// across users); org-wide KBs are unaffected.
-	if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 != "" {
-		if pub, err := runcap.DecodePublicKey(pubB64); err == nil {
-			p.verifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
-		} else {
-			logf("launcher: knowledge: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user KB retrieval refused", err)
-		}
+	v, err := capabilityVerifierFromEnv(os.Getenv)
+	if err != nil {
+		logf("launcher: knowledge: %v — per-user KB retrieval refused", err)
 	}
+	p.verifier = v
 	return p
 }
 
@@ -283,8 +284,13 @@ func (p *knowledgeProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 		wireKeyQuery: body.Query, wireKeyTopK: body.TopK, "threshold": body.Threshold,
 		wireKeyEmbeddingModel: embeddingModel,
 	}
+	// A per-user search forwards the capability its subject came from; the token service checks it.
+	capability := ""
+	if subject != "" {
+		capability = r.Header.Get(runcap.HeaderName)
+	}
 	var out json.RawMessage
-	if err := p.post(ctx, "/v1/knowledge/search", payload, &out); err != nil {
+	if err := p.post(ctx, "/v1/knowledge/search", capability, payload, &out); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		p.logf("launcher: knowledge search forward failed: %v", err)
 		http.Error(w, "knowledge search failed", http.StatusBadGateway)
@@ -322,6 +328,8 @@ func (p *knowledgeProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 // post sends payload to the token-service path and decodes the response body into out. It reuses the shared
 // postToTokenService helper (the memory proxy's forwarding contract) so both read proxies keep one wire shape.
-func (p *knowledgeProxy) post(ctx context.Context, path string, payload any, out *json.RawMessage) error {
-	return postToTokenService(ctx, p.client, p.tokenServiceURL, path, payload, out)
+func (p *knowledgeProxy) post(ctx context.Context, path, capability string, payload any, out *json.RawMessage) error {
+	return postToTokenService(ctx, p.client, tokenServiceCall{
+		baseURL: p.tokenServiceURL, path: path, tokenPath: p.tokenPath, capability: capability,
+	}, payload, out)
 }

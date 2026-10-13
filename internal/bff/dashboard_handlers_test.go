@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 	"github.com/ctxmesh/ctxmesh/internal/run"
@@ -149,15 +149,17 @@ func (f fakeLangfuseAdapter) TraceScores(_ context.Context, _ string) ([]Feedbac
 	return []FeedbackScore{}, nil
 }
 
-// CostBreakdown returns the seeded breakdown/breakdownErr (m16.5 cost drill-down).
-func (f fakeLangfuseAdapter) CostBreakdown(_ context.Context, _ int, _ string) (CostBreakdownResponse, error) {
+// CostBreakdown scopes and pages the seeded breakdown exactly as the real adapter scopes and pages
+// its aggregate: breakdown.Agents is the whole sorted list and breakdown.Total the window total.
+func (f fakeLangfuseAdapter) CostBreakdown(_ context.Context, q CostBreakdownQuery) (CostBreakdownResponse, error) {
 	if f.breakdownErr != nil {
 		return CostBreakdownResponse{}, f.breakdownErr
 	}
+	all := CostBreakdownResponse{Total: CostSummary{ByModel: []MetricPoint{}}}
 	if f.breakdown != nil {
-		return *f.breakdown, nil
+		all = *f.breakdown
 	}
-	return CostBreakdownResponse{Agents: []AgentCostItem{}, Total: CostSummary{ByModel: []MetricPoint{}}}, nil
+	return costBreakdownPage(all.Agents, all.Total, q)
 }
 
 // CreateScore is a no-op stub (m84.4) — the fake does not capture or assert calls;
@@ -190,7 +192,7 @@ const (
 
 func serverWithAdapters(t *testing.T, a Adapters) *Server {
 	t.Helper()
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: inspectorTestAgentName, Namespace: inspectorTestAgentNs},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
@@ -306,9 +308,10 @@ func TestTraceLinkRouteResolvesURL(t *testing.T) {
 }
 
 func TestLangfuseRoutesServe501WhenAdapterNil(t *testing.T) {
-	// The nil-adapter seam: routes exist and honestly report 501, not 404.
+	// The nil-adapter seam: routes exist and honestly report 501, not 404. /api/runs left this list
+	// when it gained a run-store answer (ADR 0150); cost and traces still need a trace backend.
 	s := serverWithAdapters(t, Adapters{}) // no Langfuse
-	for _, path := range []string{"/api/runs", "/api/cost", "/api/traces/abc"} {
+	for _, path := range []string{"/api/cost", "/api/traces/abc"} {
 		rec := httptest.NewRecorder()
 		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		assert.Equal(t, http.StatusNotImplemented, rec.Code, "%s must serve 501 when Langfuse is nil", path)
@@ -388,11 +391,15 @@ func TestHandleRunsMalformedFromReturns400(t *testing.T) {
 
 // TestHandleRunsLangfuseAbsentReturns501: when Langfuse adapter is not wired,
 // the route is discoverable and returns 501 (not 404).
-func TestHandleRunsLangfuseAbsentReturns501(t *testing.T) {
+// This asserted 501, which on a stock install (no trace store) meant the console could list no run at
+// all. Without Langfuse the list now comes from the run store (ADR 0150); runs_store_list_test.go holds
+// its contract, including the caller scoping.
+func TestHandleRunsLangfuseAbsentServesTheRunStore(t *testing.T) {
 	s := serverWithAdapters(t, Adapters{}) // no Langfuse
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/runs", nil))
-	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"runs":[],"nextCursor":""}`, rec.Body.String())
 }
 
 // TestHandleRunsUpstreamFailureReturns502: adapter returns an error → 502, not

@@ -35,7 +35,7 @@ areas where a bug is most likely to matter are:
 - **Admission and policy** — a way to deploy an agent that bypasses a declared guardrail, budget, or
   approval.
 
-**Out of scope:** the bundled *dev* data plane (in-cluster Valkey, MinIO, dex and the demo fixtures) is
+**Out of scope:** the bundled *dev* data plane (in-cluster Valkey, object store, dex and the demo fixtures) is
 explicitly a convenience tier for local development, is documented as not for production data, and ships
 with well-known credentials on purpose. Findings there are expected rather than vulnerabilities.
 

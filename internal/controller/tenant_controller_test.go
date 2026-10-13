@@ -33,7 +33,6 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 )
@@ -69,32 +68,32 @@ func getQuota(t *testing.T, ns string) (*corev1.ResourceQuota, error) {
 // OTH-5: an invalid CPU/Memory quantity is REJECTED at admission (CEL) instead of being
 // silently dropped by computeHard — so an operator's typo can't leave the quota unenforced.
 func TestTenant_InvalidQuotaQuantityRejectedAtAdmission(t *testing.T) {
-	badCPU := &agentsv1alpha1.Tenant{
+	badCPU := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad-cpu"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-badq"},
-			Quota:      &agentsv1alpha1.TenantComputeQuota{CPU: "10x"}, // not a quantity
+			Quota:      &agentsv1beta1.TenantComputeQuota{CPU: "10x"}, // not a quantity
 		},
 	}
 	err := k8sClient.Create(testCtx, badCPU)
 	require.Error(t, err, "an invalid cpu quantity must be rejected, not silently unenforced")
 	require.Contains(t, err.Error(), "cpu must be a valid")
 
-	badMem := &agentsv1alpha1.Tenant{
+	badMem := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad-mem"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-badq"},
-			Quota:      &agentsv1alpha1.TenantComputeQuota{Memory: "lots"}, // not a quantity
+			Quota:      &agentsv1beta1.TenantComputeQuota{Memory: "lots"}, // not a quantity
 		},
 	}
 	require.Error(t, k8sClient.Create(testCtx, badMem))
 
 	// A VALID quota (+ empty, meaning "no cap") is still accepted.
-	ok := &agentsv1alpha1.Tenant{
+	ok := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "ok-quota"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-badq"},
-			Quota:      &agentsv1alpha1.TenantComputeQuota{CPU: "8", Memory: "16Gi"},
+			Quota:      &agentsv1beta1.TenantComputeQuota{CPU: "8", Memory: "16Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, ok))
@@ -106,11 +105,11 @@ func TestTenant_InvalidQuotaQuantityRejectedAtAdmission(t *testing.T) {
 func TestTenant_StampsQuotaAndLabelsNamespaces(t *testing.T) {
 	makeNamespace(t, "tnt-alpha-1")
 	makeNamespace(t, "tnt-alpha-2")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "alpha"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-alpha-1", "tnt-alpha-2"},
-			Quota:      &agentsv1alpha1.TenantComputeQuota{CPU: "8", Memory: "16Gi", Pods: 20},
+			Quota:      &agentsv1beta1.TenantComputeQuota{CPU: "8", Memory: "16Gi", Pods: 20},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -139,7 +138,7 @@ func TestTenant_StampsQuotaAndLabelsNamespaces(t *testing.T) {
 		assert.Equal(t, "alpha", namespace.Labels[tenantLabel], "namespace must be labelled")
 	}
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "alpha"}, &got))
 	assert.Equal(t, int32(2), got.Status.MemberNamespaces)
 	ready := meta.FindStatusCondition(got.Status.Conditions, "Ready")
@@ -151,11 +150,11 @@ func TestTenant_StampsQuotaAndLabelsNamespaces(t *testing.T) {
 // authoritative tenant label (m47.3 — the AgentDeployment controller's injection source).
 func TestTenant_ResolveForNamespace(t *testing.T) {
 	makeNamespace(t, "tnt-resolve-1")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "resolveco"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-resolve-1"},
-			Model:      &agentsv1alpha1.TenantModelQuota{BudgetUSD: "50.00", RPM: 300, MaxConcurrent: 12},
+			Model:      &agentsv1beta1.TenantModelQuota{BudgetUSD: "50.00", RPM: 300, MaxConcurrent: 12},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -183,11 +182,11 @@ func TestTenant_ResolveForNamespace(t *testing.T) {
 // per-agent budget) and the TENANT_* quota env injected (m47.4 — the enforcement wiring).
 func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
 	makeNamespace(t, "tnt-inject-ns")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "injectco"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-inject-ns"},
-			Model:      &agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600},
+			Model:      &agentsv1beta1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -205,11 +204,11 @@ func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
 
 	// The gateway proxy is interposed even with NO per-agent budget — tenant caps alone repoint it.
 	assert.Equal(t, budgetProxyURL, env["MODEL_GATEWAY_URL"], "tenant caps must repoint MODEL_GATEWAY_URL at the proxy")
-	assert.Equal(t, litellmGatewayURL, env["GATEWAY_UPSTREAM_URL"])
+	assert.Equal(t, defaultPlatform.gatewayURL(), env["GATEWAY_UPSTREAM_URL"])
 	assert.Equal(t, "injectco", env["TENANT_ID"])
 	assert.Equal(t, "100.00", env["TENANT_BUDGET_USD"])
 	assert.Equal(t, "600", env["TENANT_RPM"])
-	assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "the shared Valkey addr for cross-pod coordination")
+	assert.Equal(t, defaultPlatform.statelayerAddr(), env["TENANT_QUOTA_ADDR"], "the shared Valkey addr for cross-pod coordination")
 
 	// Without a configured proxy the pod-identity token is NOT injected.
 	_, hasTokenPath := env["STATELAYER_TOKEN_PATH"]
@@ -226,11 +225,11 @@ func TestTenant_InjectsQuotaEnvAndRepointsGateway(t *testing.T) {
 // holds no Valkey path; quota flows through the proxy).
 func TestTenant_ProxyQuotaInjectsProjectedToken(t *testing.T) {
 	makeNamespace(t, "tnt-proxytok-ns")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "proxytokco"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-proxytok-ns"},
-			Model:      &agentsv1alpha1.TenantModelQuota{RPM: 600},
+			Model:      &agentsv1beta1.TenantModelQuota{RPM: 600},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -287,12 +286,12 @@ func TestTenant_ProxyQuotaInjectsProjectedToken(t *testing.T) {
 // toggling it off removes the policy.
 func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 	makeNamespace(t, "tnt-iso-ns")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "isoco"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces:       []string{"tnt-iso-ns"},
 			NetworkIsolation: ptr.To(true),
-			Quota:            &agentsv1alpha1.TenantComputeQuota{Pods: 5},
+			Quota:            &agentsv1beta1.TenantComputeQuota{Pods: 5},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -321,7 +320,7 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 
 	// Serving-safe: egress allows the model gateway AND the state-layer proxy :8080
 	// (the m53.7 cutover default — omitting it 402s a member's quota, audit SEC-1).
-	allowsGateway, allowsProxy, allowsRawValkey := false, false, false
+	allowsGateway, allowsProxy, allowsRawValkey, allowsBFF := false, false, false, false
 	for _, rule := range np.Spec.Egress {
 		for _, p := range rule.Ports {
 			if p.Port == nil {
@@ -334,11 +333,14 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 				allowsProxy = true
 			case memoryBackendPort:
 				allowsRawValkey = true
+			case bffPort:
+				allowsBFF = true
 			}
 		}
 	}
 	assert.True(t, allowsGateway, "egress must allow the model gateway port")
 	assert.True(t, allowsProxy, "egress MUST allow the state-layer proxy :8080 (audit SEC-1)")
+	assert.True(t, allowsBFF, "egress MUST allow the BFF: every launcher binds its run capability there (ADR 0124)")
 	assert.False(t, allowsRawValkey, "egress MUST NOT allow raw Valkey :6379 (audit P1-2, M94 — agents use the :8080 proxy, incl. the spawn guard)")
 
 	// Toggle isolation off → the policy is pruned.
@@ -354,9 +356,9 @@ func TestTenant_NetworkIsolationPolicy(t *testing.T) {
 // ABSENT is served as true (CRD default) → isolated from birth, condition NetworkIsolated=Isolated.
 func TestTenant_NetworkIsolationSecureDefault(t *testing.T) {
 	makeNamespace(t, "tnt-sd-ns")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "sdco"},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{"tnt-sd-ns"}}, // networkIsolation ABSENT
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: []string{"tnt-sd-ns"}}, // networkIsolation ABSENT
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
@@ -380,9 +382,9 @@ func TestTenant_NetworkIsolationSecureDefault(t *testing.T) {
 // TestTenant_NetworkIsolationPeerTenants (m89.3): peerTenants opens a named east-west allow rule.
 func TestTenant_NetworkIsolationPeerTenants(t *testing.T) {
 	makeNamespace(t, "tnt-peer-ns")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "peerco"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces:       []string{"tnt-peer-ns"},
 			NetworkIsolation: ptr.To(true),
 			PeerTenants:      []string{"friend-a", "friend-b"},
@@ -418,12 +420,12 @@ func TestTenant_NetworkIsolationPeerTenants(t *testing.T) {
 // isolates it AND clears the annotation.
 func TestTenant_NetworkIsolationGrandfathered(t *testing.T) {
 	makeNamespace(t, "tnt-gf-ns")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        "gfco",
 			Annotations: map[string]string{networkIsolationGrandfatheredAnnotation: "true"},
 		},
-		Spec: agentsv1alpha1.TenantSpec{Namespaces: []string{"tnt-gf-ns"}, NetworkIsolation: ptr.To(false)},
+		Spec: agentsv1beta1.TenantSpec{Namespaces: []string{"tnt-gf-ns"}, NetworkIsolation: ptr.To(false)},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, tenant) })
@@ -457,18 +459,18 @@ func TestTenant_NetworkIsolationGrandfathered(t *testing.T) {
 // as a NamespaceConflict warning — never double-stamped.
 func TestTenant_NamespaceUniqueness(t *testing.T) {
 	makeNamespace(t, "tnt-shared")
-	first := &agentsv1alpha1.Tenant{
+	first := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "owner"},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{"tnt-shared"}, Quota: &agentsv1alpha1.TenantComputeQuota{Pods: 5}},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: []string{"tnt-shared"}, Quota: &agentsv1beta1.TenantComputeQuota{Pods: 5}},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, first))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, first) })
 	reconcileTenant(t, "owner")
 	reconcileTenant(t, "owner")
 
-	second := &agentsv1alpha1.Tenant{
+	second := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "intruder"},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{"tnt-shared"}, Quota: &agentsv1alpha1.TenantComputeQuota{Pods: 99}},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: []string{"tnt-shared"}, Quota: &agentsv1beta1.TenantComputeQuota{Pods: 99}},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, second))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, second) })
@@ -481,7 +483,7 @@ func TestTenant_NamespaceUniqueness(t *testing.T) {
 	assert.Equal(t, "owner", q.Labels[tenantLabel])
 	assert.Equal(t, "5", q.Spec.Hard.Name(corev1.ResourcePods, "").String(), "the intruder must not overwrite the owner's quota")
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "intruder"}, &got))
 	assert.Equal(t, int32(0), got.Status.MemberNamespaces)
 	conflict := meta.FindStatusCondition(got.Status.Conditions, "NamespaceConflict")
@@ -503,11 +505,11 @@ func TestTenant_NamespaceUniqueness(t *testing.T) {
 func TestTenant_PruneAndFinalizerCleanup(t *testing.T) {
 	makeNamespace(t, "tnt-beta-keep")
 	makeNamespace(t, "tnt-beta-drop")
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "beta"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-beta-keep", "tnt-beta-drop"},
-			Quota:      &agentsv1alpha1.TenantComputeQuota{Pods: 10},
+			Quota:      &agentsv1beta1.TenantComputeQuota{Pods: 10},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -536,7 +538,7 @@ func TestTenant_PruneAndFinalizerCleanup(t *testing.T) {
 	reconcileTenant(t, "beta")
 	_, err = getQuota(t, "tnt-beta-keep")
 	assert.True(t, apierrors.IsNotFound(err), "finalizer must prune the kept namespace's quota")
-	err = k8sClient.Get(testCtx, types.NamespacedName{Name: "beta"}, &agentsv1alpha1.Tenant{})
+	err = k8sClient.Get(testCtx, types.NamespacedName{Name: "beta"}, &agentsv1beta1.Tenant{})
 	assert.True(t, apierrors.IsNotFound(err), "tenant must be gone after the finalizer is removed")
 }
 
@@ -604,11 +606,11 @@ func TestTenant_StorageSoftCap_ExceededSetsCondition(t *testing.T) {
 	mkKBWithSize(t, "kb-cap-a", ns1, 6*1024*1024*1024) // 6GiB
 	mkKBWithSize(t, "kb-cap-b", ns2, 5*1024*1024*1024) // 5GiB (total 11GiB)
 
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "cap-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns1, ns2},
-			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+			Storage:    &agentsv1beta1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -617,7 +619,7 @@ func TestTenant_StorageSoftCap_ExceededSetsCondition(t *testing.T) {
 	reconcileTenant(t, "cap-tenant") // adds finalizer
 	reconcileTenant(t, "cap-tenant") // stamps namespaces + checks soft cap
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "cap-tenant"}, &got))
 
 	// The StorageSoftCapExceeded condition must be set.
@@ -648,11 +650,11 @@ func TestTenant_StorageSoftCap_UnderCapClearsCondition(t *testing.T) {
 	// KB total = 2GiB; soft cap = 10Gi → under cap.
 	mkKBWithSize(t, "kb-under", ns, 2*1024*1024*1024)
 
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "undercap-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns},
-			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+			Storage:    &agentsv1beta1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -661,7 +663,7 @@ func TestTenant_StorageSoftCap_UnderCapClearsCondition(t *testing.T) {
 	reconcileTenant(t, "undercap-tenant")
 	reconcileTenant(t, "undercap-tenant")
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "undercap-tenant"}, &got))
 
 	// No StorageSoftCapExceeded condition when under the cap.
@@ -682,9 +684,9 @@ func TestTenant_StorageSoftCap_NoCap_NoCondition(t *testing.T) {
 	// A large KB, but the tenant has no storage.corpusBytesSoftCap set.
 	mkKBWithSize(t, "kb-nocap", ns, 100*1024*1024*1024) // 100GiB
 
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "nocap-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns},
 			// Storage intentionally omitted — no cap.
 		},
@@ -695,7 +697,7 @@ func TestTenant_StorageSoftCap_NoCap_NoCondition(t *testing.T) {
 	reconcileTenant(t, "nocap-tenant")
 	reconcileTenant(t, "nocap-tenant")
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "nocap-tenant"}, &got))
 
 	// No StorageSoftCapExceeded condition when no cap is configured.
@@ -719,11 +721,11 @@ func TestTenant_StorageSoftCap_ConditionClearedWhenUnderAfterExceeded(t *testing
 	// Start with a large KB (> cap).
 	mkKBWithSize(t, "kb-clear-large", ns, 15*1024*1024*1024) // 15GiB > 10Gi cap
 
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "clear-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns},
-			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+			Storage:    &agentsv1beta1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -732,7 +734,7 @@ func TestTenant_StorageSoftCap_ConditionClearedWhenUnderAfterExceeded(t *testing
 	reconcileTenant(t, "clear-tenant")
 	reconcileTenant(t, "clear-tenant")
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "clear-tenant"}, &got))
 	cond := meta.FindStatusCondition(got.Status.Conditions, "StorageSoftCapExceeded")
 	require.NotNil(t, cond, "StorageSoftCapExceeded must be set (15GiB > 10Gi cap)")
@@ -747,7 +749,7 @@ func TestTenant_StorageSoftCap_ConditionClearedWhenUnderAfterExceeded(t *testing
 	// Reconcile again — condition must be cleared.
 	reconcileTenant(t, "clear-tenant")
 
-	var got2 agentsv1alpha1.Tenant
+	var got2 agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "clear-tenant"}, &got2))
 	cond2 := meta.FindStatusCondition(got2.Status.Conditions, "StorageSoftCapExceeded")
 	assert.Nil(t, cond2,
@@ -764,11 +766,11 @@ func TestTenant_MembershipMirror_WiredThroughReconcile(t *testing.T) {
 	makeNamespace(t, "tnt-mirror-1")
 	makeNamespace(t, "tnt-mirror-2")
 	mem := namespacetenant.NewMemStore()
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "mirror-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"tnt-mirror-1", "tnt-mirror-2"},
-			Quota:      &agentsv1alpha1.TenantComputeQuota{Pods: 5},
+			Quota:      &agentsv1beta1.TenantComputeQuota{Pods: 5},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -816,11 +818,11 @@ func TestTenant_StorageHardCap_ReachedSetsConditionAndProjects(t *testing.T) {
 	mkKBWithSize(t, "kb-hc-b", ns2, 10*1024*1024*1024)
 
 	mem := namespacetenant.NewMemStore()
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns1, ns2},
-			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
+			Storage:    &agentsv1beta1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -829,7 +831,7 @@ func TestTenant_StorageHardCap_ReachedSetsConditionAndProjects(t *testing.T) {
 	reconcileTenantWithStore(t, "hardcap-tenant", mem) // adds finalizer
 	reconcileTenantWithStore(t, "hardcap-tenant", mem) // stamps + checks hard cap + projects
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-tenant"}, &got))
 
 	cond := meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded")
@@ -864,11 +866,11 @@ func TestTenant_StorageHardCap_UnderCapNoConditionNoProjection(t *testing.T) {
 	mkKBWithSize(t, "kb-hc-under", ns, 5*1024*1024*1024) // 5GiB < 20Gi cap
 
 	mem := namespacetenant.NewMemStore()
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-under-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns},
-			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
+			Storage:    &agentsv1beta1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -877,7 +879,7 @@ func TestTenant_StorageHardCap_UnderCapNoConditionNoProjection(t *testing.T) {
 	reconcileTenantWithStore(t, "hardcap-under-tenant", mem)
 	reconcileTenantWithStore(t, "hardcap-under-tenant", mem)
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-under-tenant"}, &got))
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded"),
 		"StorageHardCapExceeded must NOT be set when under the hard cap")
@@ -896,12 +898,12 @@ func TestTenant_StorageHardCap_NoCapNoCondition(t *testing.T) {
 	mkKBWithSize(t, "kb-hc-nocap", ns, 100*1024*1024*1024) // 100GiB, but no hard cap
 
 	mem := namespacetenant.NewMemStore()
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-nocap-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns},
 			// Only a SOFT cap — the hard cap is intentionally unset (backward-compatible).
-			Storage: &agentsv1alpha1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
+			Storage: &agentsv1beta1.TenantStorageQuota{CorpusBytesSoftCap: "10Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -910,7 +912,7 @@ func TestTenant_StorageHardCap_NoCapNoCondition(t *testing.T) {
 	reconcileTenantWithStore(t, "hardcap-nocap-tenant", mem)
 	reconcileTenantWithStore(t, "hardcap-nocap-tenant", mem)
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-nocap-tenant"}, &got))
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded"),
 		"StorageHardCapExceeded must NOT be set when no hard cap is configured")
@@ -932,11 +934,11 @@ func TestTenant_StorageHardCap_ClearedWhenCorpusShrinks(t *testing.T) {
 	mkKBWithSize(t, "kb-hc-clear", ns, 25*1024*1024*1024) // 25GiB >= 20Gi cap
 
 	mem := namespacetenant.NewMemStore()
-	tenant := &agentsv1alpha1.Tenant{
+	tenant := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "hardcap-clear-tenant"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{ns},
-			Storage:    &agentsv1alpha1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
+			Storage:    &agentsv1beta1.TenantStorageQuota{CorpusBytesHardCap: "20Gi"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tenant))
@@ -945,7 +947,7 @@ func TestTenant_StorageHardCap_ClearedWhenCorpusShrinks(t *testing.T) {
 	reconcileTenantWithStore(t, "hardcap-clear-tenant", mem)
 	reconcileTenantWithStore(t, "hardcap-clear-tenant", mem)
 
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-clear-tenant"}, &got))
 	require.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, "StorageHardCapExceeded"),
 		"StorageHardCapExceeded must be set (25GiB >= 20Gi cap)")
@@ -961,7 +963,7 @@ func TestTenant_StorageHardCap_ClearedWhenCorpusShrinks(t *testing.T) {
 
 	reconcileTenantWithStore(t, "hardcap-clear-tenant", mem)
 
-	var got2 agentsv1alpha1.Tenant
+	var got2 agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "hardcap-clear-tenant"}, &got2))
 	assert.Nil(t, meta.FindStatusCondition(got2.Status.Conditions, "StorageHardCapExceeded"),
 		"StorageHardCapExceeded must be CLEARED once the corpus drops below the hard cap")
@@ -975,11 +977,11 @@ func TestTenant_StorageHardCap_ClearedWhenCorpusShrinks(t *testing.T) {
 // must surface a ProtectedNamespaceRefused condition. Otherwise a Tenant could fence the cluster's own DNS /
 // control plane behind a default-deny NetworkPolicy (a cluster outage).
 func TestTenant_ProtectedNamespaceRefused(t *testing.T) {
-	tnt := &agentsv1alpha1.Tenant{
+	tnt := &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: "sys-claimer"},
-		Spec: agentsv1alpha1.TenantSpec{
+		Spec: agentsv1beta1.TenantSpec{
 			Namespaces: []string{"kube-system"},
-			Quota:      &agentsv1alpha1.TenantComputeQuota{Pods: 5},
+			Quota:      &agentsv1beta1.TenantComputeQuota{Pods: 5},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, tnt))
@@ -988,7 +990,7 @@ func TestTenant_ProtectedNamespaceRefused(t *testing.T) {
 	reconcileTenant(t, "sys-claimer")
 
 	// Nothing is owned/stamped.
-	var got agentsv1alpha1.Tenant
+	var got agentsv1beta1.Tenant
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "sys-claimer"}, &got))
 	assert.Equal(t, int32(0), got.Status.MemberNamespaces, "a protected namespace is never owned")
 

@@ -32,7 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 )
 
@@ -43,7 +43,7 @@ const (
 	// flip a gate at awaiting-promotion → promoted for THAT candidate only. A later
 	// candidate (new revision) re-gates (audit FUNC-4 — a bare "true" no longer permanently
 	// auto-promotes every future passing revision). v1 promotion is human-gated: a passing
-	// score does NOT auto-promote. Auto-promotion/rollback are phase 2.
+	// score does NOT auto-promote. A rollback clears it when it names the version rolled back from.
 	promoteAnnotation = "agents.ctxmesh.ai/promote"
 
 	// warnAnnotation records that a below-threshold candidate was promoted under
@@ -78,7 +78,7 @@ type gateOutcome struct {
 	// not yet human-approved) — both keep the candidate from serving.
 	promote bool
 	// status is the gate status to write on the AgentDeployment.
-	status agentsv1alpha1.GateStatus
+	status agentsv1beta1.GateStatus
 	// warn / unscored request the corresponding annotation be stamped on promote
 	// (gate:warn paths).
 	warn     bool
@@ -115,22 +115,23 @@ func (r *AgentDeploymentReconciler) scorerFor(scorerType, name string) (eval.Sco
 // policy + the human-approval signal, emits the eval.gate span, and returns the
 // gateOutcome (whether to promote + the status to record).
 //
-// candidateRev is the revision name the candidate would serve — it pins the gate
-// decision to an exact candidate so a spec/prompt change re-scores rather than
-// reusing a stale decision, and so a human approval targets the reviewed
-// candidate. Returns (nil, nil) when the agent has no evalSuiteRef (no gate — the
-// deploy proceeds unchanged). A missing EvalSuite is user input → an
-// evalGateError (Ready=False, old revision keeps serving), not a hard error.
+// cand is the revision the candidate would serve — it pins the gate decision to an
+// exact candidate so a spec/prompt change re-scores rather than reusing a stale
+// decision, and so a human approval targets the reviewed candidate. Returns (nil,
+// nil) when the agent has no evalSuiteRef (no gate — the deploy proceeds
+// unchanged). A missing EvalSuite is user input → an evalGateError (Ready=False,
+// old revision keeps serving), not a hard error.
 func (r *AgentDeploymentReconciler) evaluateGate(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-	candidateRev string,
+	deploy *agentsv1beta1.AgentDeployment,
+	cand candidateRevision,
 ) (*gateOutcome, error) {
 	if deploy.Spec.EvalSuiteRef == "" {
 		return nil, nil // no gate — unchanged deploy
 	}
+	candidateRev := cand.name
 
-	var suite agentsv1alpha1.EvalSuite
+	var suite agentsv1beta1.EvalSuite
 	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Spec.EvalSuiteRef}, &suite)
 	if apierrors.IsNotFound(err) {
 		return nil, &evalGateError{
@@ -186,11 +187,11 @@ func (r *AgentDeploymentReconciler) evaluateGate(
 	case passes:
 		// Passing score is human-gated: promote ONLY when the approval signal is set
 		// for this candidate; otherwise rest at awaiting-promotion (candidate held).
-		if r.promotionApproved(deploy, candidateRev) {
+		if r.promotionApproved(deploy, cand) {
 			out := &gateOutcome{
 				promote:  true,
 				terminal: true,
-				status: agentsv1alpha1.GateStatus{
+				status: agentsv1beta1.GateStatus{
 					Phase: eval.PhasePromoted, Score: scoreStr, Threshold: thresholdStr,
 					Decision: eval.DecisionPromoted, ScoredRevision: candidateRev, Reason: "PromotionApproved",
 				},
@@ -200,7 +201,7 @@ func (r *AgentDeploymentReconciler) evaluateGate(
 		}
 		return &gateOutcome{
 			promote: false,
-			status: agentsv1alpha1.GateStatus{
+			status: agentsv1beta1.GateStatus{
 				Phase: eval.PhaseAwaitingPromotion, Score: scoreStr, Threshold: thresholdStr,
 				Decision: eval.DecisionPromoted, ScoredRevision: candidateRev, Reason: "AwaitingHumanPromotion",
 			},
@@ -212,7 +213,7 @@ func (r *AgentDeploymentReconciler) evaluateGate(
 			promote:  true,
 			terminal: true,
 			warn:     true,
-			status: agentsv1alpha1.GateStatus{
+			status: agentsv1beta1.GateStatus{
 				Phase: eval.PhaseWarned, Score: scoreStr, Threshold: thresholdStr,
 				Decision: eval.DecisionWarned, ScoredRevision: candidateRev, Reason: "ScoreBelowThresholdWarn",
 			},
@@ -225,7 +226,7 @@ func (r *AgentDeploymentReconciler) evaluateGate(
 		out := &gateOutcome{
 			promote:  false,
 			terminal: true,
-			status: agentsv1alpha1.GateStatus{
+			status: agentsv1beta1.GateStatus{
 				Phase: eval.PhaseBlocked, Score: scoreStr, Threshold: thresholdStr,
 				Decision: eval.DecisionBlocked, ScoredRevision: candidateRev, Reason: "ScoreBelowThreshold",
 			},
@@ -241,7 +242,7 @@ func (r *AgentDeploymentReconciler) evaluateGate(
 // silently promoted); gate:warn promotes with the eval.unscored annotation.
 func (r *AgentDeploymentReconciler) gateUnscored(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	candidateRev, gateMode, thresholdStr string,
 	cause error,
 ) *gateOutcome {
@@ -260,7 +261,7 @@ func (r *AgentDeploymentReconciler) gateUnscored(
 			promote:  true,
 			terminal: true,
 			unscored: true,
-			status: agentsv1alpha1.GateStatus{
+			status: agentsv1beta1.GateStatus{
 				Phase: eval.PhaseWarned, Score: "", Threshold: thresholdStr,
 				Decision: eval.DecisionWarned, ScoredRevision: candidateRev,
 				Reason: reasonWarn,
@@ -272,7 +273,7 @@ func (r *AgentDeploymentReconciler) gateUnscored(
 	out := &gateOutcome{
 		promote:  false,
 		terminal: true,
-		status: agentsv1alpha1.GateStatus{
+		status: agentsv1beta1.GateStatus{
 			Phase: eval.PhaseBlocked, Score: "", Threshold: thresholdStr,
 			Decision: eval.DecisionBlocked, ScoredRevision: candidateRev,
 			Reason: reasonBlock,
@@ -291,12 +292,10 @@ func (r *AgentDeploymentReconciler) gateUnscored(
 // exactly that candidate; a LATER candidate (a new revision) does NOT match and re-gates,
 // so one approval can no longer permanently auto-promote every future passing revision. A
 // legacy bare "true" (or any non-matching value) matches nothing → fails safe (never
-// auto-promotes).
-func (r *AgentDeploymentReconciler) promotionApproved(deploy *agentsv1alpha1.AgentDeployment, candidateRev string) bool {
-	if candidateRev == "" {
-		return false
-	}
-	return strings.TrimSpace(deploy.Annotations[promoteAnnotation]) == candidateRev
+// auto-promotes). An approval of the candidate's pod under a superseded pod contract's name
+// still matches: a platform upgrade renames the revision without changing what runs.
+func (r *AgentDeploymentReconciler) promotionApproved(deploy *agentsv1beta1.AgentDeployment, cand candidateRevision) bool {
+	return cand.names(strings.TrimSpace(deploy.Annotations[promoteAnnotation]))
 }
 
 // emitGateSpan emits the eval.gate span carrying eval.score / eval.threshold /
@@ -306,8 +305,8 @@ func (r *AgentDeploymentReconciler) promotionApproved(deploy *agentsv1alpha1.Age
 // exercised and a production tracer lands the span.
 func (r *AgentDeploymentReconciler) emitGateSpan(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-	gs agentsv1alpha1.GateStatus,
+	deploy *agentsv1beta1.AgentDeployment,
+	gs agentsv1beta1.GateStatus,
 ) {
 	_, span := r.evalTracer().Start(ctx, "eval.gate")
 	defer span.End()
@@ -365,10 +364,10 @@ func asEvalGateError(err error) (*evalGateError, bool) {
 // input) like setReadyFalse.
 func (r *AgentDeploymentReconciler) setGateBlockedStatus(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	reason, message string,
 ) (ctrl.Result, error) {
-	deploy.Status.Gate = &agentsv1alpha1.GateStatus{
+	deploy.Status.Gate = &agentsv1beta1.GateStatus{
 		Phase:    eval.PhaseBlocked,
 		Decision: eval.DecisionBlocked,
 		Reason:   reason,
@@ -395,7 +394,7 @@ func (r *AgentDeploymentReconciler) setGateBlockedStatus(
 // re-evaluates.
 func (r *AgentDeploymentReconciler) recordHeldGate(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	versionName string,
 	outcome *gateOutcome,
 ) (ctrl.Result, error) {
@@ -444,7 +443,7 @@ func (r *AgentDeploymentReconciler) recordHeldGate(
 // eval.warn / eval.unscored annotation on the object so the risk is visible.
 func (r *AgentDeploymentReconciler) recordPromotedGate(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	outcome *gateOutcome,
 ) error {
 	// Stamp warn/unscored annotations on the object (metadata → a regular Update,
@@ -457,7 +456,7 @@ func (r *AgentDeploymentReconciler) recordPromotedGate(
 
 	// Re-fetch to layer the gate status on top of the syncStatus write without a
 	// conflicting stale object, then persist the merged status.
-	var fresh agentsv1alpha1.AgentDeployment
+	var fresh agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		return fmt.Errorf("re-fetching for gate status: %w", err)
 	}
@@ -474,10 +473,10 @@ func (r *AgentDeploymentReconciler) recordPromotedGate(
 // (or unscored) promotion on the object itself. Idempotent.
 func (r *AgentDeploymentReconciler) stampGateAnnotations(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	outcome *gateOutcome,
 ) error {
-	var fresh agentsv1alpha1.AgentDeployment
+	var fresh agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		return fmt.Errorf("re-fetching for gate annotations: %w", err)
 	}

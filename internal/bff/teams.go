@@ -124,7 +124,7 @@ func (s *Server) handleListTeams(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(ns))
 	}
 	var list agentsv1beta1.AgentTeamList
-	if err := caller.List(r.Context(), &list, opts...); err != nil {
+	if err := s.acrossWorkspaces(caller).List(r.Context(), &list, opts...); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return

@@ -1,137 +1,119 @@
 # frozen_string_literal: true
 
-# Coverage is asserted against sdk/launcher-routes.json -- generated from cmd/launcher -- with a
-# fake that 404s anything unregistered.
-#
-# The previous fake was a permissive catch-all written by the author of the client it tests, so
-# both encoded the same wrong assumption and every test passed while 8 of 10 routes failed against
-# a real launcher.
+# The fake is generated from sdk/launcher-routes.json, whose goldens cmd/launcher proves against the
+# real handlers. It 404s anything the launcher does not serve and records every request that breaks
+# a route's schema, so a client calling the wrong path, or sending the wrong field, fails here.
 
 require "minitest/autorun"
-require "webrick"
 require "json"
-require "pathname"
 require_relative "../lib/ctxmesh"
-
-# One fake launcher, built from the fixture.
-class FakePlane
-  attr_reader :port, :seen, :requests
-
-  # {param} matches exactly ONE segment: /memory/{id} must NOT match /memory/agent/remember.
-  Route = Struct.new(:method, :path) do
-    def matches?(m, p)
-      return false unless method == "ANY" || method == m
-
-      want = path.split("/").reject(&:empty?)
-      got = p.split("/").reject(&:empty?)
-      return false unless want.size == got.size
-
-      want.zip(got).all? { |w, g| w.start_with?("{") ? !g.empty? : w == g }
-    end
-  end
-
-  def self.routes
-    dir = Pathname.new(__dir__).expand_path
-    6.times do
-      f = dir + "launcher-routes.json"
-      if f.exist?
-        rs = JSON.parse(f.read).fetch("routes")
-        raise "the fixture is empty; this test would assert nothing" if rs.empty?
-
-        return rs.map { |r| Route.new(r["method"], r["path"]) }
-      end
-      dir = dir.parent
-    end
-    raise "launcher-routes.json not found -- the fixture IS the contract"
-  end
-
-  def initialize(status: 200)
-    @routes = self.class.routes
-    @seen = []
-    @requests = []
-    @server = WEBrick::HTTPServer.new(Port: 0, Logger: WEBrick::Log.new(File::NULL), AccessLog: [])
-    @server.mount_proc "/" do |req, res|
-      @requests << "#{req.request_method} #{req.path}"
-      hit = @routes.find { |r| r.matches?(req.request_method, req.path) }
-      if hit.nil?
-        res.status = 404
-        res.body = "404 page not found"
-        next
-      end
-      @seen << "#{hit.method} #{hit.path}"
-      res.status = status
-      res["Content-Type"] = "application/json"
-      res.body = self.class.body_for(hit.path)
-    end
-    @thread = Thread.new { @server.start }
-    @port = @server.listeners[0].addr[1]
-  end
-
-  # Mirrors what the real handlers return -- verified against cmd/launcher, not against the client.
-  def self.body_for(pattern)
-    case pattern
-    when "/memory/agent/search"
-      '{"results":[{"content":"strong","score":0.9},{"content":"weak","score":0.1}]}'
-    when "/knowledge/search" then '{"results":[{"content":"c","documentRef":"d","score":0.5}]}'
-    when "/skills" then '{"skills":[{"name":"s","description":"d"}]}'
-    when "/skills/load" then '{"body":"the skill body"}'  # "body", not "content"
-    when "/delegate" then '{"ok":true,"subAgent":"sub","subRun":"r1","answer":"42"}'
-    when "/handoff" then '{"ok":true,"runId":"r1","handedOffTo":"other"}'
-    when "/memory/{conversationId}", "/memory/{conversationId}/search"
-      '[{"role":"user","content":"hi"}]'
-    else "{}"
-    end
-  end
-
-  def routes = @routes
-
-  def shutdown
-    @server.shutdown
-    @thread.join(2)
-  end
-end
+require_relative "generated_fake_launcher"
 
 class RoutesTest < Minitest::Test
-  CAP = "cap-token"
+  CAP = "probe-run-capability"
 
   def setup
-    @fake = FakePlane.new
-    p = @fake.port
-    @client = Ctxmesh::Client.from_config(
-      Ctxmesh::Config.new(memory_port: p, feedback_port: p, amp_port: p, delegate_port: p,
-                          conversation_id: "conv-1")
-    )
+    @fake = FakeLauncher.new
+    @client = client_for(@fake)
   end
 
   def teardown = @fake.shutdown
 
-  def test_every_launcher_route_is_exercised
-    @client.memory_get
-    @client.memory_append(role: "user", content: "hi")
-    @client.memory_put([{ "role" => "user", "content" => "hi" }])
-    @client.memory_search("hi", capability: CAP)
-    @client.remember("a fact", { "topic" => "x" })
-    @client.search_agent("q", top_k: 3)
-    @client.knowledge_search("q", knowledge_base: "kb", top_k: 3)
-    @client.skills
-    @client.skill_load("s")
-    @client.feedback("t1", "helpfulness", 1.0, "clear")
-    @client.call_agent("other", { "q" => 1 })
-    @client.call_agent_legacy("other", { "q" => 1 })
-    @client.delegate("sub", step: "step-1", call_id: "call-1", capability: CAP, input: { "x" => 1 })
-    @client.handoff("other", capability: CAP, message: "over to you")
+  def client_for(fake, delegate_port: fake.port)
+    p = fake.port
+    Ctxmesh::Client.from_config(
+      Ctxmesh::Config.new(memory_port: p, feedback_port: p, amp_port: p, delegate_port: delegate_port,
+                          conversation_id: "conv-1")
+    )
+  end
 
-    @fake.routes.each do |r|
-      assert_includes @fake.seen, "#{r.method} #{r.path}",
-                      "launcher serves #{r.method} #{r.path} and no SDK call reached it; " \
-                      "requests=#{@fake.requests.inspect}"
+  def test_every_launcher_route_is_exercised
+    # Every call the plane-client tier owes. One fake serves every listener, so a route sent to the
+    # wrong PORT still reaches it; test_delegate_uses_its_own_listener covers ports.
+    calls = {
+      "GET /memory/{conversationId}" => -> { @client.memory_get },
+      "POST /memory/{conversationId}/append" => -> { @client.memory_append(role: "user", content: "hi") },
+      "PUT /memory/{conversationId}" => -> { @client.memory_put([{ "role" => "user", "content" => "hi" }]) },
+      "GET /memory/{conversationId}/search" => -> { @client.memory_search("metric", capability: CAP) },
+      "POST /memory/agent/remember" => lambda {
+        @client.remember("The user prefers metric units.", { "topic" => "preferences" })
+      },
+      "POST /memory/agent/search" => -> { @client.search_agent("units", top_k: 3) },
+      "POST /knowledge/search" => lambda {
+        @client.knowledge_search("When do deploys go out?", knowledge_base: "handbook", top_k: 3)
+      },
+      "GET /skills" => -> { @client.skills },
+      "POST /skills/load" => -> { @client.skill_load("deploy") },
+      "ANY /feedback" => lambda {
+        @client.feedback("0af7651916cd43dd8448eb211c80319c", "helpfulness", 0.9, "clear answer")
+      },
+      "POST /amp/{targetAgent}" => -> { @client.call_agent("peer-agent", { "question" => "ping" }) },
+      "POST /a2a/{targetAgent}" => -> { @client.call_agent_legacy("peer-agent", { "question" => "ping" }) },
+      "POST /delegate" => lambda {
+        @client.delegate("researcher", step: "1", call_id: "call-1", capability: CAP,
+                                       input: "Summarise the quarterly report")
+      },
+      "POST /handoff" => lambda {
+        @client.handoff("billing", capability: CAP, message: "The customer is asking about an invoice.")
+      }
+    }
+    calls.each do |key, call|
+      call.call
+    rescue Ctxmesh::Error => e
+      flunk "#{key}: #{e.message}"
     end
+
+    @fake.route_keys.each do |key|
+      why = @fake.waived(key)
+      if why
+        refute @fake.covered?(key), "#{key} is waived for Ruby (#{why}) but the SDK reaches it now: delete the waiver"
+      else
+        assert @fake.covered?(key), "the launcher serves #{key} and no SDK call reached it"
+      end
+    end
+    @fake.assert_conforms(self)
+  end
+
+  def test_responses_decode_as_the_launcher_sends_them
+    entries = @client.memory_get("conv-1")
+    assert_equal @fake.golden("GET /memory/{conversationId}")["response"]["body"], entries
+
+    facts = @client.search_agent("units", top_k: 3)
+    assert_equal @fake.golden("POST /memory/agent/search")["response"]["body"]["results"], facts
+
+    chunks = @client.knowledge_search("When do deploys go out?", knowledge_base: "handbook", top_k: 3)
+    assert_equal "handbook/deploys.md", chunks.first["documentRef"]
+
+    assert_equal @fake.golden("GET /skills")["response"]["body"]["skills"], @client.skills
+
+    reply = @client.call_agent("peer-agent", { "question" => "ping" })
+    assert_equal "pong", reply["answer"]
+
+    h = @client.handoff("billing", capability: CAP, message: "over to you")
+    assert_equal true, h["ok"]
+    assert_equal "run-billing-1", h["runId"]
+    assert_equal "billing", h["handedOffTo"]
+    @fake.assert_conforms(self)
   end
 
   def test_skill_load_returns_the_body
     # The launcher answers {"body": ...}. Reading "content" gave "" with NO error, so a skill
     # loaded as nothing and the model carried on without it.
-    assert_equal "the skill body", @client.skill_load("s")
+    want = @fake.golden("POST /skills/load")["response"]["body"]["body"]
+    got = @client.skill_load("deploy")
+    refute_empty got
+    assert_equal want, got
+  end
+
+  def test_refusals_surface_the_launcher_status
+    @fake.use_golden("POST /knowledge/search", "refuses-a-knowledge-base-not-granted")
+    @fake.use_golden("POST /skills/load", "refuses-a-skill-not-attached")
+
+    e = assert_raises(Ctxmesh::DeniedError) { @client.knowledge_search("salaries", knowledge_base: "payroll") }
+    assert_equal 403, e.status
+    e = assert_raises(Ctxmesh::DeniedError) { @client.skill_load("payroll") }
+    assert_equal 403, e.status
+    assert_match(/not attached/, e.body)
   end
 
   def test_delegate_refuses_without_its_required_fields
@@ -143,35 +125,39 @@ class RoutesTest < Minitest::Test
 
   def test_delegate_uses_its_own_listener
     # /delegate and /handoff are served by a DIFFERENT listener. Sending them to the memory port
-    # was a 404 in all four SDKs.
-    delegate = FakePlane.new
-    c = Ctxmesh::Client.from_config(
-      Ctxmesh::Config.new(memory_port: @fake.port, feedback_port: @fake.port,
-                          amp_port: @fake.port, delegate_port: delegate.port, conversation_id: "c")
-    )
-    c.delegate("sub", step: "s", call_id: "c", capability: CAP)
-    assert_includes delegate.seen, "POST /delegate", "/delegate did not reach the delegate listener"
-    refute_includes @fake.seen, "POST /delegate", "/delegate reached the MEMORY listener"
+    # was a 404 in all four plane-client SDKs.
+    delegate = FakeLauncher.new
+    c = client_for(@fake, delegate_port: delegate.port)
+    c.delegate("researcher", step: "1", call_id: "call-1", capability: CAP, input: "x")
+    assert delegate.covered?("POST /delegate"), "/delegate did not reach the delegate listener"
+    refute @fake.covered?("POST /delegate"), "/delegate reached the MEMORY listener"
   ensure
     delegate&.shutdown
   end
 
-  def test_delegate_refusal_is_not_success
-    # The launcher answers 200 for every outcome and signals success in "ok". Decoding
-    # {runId, accepted} made refusal, failure and success indistinguishable -- and dropped
-    # "answer", which is the entire point of delegating.
-    d = @client.delegate("sub", step: "s", call_id: "c", capability: CAP)
-    assert_equal true, d["ok"], "ok must be decoded"
-    assert_equal "42", d["answer"], "answer must survive"
+  def test_delegate_decodes_success_and_refusal
+    # The launcher answers 200 for every outcome and signals success in "ok", so a refusal decoded
+    # as a transport success would be silent data loss, and "answer" is the point of delegating.
+    d = @client.delegate("researcher", step: "1", call_id: "call-1", capability: CAP,
+                                       input: "Summarise the quarterly report")
+    assert_equal true, d["ok"]
+    assert_equal "The quarterly report is ready.", d["answer"]
+    assert_equal "sub-run-1", d["subRun"]
+
+    @fake.use_golden("POST /delegate", "refuses-without-a-run-capability")
+    d = @client.delegate("researcher", step: "1", call_id: "call-1", capability: CAP, input: "x")
+    assert_equal false, d["ok"]
+    refute_empty d["error"].to_s
+    @fake.assert_conforms(self)
   end
 
   def test_handoff_defaults_to_including_history
     # The launcher treats an ABSENT includeHistory as TRUE. Defaulting to false handed the
     # receiver nothing -- and every other SDK defaults true.
-    assert_equal true, @client.method(:handoff).parameters.include?([:key, :include_history]) ||
-                       true
-    h = @client.handoff("other", capability: CAP)
+    h = @client.handoff("billing", capability: CAP)
     assert_equal true, h["ok"]
+    sent = JSON.parse(@fake.received.last[:body])
+    assert_equal true, sent["includeHistory"]
   end
 
   def test_unwired_capabilities_refuse_locally
@@ -195,5 +181,24 @@ class RoutesTest < Minitest::Test
     assert_equal 3997, cfg.amp_port
     assert_equal 3994, cfg.delegate_port
     refute cfg.memory_wired?, "MEMORY_PORT unset must mean memory is NOT wired"
+  end
+
+  def test_the_fake_refuses_what_the_launcher_refuses
+    # The fake is only worth generating if it catches the defects hand-written fakes let through.
+    base = @client.config.memory_base
+    @client.send(:request, "POST", "#{base}/memory/agent/remember", { text: "a fact" })
+    refute_empty @fake.violations, "a remember body without content passed the fake"
+
+    e = assert_raises(Ctxmesh::ApiError) { @client.send(:request, "POST", "#{base}/memory/agent/forget", {}) }
+    assert_equal 404, e.status
+    e = assert_raises(Ctxmesh::ApiError) { @client.send(:request, "GET", "#{base}/skills/load") }
+    assert_equal 405, e.status
+  end
+
+  def test_a_custom_answer_must_be_one_the_launcher_can_give
+    assert_raises(ArgumentError) { @fake.respond("POST /skills/load", 418, "") }
+    assert_raises(ArgumentError) { @fake.respond("POST /skills/load", 200, '{"content":"x"}') }
+    @fake.respond("POST /skills/load", 200, '{"body":"custom"}')
+    assert_equal "custom", @client.skill_load("deploy")
   end
 end

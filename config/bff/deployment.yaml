@@ -154,6 +154,10 @@ spec:
             # Default renders the in-cluster http addr == the chart's default (no drift). (M124/Gate A.)
             - name: TOKEN_SERVICE_URL
               value: http://ctxmesh-token-service.ctxmesh.svc:8443
+            # The BFF's projected token for the token service, which lets it store grants and run
+            # the knowledge test query in any namespace (ADR 0154).
+            - name: TOKEN_SERVICE_TOKEN_PATH
+              value: /var/run/secrets/ctxmesh-token-service/token
             # --- Model-service + async wiring (M148/m148.5, m52 M141-install) -----
             # Before M148 NONE of these had a chart home. The degradation was honest
             # — no MODEL_GATEWAY_URL ⇒ KB ingest 501s; no DISCOVERY_EMBEDDING_ROUTE ⇒
@@ -210,6 +214,10 @@ spec:
               value: ""
             - name: NATS_CREDENTIALS_FILE
               value: ""
+            # How many async hops to one agent the dispatcher delivers at once, and the most its
+            # durable has outstanding. Empty ⇒ 8.
+            - name: ASYNC_DELIVERY_CONCURRENCY
+              value: ""
             # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2) — the fail-CLOSED switch for per-user OBO.
             # "false" (default) keeps a no-OBO install unaffected. The Helm chart templates it from
             # controllerManager.oboEgress.enabled: when the operator enables OBO egress, the BFF/worker
@@ -218,6 +226,12 @@ spec:
             # the chart default (no drift).
             - name: MCP_OBO_REQUIRED
               value: "false"
+            # MCP_CAPABILITY_AUDIENCE — the audience the BFF mints run capabilities for. It must be
+            # the one the controller (egress sidecar, agents) and the token service verify against;
+            # the chart templates all of them from controllerManager.oboEgress.capabilityAudience,
+            # and hack/capability_audience.py fails a render where they differ. Empty ⇒ the default.
+            - name: MCP_CAPABILITY_AUDIENCE
+              value: ""
             # MCP_GRANT_HMAC_KEY — the per-cluster salt for user-identity hashes on MCP
             # grants (ADR 0029 §7). Unset ⇒ legacy UNSALTED SHA-256, which is enumerable:
             # a known username hashes to a known value, so a reader of the grant Secrets
@@ -228,11 +242,17 @@ spec:
             # patching around a gap that everyone who is not us simply lives with. The
             # Fable re-audit reached the same finding independently (M149 B9).
             #
-            # Empty here so the render is unchanged and today's honest start-up warning
-            # still fires; `profile=production` REQUIRES it (ha-profile-guards), because
-            # shipping enumerable identity hashes is not a posture anyone chose.
+            # Read from a Secret, never a literal in this spec: the key is what makes the
+            # hashes unenumerable, and a Deployment is readable by far more principals than a
+            # Secret. Optional, so an install without it starts with the honest warning;
+            # `profile=production` REQUIRES it (ha-profile-guards). The chart renders the
+            # Secret from bff.mcp.grantHmacKey or references bff.mcp.grantHmacKeySecret.
             - name: MCP_GRANT_HMAC_KEY
-              value: ""
+              valueFrom:
+                secretKeyRef:
+                  name: ctxmesh-grant-hmac
+                  key: MCP_GRANT_HMAC_KEY
+                  optional: true
             # OIDC_ENABLED / OIDC_ISSUER / OIDC_CLIENT_ID are the ADR 0020 console
             # SSO seam (m19.6). OFF by default ("false" + empty) → the BFF advertises
             # NO OIDC at GET /api/authconfig and the SPA uses token login (ADR 0012).
@@ -250,7 +270,7 @@ spec:
             # OBJECT_STORE_* (M78/ADR 0071 §2): the durable object store the BFF reads recorded
             # fixtures from (GET /api/runs/{id}/fixture — the O10a console stepper) and writes KB
             # documents to (M68). Unset ⇒ docStore nil ⇒ those endpoints 501 (honest feature-off).
-            # The addr points at the in-cluster MinIO (config/objectstore, which config/default ships);
+            # The addr points at the in-cluster object store (config/objectstore, which config/default ships);
             # the creds come from the objectstore-dev Secret via secretKeyRef, OPTIONAL so a
             # no-object-store install still starts cleanly. A production install points these at its own
             # object store (a values override / overlay). The Helm chart carries the SAME env (the
@@ -330,7 +350,7 @@ spec:
               cpu: 500m
               # 512Mi limit — right-sized for the ingestion executor (ADR 0061), NOT picked
               # blindly. The m68.14 OOM (even 512Mi OOMed on 3 tiny docs) was the M3 artifact
-              # (c0bf933: the MinIO lazy reader's context was cancelled on Get return, so every
+              # (c0bf933: the minio-go lazy reader's context was cancelled on Get return, so every
               # ingestion spun/failed on doc 1); that is FIXED. Post-fix + m80.2, the peak is
               # BOUNDED and independent of corpus/doc-chunk count:
               #   base BFF                                        ~100Mi
@@ -367,6 +387,9 @@ spec:
             - name: recipe-overlay
               mountPath: /etc/ctxmesh/recipes
               readOnly: true
+            - name: token-service-token
+              mountPath: /var/run/secrets/ctxmesh-token-service
+              readOnly: true
       volumes:
         # optional:true — a cluster that provides no `ctxmesh-recipes` ConfigMap still schedules the
         # pod (the mount dir is empty ⇒ the embedded gallery serves, fail-closed). The operator creates
@@ -376,5 +399,13 @@ spec:
           configMap:
             name: ctxmesh-recipes
             optional: true
+        # A kubelet-rotated token for the token service's audience; the BFF reads it per request.
+        - name: token-service-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: ctxmesh-token-service
+                  expirationSeconds: 600
       serviceAccountName: bff
       terminationGracePeriodSeconds: 10

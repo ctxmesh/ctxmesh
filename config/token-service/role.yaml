@@ -1,7 +1,7 @@
 # Token-service Role — the LEAST privilege the central credential resolver needs (ADR 0030
 # §1, ADR 0029 §7). It reads per-user grant Secrets and writes back rotated tokens
-# (optimistic concurrency) + deletes on revoke; it reads ToolRegistries to classify a
-# server's auth type / scope. NO agent-CRD access, NO create.
+# (optimistic concurrency) + deletes on revoke. NO agent-CRD access. Reviewing callers' tokens
+# needs the cluster-scoped TokenReview grant in tokenreview_rbac.yaml.
 #
 # This Role is namespaced to the platform namespace. When an operator runs OBO with a
 # DEDICATED credential namespace (mcp.credentialNamespace), the Helm chart also binds this
@@ -18,10 +18,10 @@ metadata:
 rules:
   # Per-user grant Secrets in the LOCKED credential namespace: read to resolve, CREATE a
   # first-time (user, server) grant, update to write back a rotated token / re-consent, delete on
-  # revoke (RFC 7009: forget locally). create IS required — K8sBackend.StoreGrant upserts, calling
+  # revoke (RFC 7009: forget locally). create IS required — secretbackend.Backend.StoreGrant upserts, calling
   # Client.Create on a not-found grant (internal/credresolve/backend.go). Grants live only in this
-  # one namespace (ADR 0029 §7), so this stays a namespaced Role. (ToolRegistry + CredentialStore
-  # reads are cluster-wide — the plane serves requests from ANY namespace — see the ClusterRole.)
+  # one namespace (ADR 0029 §7), so this stays a namespaced Role. The token-service needs no
+  # cluster-scoped access: its backend is its own configuration (ADR 0152).
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "delete"]

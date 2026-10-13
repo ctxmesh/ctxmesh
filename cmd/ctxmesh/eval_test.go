@@ -25,7 +25,7 @@ import (
 	"testing"
 	"time"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // ── (a) Flag validation ───────────────────────────────────────────────────────
@@ -206,7 +206,7 @@ func TestComputeDecision_Pass(t *testing.T) {
 		namespace: "agent-eval",
 		minScore:  0.80,
 	}
-	gate := &agentsv1alpha1.GateStatus{
+	gate := &agentsv1beta1.GateStatus{
 		Phase:     "blocked", // phase doesn't affect computeDecision's pass/fail logic
 		Score:     "0.9000",
 		Threshold: "0.80",
@@ -233,7 +233,7 @@ func TestComputeDecision_Fail(t *testing.T) {
 		namespace: "agent-eval",
 		minScore:  0.80,
 	}
-	gate := &agentsv1alpha1.GateStatus{
+	gate := &agentsv1beta1.GateStatus{
 		Phase:     "blocked",
 		Score:     "0.6000",
 		Threshold: "0.80",
@@ -253,7 +253,7 @@ func TestComputeDecision_Fail(t *testing.T) {
 
 func TestComputeDecision_ExactThreshold_Pass(t *testing.T) {
 	fv := evalFlagValues{candidate: "agent.yaml", namespace: "agent-eval", minScore: 0.80}
-	gate := &agentsv1alpha1.GateStatus{Score: "0.8000", Threshold: "0.80", Decision: "promoted", Phase: "promoted"}
+	gate := &agentsv1beta1.GateStatus{Score: "0.8000", Threshold: "0.80", Decision: "promoted", Phase: "promoted"}
 	_, exitCode, err := computeDecision(fv, gate)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -265,7 +265,7 @@ func TestComputeDecision_ExactThreshold_Pass(t *testing.T) {
 
 func TestComputeDecision_EmptyScore_InfraError(t *testing.T) {
 	fv := evalFlagValues{candidate: "agent.yaml", namespace: "agent-eval", minScore: 0.80}
-	gate := &agentsv1alpha1.GateStatus{Score: "", Phase: "blocked", Decision: "blocked"}
+	gate := &agentsv1beta1.GateStatus{Score: "", Phase: "blocked", Decision: "blocked"}
 	_, exitCode, evalErr := computeDecision(fv, gate)
 	if evalErr == nil {
 		t.Fatal("expected error for empty score, got nil")
@@ -279,7 +279,7 @@ func TestComputeDecision_EmptyScore_InfraError(t *testing.T) {
 
 func TestComputeDecision_UnparsableScore_InfraError(t *testing.T) {
 	fv := evalFlagValues{candidate: "agent.yaml", namespace: "agent-eval", minScore: 0.80}
-	gate := &agentsv1alpha1.GateStatus{Score: "not-a-number", Phase: "blocked", Decision: "blocked"}
+	gate := &agentsv1beta1.GateStatus{Score: "not-a-number", Phase: "blocked", Decision: "blocked"}
 	_, _, evalErr := computeDecision(fv, gate)
 	if evalErr == nil {
 		t.Fatal("expected error for unparsable score, got nil")

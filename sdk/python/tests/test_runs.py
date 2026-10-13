@@ -8,7 +8,11 @@ decision, cancel, SSE stream parsing, and the sync run() sugar's create+poll.
 from __future__ import annotations
 
 import json
-from typing import List, Tuple
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Iterator, List, Tuple
 
 import pytest
 
@@ -224,3 +228,61 @@ def test_runs_stream_uses_long_read_timeout(monkeypatch):
     list(RunsClient("https://c").stream("run-1"))
     assert seen["timeout"] == _http.STREAM_READ_TIMEOUT
     assert seen["timeout"] > _http.DEFAULT_TIMEOUT
+
+
+# The BFF's run event stream exactly as its handler writes it. internal/bff's
+# TestRunEventsWire_MatchesGolden regenerates the file from the real handler and fails when the
+# handler's bytes drift from it, so this test parses what the server sends.
+_GOLDEN = Path(__file__).resolve().parents[2] / "run-events.golden.sse"
+_GOLDEN_TEXT = "Calling echo_tool.\nMOCK_TOOL_OK echo_tool returned:\nFIXTURE_ECHO: ping\n Done."
+
+
+@contextmanager
+def _serve_events(body: bytes) -> Iterator[Tuple[str, List[dict]]]:
+    """Serve ``body`` as the run event stream on a real local HTTP server, recording each request's
+    headers, so the SDK's own transport and line splitting read the bytes."""
+    seen: List[dict] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append({k.lower(): v for k, v in self.headers.items()})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}", seen
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_stream_reads_the_servers_frames():
+    with _serve_events(_GOLDEN.read_bytes()) as (base, seen):
+        events = list(RunsClient(base).stream("run-golden"))
+
+    assert [e.seq for e in events] == list(range(1, 12))
+    assert "".join(e.data for e in events if e.kind == "token") == _GOLDEN_TEXT
+    assert [e.data for e in events if e.kind == "state"] == [
+        "running",
+        "requires_action",
+        "running",
+        "succeeded",
+    ]
+    steps = [json.loads(e.data) for e in events if e.kind == "step"]
+    assert [(s["step"], s["kind"], s.get("tool")) for s in steps] == [
+        (1, "model", None),
+        (1, "tool", "echo_tool"),
+        (2, "model", None),
+    ]
+    assert [e.data for e in events if e.kind == "message"] == [_GOLDEN_TEXT]
+    assert seen[0]["accept"] == "text/event-stream"

@@ -105,6 +105,9 @@ func (m *memStore) List(_ context.Context, opts controlplane.ListOptions) (contr
 		if opts.Namespace != "" && pv.Namespace != opts.Namespace {
 			continue
 		}
+		if opts.Namespaces != nil && !slices.Contains(opts.Namespaces, pv.Namespace) {
+			continue
+		}
 		if s := strings.TrimSpace(opts.Search); s != "" && !strings.Contains(strings.ToLower(pv.Name), strings.ToLower(s)) {
 			continue
 		}

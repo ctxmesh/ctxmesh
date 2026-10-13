@@ -41,7 +41,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: litellm
-          image: ghcr.io/berriai/litellm:v1.91.0
+          image: ghcr.io/berriai/litellm:v1.91.0@sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
           securityContext:
             allowPrivilegeEscalation: false
             capabilities:
@@ -76,6 +76,13 @@ spec:
               port: 4000
             periodSeconds: 10
             failureThreshold: 3
+          # Every ModelRoute change rolls this pod (the config hash above). Without a pause the old pod
+          # stops listening while Services still route to it, and calls in those seconds get
+          # "connection refused": a quickstart run made a minute after its ModelRoute failed that way.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "10"]
           resources:
             requests:
               cpu: 50m       # scheduling headroom on ~2-CPU CI nodes
@@ -91,4 +98,4 @@ spec:
         - name: gateway-config
           configMap:
             name: gateway-config
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: 30 # the preStop pause, then LiteLLM's own shutdown

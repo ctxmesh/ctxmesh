@@ -23,22 +23,84 @@ package bff
 //     durable export Run the run-worker drives: it copies production traces OUT of
 //     Langfuse into the control-plane dataset store, M66-REDACTED (the PII P1) with
 //     source_trace_id lineage, so a pinned dataset survives Langfuse retention.
-//     Caller-scoped (ADR 0011): the caller's own token gates who can trigger it.
 //     Returns 202 + {runId, status}. Unconfigured store/adapter → honest 501.
+//
+// Authorization. A dataset is the data an EvalSuite gates against (EvalSuite.datasetRef), so every dataset
+// request is authorized as the caller on evalsuites in the dataset's namespace, before any store or trace
+// backend read: reading a dataset needs list, changing one needs update. The alertpolicies and workflows
+// reads authorize the same way, on the resource their records belong to.
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/validation"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
+
+// datasetNamespace is the namespace a dataset request addresses: the X-Namespace header, then
+// ?namespace=, then "default" when neither is given. It is trimmed, because the stores trim and an
+// untrimmed value would be authorized as one namespace and read as another. A value given that is not
+// a DNS-1123 label, blank included, is a 400, written here.
+func datasetNamespace(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw := r.Header.Get(kbNamespaceHeader)
+	if raw == "" {
+		raw = r.URL.Query().Get("namespace")
+	}
+	if raw == "" {
+		return defaultCreateNamespace, true
+	}
+	ns := strings.TrimSpace(raw)
+	if errs := validation.IsDNS1123Label(ns); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("namespace %q is not valid: %s", ns, strings.Join(errs, "; ")))
+		return "", false
+	}
+	return ns, true
+}
+
+// msgDatasetNotFound is what a verified end-user gets from every dataset route but from-run, whose
+// refusals are the trace path's msgTraceNotFound.
+const msgDatasetNotFound = "dataset not found"
+
+// authorizeDatasets asks, as the caller, for verb on evalsuites in ns (see the file comment). A verified
+// end-user bearer (ADR 0107) is refused first with a 404 carrying notFound, and never reaches the API
+// server. On refusal it writes the response — 403 for a denial, 401 for a token the API server rejects,
+// 500 otherwise — and returns false.
+func (s *Server) authorizeDatasets(w http.ResponseWriter, r *http.Request, caller client.Client, verb, ns, action, notFound string) bool {
+	_, _, isEndUser, err := s.resolveEndUserPrincipal(r.Context(), r, ns)
+	if isEndUser {
+		writeError(w, http.StatusNotFound, notFound)
+		return false
+	}
+	// A console token fails end-user verification wherever the namespace has an end-user IdP; that is
+	// the normal case and the token goes on to the API server like any other. Anything else is logged
+	// and treated the same way, as every caller of resolveEndUserPrincipal does.
+	if err != nil && !errors.Is(err, errEndUserBearerRejected) {
+		s.log.Error(err, "datasets: resolving the end-user identity failed", "namespace", ns)
+	}
+	if cErr := s.authzRefusal(s.authorizeStore(r.Context(), caller, verb, resEvalSuites, ns, ""), action); cErr != nil {
+		writeError(w, cErr.status, cErr.msg)
+		return false
+	}
+	return true
+}
+
+// datasetNotFound writes the 404 for a dataset that does not exist in ns.
+func datasetNotFound(w http.ResponseWriter, name, ns string) {
+	writeError(w, http.StatusNotFound, fmt.Sprintf("dataset %q not found in namespace %q", name, ns))
+}
 
 // ExportRequest is the POST /api/datasets/{name}/export body. The dataset name comes from the URL path; the body
 // names the source agent + the export window. AgentNamespace + AgentName build the Langfuse identity tag the
@@ -63,19 +125,22 @@ type ExportResponse struct {
 // executor drives) and creates a durable export Run (queued for the worker pool in dispatch mode, or executed
 // in-process in dev — the handleIngestKB precedent). Returns 202 + the run id.
 //
-// Caller-scoped (ADR 0011): the caller's own bearer token authenticates the trigger (the callerClient choke
-// point 401s a missing/rejected token). Datasets are a Postgres store (not a CRD), so there is no per-object K8s
-// RBAC to consult — the authenticated identity is the gate, and the run-worker (trusted control-plane holding
-// cpDB + Langfuse creds, governance #8) does the read+write.
+// The run-worker (trusted control plane holding the store and Langfuse credentials) copies the traces later,
+// so the caller is authorized here, before the run exists: update on evalsuites in the dataset namespace, and
+// read of the source AgentDeployment with their own token. The export selects only traces tagged with that
+// agent, and authorizeTraceRead admits a reader of a trace's agent to each of them, so this is the same rule
+// applied to the whole set at once.
 //
-// Honest errors (ADR 0027):
-//   - 400 — missing dataset name / invalid body / missing agentName
+// Honest errors (ADR 0027, ADR 0078):
+//   - 400 — missing dataset name / invalid body / an agent or namespace that is not a valid name
 //   - 401 — missing or rejected token
+//   - 403 — no update on evalsuites in the dataset namespace, or no read on the source agent
+//   - 404 — the source agent does not exist, or a verified end-user bearer (ADR 0107)
+//   - 500 — the caller's identity could not be resolved (an API-server failure, not the token)
 //   - 501 — the dataset store or the Langfuse adapter is not configured (export is unwired)
 func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
-	// Authenticate the caller (ADR 0011 choke point — 401 on a missing/rejected token). The client itself is not
-	// used (datasets are a Postgres store, not a CRD), but this enforces the caller's identity is present.
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 
@@ -106,23 +171,51 @@ func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 
 	// Resolve the dataset namespace (X-Namespace header / ?namespace / default). The dataset lives in the caller's
 	// namespace; the agent namespace is a separate field on the body (a dataset may aggregate one agent's traces).
-	ns := r.Header.Get(kbNamespaceHeader)
-	if ns == "" {
-		ns = r.URL.Query().Get("namespace")
-	}
-	if ns == "" {
-		ns = defaultCreateNamespace
+	ns, ok := datasetNamespace(w, r)
+	if !ok {
+		return
 	}
 	agentNs := strings.TrimSpace(req.AgentNamespace)
 	if agentNs == "" {
 		agentNs = ns
+	}
+	agentName := strings.TrimSpace(req.AgentName)
+	// Both parts go into an API path, where a "/" or another stray character is a client error, not a
+	// failed API call.
+	if errs := validation.IsDNS1123Label(agentNs); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("agentNamespace %q is not valid: %s", agentNs, strings.Join(errs, "; ")))
+		return
+	}
+	if errs := validation.IsDNS1123Subdomain(agentName); len(errs) > 0 {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("agentName %q is not valid: %s", agentName, strings.Join(errs, "; ")))
+		return
+	}
+
+	if !s.authorizeDatasets(w, r, caller, authz.VerbUpdate, ns, "export into datasets in namespace "+ns, msgDatasetNotFound) {
+		return
+	}
+	if !s.authorizeAgentKey(w, r, caller, agentNs+"/"+agentName) {
+		return
+	}
+	// The creator reads and cancels the run by ownership (authorizeResolvedRun), and the worker copies
+	// only the traces this identity was shown to be able to read (exportMayCopy).
+	username, err := callerUsername(r.Context(), caller)
+	if err != nil {
+		if apierrors.IsUnauthorized(err) {
+			writeError(w, http.StatusUnauthorized, msgTokenRejected)
+			return
+		}
+		// Not a token problem, so not a 401: the console reads a 401 as an expired session.
+		s.log.Error(err, "export: resolving the caller's identity failed", "ns", ns, "dataset", datasetName)
+		writeError(w, http.StatusInternalServerError, "failed to resolve the caller's identity")
+		return
 	}
 
 	// Build the agent's Langfuse identity filter ("<ns>/<name>" — the RunFilter.Agent value; buildRunsQuery turns
 	// it into tags=agent:<ns>/<name>). Via the SHARED agentFilterValue so the export and the /api/runs?agent=
 	// browser use ONE grammar and select the SAME traces for an agent (m52.N8 — never hand-concatenate this join,
 	// which can drift from buildRunsQuery's split).
-	agentTag := agentFilterValue(agentNs, req.AgentName)
+	agentTag := agentFilterValue(agentNs, agentName)
 
 	// Pin the export spec (the snapshot the off-request executor drives).
 	spec := ExportSpec{
@@ -148,6 +241,7 @@ func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 	// Create the export Run. Its Agent is the dataset name (the audit/display label — an export run has no agent;
 	// the executor drives it off ExportSpec, never off Agent). No conversation, no OBO-to-a-model.
 	rn := run.New(runID, ns, datasetName, nil, "", time.Now())
+	rn.CallerUsername = username
 	rn.ExportRef = datasetName
 	rn.ExportSpec = string(specJSON)
 	if err := s.runStore.Create(rn); err != nil {
@@ -172,9 +266,8 @@ func (s *Server) handleExportDataset(w http.ResponseWriter, r *http.Request) {
 //   POST /api/datasets/{name}/cases/{caseId}/labels — append a label (author = the authenticated caller)
 //   POST /api/datasets/{name}/cases/from-run        — single-run on-ramp: add one redacted trace as a case
 //
-// Auth pattern: caller-scoped (ADR 0011) for the identity check (callerUsername), dataset store for the data.
-// No CRD ops — datasets are a Postgres store (ADR 0044 precedent). The dataset store nil-guard (501) follows
-// the DocStore-nil pattern established by the export handler.
+// Each is authorized on evalsuites in the dataset's namespace (the file comment) before the store is touched.
+// The dataset store nil-guard (501) follows the DocStore-nil pattern established by the export handler.
 
 // DatasetListItem is one dataset summary in GET /api/datasets. CaseCount is the DRAFT HEAD size
 // (ListCases count) — the labeling-UI's primary navigation datum.
@@ -191,12 +284,12 @@ type DatasetListResponse struct {
 	Items []DatasetListItem `json:"items"`
 }
 
-// handleListDatasets serves GET /api/datasets — lists datasets in the caller's namespace(s).
-// Caller-scoped (ADR 0011): the caller must present a valid token (for identity); the dataset store
-// is then queried per-namespace. Namespace resolved via X-Namespace header / ?namespace / "default".
-// 501 when the dataset store is not configured; 401 on a missing/rejected token.
+// handleListDatasets serves GET /api/datasets — lists the datasets in one namespace (X-Namespace header /
+// ?namespace / "default"). The caller needs list on evalsuites there (403 otherwise). 501 when the dataset
+// store is not configured; 401 on a missing/rejected token.
 func (s *Server) handleListDatasets(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	if s.datasetStore == nil {
@@ -204,12 +297,12 @@ func (s *Server) handleListDatasets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ns := r.Header.Get(kbNamespaceHeader)
-	if ns == "" {
-		ns = r.URL.Query().Get("namespace")
+	ns, ok := datasetNamespace(w, r)
+	if !ok {
+		return
 	}
-	if ns == "" {
-		ns = defaultCreateNamespace
+	if !s.authorizeDatasets(w, r, caller, authz.VerbList, ns, "read datasets in namespace "+ns, msgDatasetNotFound) {
+		return
 	}
 
 	datasets, err := s.datasetStore.ListDatasets(r.Context(), ns)
@@ -223,9 +316,10 @@ func (s *Server) handleListDatasets(w http.ResponseWriter, r *http.Request) {
 	for _, ds := range datasets {
 		cases, cErr := s.datasetStore.ListCases(r.Context(), ds.ID)
 		if cErr != nil {
-			s.log.Error(cErr, "list cases for dataset failed", "dataset", ds.ID)
-			// Best-effort: report count as 0 rather than failing the whole list.
-			cases = nil
+			// A count the store could not read is not a zero; the list fails rather than show one.
+			s.log.Error(cErr, "list cases for dataset failed", "ns", ns, "dataset", ds.ID)
+			writeError(w, http.StatusInternalServerError, "failed to list datasets")
+			return
 		}
 		items = append(items, DatasetListItem{
 			ID:        ds.ID,
@@ -267,10 +361,11 @@ type DatasetCasesResponse struct {
 }
 
 // handleListDatasetCases serves GET /api/datasets/{name}/cases — the draft-head cases + each case's latest label
-// (for the labeling console, m69.3). Namespace via X-Namespace / ?namespace / "default".
-// 404 when the dataset does not exist; 501 when the store is unconfigured.
+// (for the labeling console, m69.3). Namespace via X-Namespace / ?namespace / "default". The caller needs list on
+// evalsuites there (403 otherwise). 404 when the dataset does not exist; 501 when the store is unconfigured.
 func (s *Server) handleListDatasetCases(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	if s.datasetStore == nil {
@@ -283,21 +378,21 @@ func (s *Server) handleListDatasetCases(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "dataset name is required in the URL path")
 		return
 	}
-	ns := r.Header.Get(kbNamespaceHeader)
-	if ns == "" {
-		ns = r.URL.Query().Get("namespace")
+	ns, ok := datasetNamespace(w, r)
+	if !ok {
+		return
 	}
-	if ns == "" {
-		ns = defaultCreateNamespace
+	if !s.authorizeDatasets(w, r, caller, authz.VerbList, ns, "read datasets in namespace "+ns, msgDatasetNotFound) {
+		return
 	}
 
-	ds, err := s.datasetStore.EnsureDataset(r.Context(), ns, datasetName)
+	ds, err := s.datasetStore.GetDataset(r.Context(), ns, datasetName)
 	if err != nil {
 		if errors.Is(err, controlplane.ErrNotFound) {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("dataset %q not found in namespace %q", datasetName, ns))
+			datasetNotFound(w, datasetName, ns)
 			return
 		}
-		s.log.Error(err, "ensure dataset for case list", "name", datasetName, "ns", ns)
+		s.log.Error(err, "get dataset for case list", "name", datasetName, "ns", ns)
 		writeError(w, http.StatusInternalServerError, "failed to look up dataset")
 		return
 	}
@@ -319,7 +414,13 @@ func (s *Server) handleListDatasetCases(w http.ResponseWriter, r *http.Request) 
 			Tags:          c.Tags,
 			CreatedAt:     c.CreatedAt,
 		}
-		if label, lErr := s.datasetStore.LatestLabel(r.Context(), c.ID); lErr == nil && label != nil {
+		label, lErr := s.datasetStore.LatestLabel(r.Context(), c.ID)
+		if lErr != nil {
+			s.log.Error(lErr, "read latest label failed", "dataset", ds.ID, "case", c.ID)
+			writeError(w, http.StatusInternalServerError, "failed to read case labels")
+			return
+		}
+		if label != nil {
 			item.LatestLabel = &CaseLabelSummary{
 				Value:      label.Value,
 				Correction: label.Correction,
@@ -352,8 +453,11 @@ type AppendLabelResponse struct {
 
 // handleAppendLabel serves POST /api/datasets/{name}/cases/{caseId}/labels (m69.3, ADR 0062 Fork 5).
 // APPENDS one label row to the case — append-only (no update/delete). The author is the AUTHENTICATED
-// caller (resolved via SelfSubjectReview — never a client-supplied field). 404 when the case does not exist;
-// 400 on missing value; 401 on a missing/rejected token; 501 when the store is unconfigured.
+// caller (resolved via SelfSubjectReview — never a client-supplied field). The caller needs update on
+// evalsuites in the dataset's namespace (403 otherwise), and the case must belong to the dataset named in
+// the path in that namespace: a case id alone would let a writer in one namespace label any other's.
+// 404 when the dataset or the case does not exist there; 400 on missing value; 401 on a missing/rejected
+// token; 501 when the store is unconfigured.
 func (s *Server) handleAppendLabel(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -364,9 +468,14 @@ func (s *Server) handleAppendLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	datasetName := r.PathValue("name")
 	caseID := r.PathValue("caseId")
-	if caseID == "" {
-		writeError(w, http.StatusBadRequest, "caseId is required in the URL path")
+	if datasetName == "" || caseID == "" {
+		writeError(w, http.StatusBadRequest, "dataset name and caseId are required in the URL path")
+		return
+	}
+	ns, ok := datasetNamespace(w, r)
+	if !ok {
 		return
 	}
 
@@ -377,6 +486,30 @@ func (s *Server) handleAppendLabel(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.Value) == "" {
 		writeError(w, http.StatusBadRequest, "label value is required")
+		return
+	}
+
+	if !s.authorizeDatasets(w, r, caller, authz.VerbUpdate, ns, "label datasets in namespace "+ns, msgDatasetNotFound) {
+		return
+	}
+	ds, err := s.datasetStore.GetDataset(r.Context(), ns, datasetName)
+	if err != nil {
+		if errors.Is(err, controlplane.ErrNotFound) {
+			datasetNotFound(w, datasetName, ns)
+			return
+		}
+		s.log.Error(err, "get dataset for label", "name", datasetName, "ns", ns)
+		writeError(w, http.StatusInternalServerError, "failed to look up dataset")
+		return
+	}
+	cases, err := s.datasetStore.ListCases(r.Context(), ds.ID)
+	if err != nil {
+		s.log.Error(err, "list cases for label", "dataset", ds.ID)
+		writeError(w, http.StatusInternalServerError, "failed to look up the case")
+		return
+	}
+	if !slices.ContainsFunc(cases, func(c dataset.Case) bool { return c.ID == caseID }) {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("case %q not found in dataset %q", caseID, datasetName))
 		return
 	}
 
@@ -423,10 +556,12 @@ type FromRunResponse struct {
 // AppendCase, and returns the new case id.
 //
 // Honest degrade (501) when the dataset store or the Langfuse adapter is unconfigured. 400 on a missing
-// traceId. Caller-scoped (ADR 0011): the caller must authenticate; the identity is used as the label author
-// for the initial case (not the label row — that comes from a subsequent label append).
+// traceId. The caller needs update on evalsuites in the dataset's namespace (403 otherwise), checked before
+// the trace is looked up; the trace is then read only after authorizeTraceRead proves the caller may read it
+// (ADR 0078): the case it seeds is the trace's own input and output.
 func (s *Server) handleFromRun(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	if s.datasetStore == nil || s.adapters.Langfuse == nil {
@@ -440,12 +575,9 @@ func (s *Server) handleFromRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "dataset name is required in the URL path")
 		return
 	}
-	ns := r.Header.Get(kbNamespaceHeader)
-	if ns == "" {
-		ns = r.URL.Query().Get("namespace")
-	}
-	if ns == "" {
-		ns = defaultCreateNamespace
+	ns, ok := datasetNamespace(w, r)
+	if !ok {
+		return
 	}
 
 	var req FromRunRequest
@@ -459,12 +591,24 @@ func (s *Server) handleFromRun(w http.ResponseWriter, r *http.Request) {
 	}
 	traceID := strings.TrimSpace(req.TraceID)
 
-	// Fetch the trace's detail from Langfuse.
-	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), traceID)
-	if err != nil {
-		s.log.Error(err, "from-run: fetch trace detail", "trace", traceID)
-		writeError(w, http.StatusBadGateway, "failed to fetch trace from Langfuse: "+err.Error())
+	if !s.authorizeDatasets(w, r, caller, authz.VerbUpdate, ns, "add cases to datasets in namespace "+ns, msgTraceNotFound) {
 		return
+	}
+	access, ok := s.authorizeTraceRead(w, r, caller, traceID)
+	if !ok {
+		return
+	}
+	var detail TraceDetail
+	if access.detail != nil {
+		detail = *access.detail
+	} else {
+		d, err := s.adapters.Langfuse.TraceDetail(r.Context(), traceID)
+		if err != nil {
+			s.log.Error(err, "from-run: fetch trace detail", "trace", traceID)
+			writeError(w, http.StatusBadGateway, "failed to fetch trace from Langfuse: "+err.Error())
+			return
+		}
+		detail = d
 	}
 
 	// REDACT (the same helper the export executor uses — parity of the case shape, ADR 0062 Fork 1 PII P1).
@@ -519,9 +663,11 @@ type PinDatasetResponse struct {
 // NEW immutable version (the case set + each case's latest label snapshot; ADR 0062 Fork 1). An
 // `EvalSuite.datasetRef: <name>@<version>` then gates reproducibly against it. The store's PinVersion had
 // no API surface (the m69.12 live tier gap) — the loop (export → label → PIN → gate) needs this to create
-// a name@version ref via the console/API rather than only at the SQL tier.
+// a name@version ref via the console/API rather than only at the SQL tier. The caller needs update on
+// evalsuites in the dataset's namespace (403 otherwise); 404 when the dataset does not exist there.
 func (s *Server) handlePinDataset(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.callerClient(w, r); !ok {
+	caller, ok := s.callerClient(w, r)
+	if !ok {
 		return
 	}
 	if s.datasetStore == nil {
@@ -533,20 +679,20 @@ func (s *Server) handlePinDataset(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "dataset name is required in the URL path")
 		return
 	}
-	ns := r.Header.Get(kbNamespaceHeader)
-	if ns == "" {
-		ns = r.URL.Query().Get("namespace")
+	ns, ok := datasetNamespace(w, r)
+	if !ok {
+		return
 	}
-	if ns == "" {
-		ns = defaultCreateNamespace
+	if !s.authorizeDatasets(w, r, caller, authz.VerbUpdate, ns, "pin datasets in namespace "+ns, msgDatasetNotFound) {
+		return
 	}
-	ds, err := s.datasetStore.EnsureDataset(r.Context(), ns, datasetName)
+	ds, err := s.datasetStore.GetDataset(r.Context(), ns, datasetName)
 	if err != nil {
 		if errors.Is(err, controlplane.ErrNotFound) {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("dataset %q not found in namespace %q", datasetName, ns))
+			datasetNotFound(w, datasetName, ns)
 			return
 		}
-		s.log.Error(err, "ensure dataset for pin", "name", datasetName, "ns", ns)
+		s.log.Error(err, "get dataset for pin", "name", datasetName, "ns", ns)
 		writeError(w, http.StatusInternalServerError, "failed to look up dataset")
 		return
 	}

@@ -4,6 +4,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { KnowledgeBasesPage, KBDetailPage } from "@/pages/knowledge-bases-page";
 import type { KBSummary, KBDetail } from "@/lib/api";
+import { CapabilitiesProvider } from "@/lib/capabilities";
+import { NamespaceProvider } from "@/lib/namespace";
 
 // KnowledgeBasesPage (m68.13, ADR 0061) — managed RAG corpora list + detail.
 //
@@ -52,6 +54,8 @@ interface FetchRoutes {
   get?: { ok: boolean; status?: number; body?: unknown };
   search?: { ok: boolean; status?: number; body?: unknown };
   ingest?: { ok: boolean; status?: number; body?: unknown };
+  // The caller's capability map in "default" (GET /api/capabilities).
+  caps?: Record<string, Record<string, boolean>>;
 }
 
 function installFetch(routes: FetchRoutes): { calls: { url: string; method: string; body: string }[] } {
@@ -65,6 +69,18 @@ function installFetch(routes: FetchRoutes): { calls: { url: string; method: stri
       const body = typeof init?.body === "string" ? init.body : "";
       calls.push({ url: path, method, body });
 
+      if (path === "/api/namespaces")
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ namespaces: [{ name: "default" }] }),
+        } as Response);
+      if (path === "/api/capabilities")
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ namespace: "default", allowed: routes.caps ?? {} }),
+        } as Response);
       if (path === "/api/knowledgebases" && method === "GET") {
         const r = routes.list ?? { ok: true, body: { items: [] } };
         return Promise.resolve({
@@ -391,5 +407,46 @@ describe("KBDetailPage — absent is not zero (M151)", () => {
     renderDetailPage();
     await screen.findByTestId("kb-detail-page");
     expect(within(railRow("Embedding route")).getByText("not set")).toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Who may change the corpus
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("KBDetailPage — Upload and Ingest follow the caller's update permission", () => {
+  function renderAs(update: boolean) {
+    localStorage.removeItem("ctxmesh.namespace");
+    installFetch({
+      get: { ok: true, body: kbDetail() },
+      caps: { knowledgebases: { get: true, list: true, update } },
+    });
+    render(
+      <NamespaceProvider>
+        <CapabilitiesProvider>
+          <MemoryRouter initialEntries={["/knowledgebases/default/my-kb"]}>
+            <Routes>
+              <Route path="/knowledgebases/:ns/:name" element={<KBDetailPage />} />
+            </Routes>
+          </MemoryRouter>
+        </CapabilitiesProvider>
+      </NamespaceProvider>,
+    );
+  }
+
+  it("a reader sees why there is nothing to press", async () => {
+    renderAs(false);
+    expect(await screen.findByTestId("kb-upload-read-only")).toHaveTextContent("need update on it");
+    expect(screen.getByTestId("kb-ingest-read-only")).toBeInTheDocument();
+    expect(screen.queryByTestId("upload-submit")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("upload-input")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ingest-button")).not.toBeInTheDocument();
+  });
+
+  it("a caller who may update it uploads and ingests", async () => {
+    renderAs(true);
+    expect(await screen.findByTestId("ingest-button")).toBeInTheDocument();
+    expect(screen.getByTestId("upload-submit")).toBeInTheDocument();
+    expect(screen.queryByTestId("kb-upload-read-only")).not.toBeInTheDocument();
   });
 });

@@ -40,7 +40,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/bff"
 	"github.com/ctxmesh/ctxmesh/internal/replay"
@@ -82,7 +81,7 @@ func newDevCmd() *cobra.Command {
 		Short: "Run the agent locally with the full runtime contract + a mock gateway",
 		Long: `dev runs the SAME launcher + your agent locally on Docker Compose with the
 full runtime contract (the traced proxy on AGENT_PORT, memory :2998, feedback
-:2995, and the tool-discovery sidecar :2999), so your inner loop matches
+:2995, and tool discovery :2999, all served by the launcher), so your inner loop matches
 production. The model gateway points at a deterministic MOCK provider by default
 (every completion is "MOCK_OK…"); pass --provider real to use a real provider.
 
@@ -92,7 +91,6 @@ It reads the same simplified agent.yaml the ` + "`expand`" + ` command consumes
 
 Prerequisites (built once via the engine Makefile):
   - the agent image referenced by agent.yaml (e.g. make docker-build-example)
-  - the discovery sidecar image: make docker-build-discovery
 
 Provider modes:
   --provider mock   (default) gateway returns MOCK_OK — no key, deterministic, fast.
@@ -355,11 +353,8 @@ func serveDevUI(uiPort int, uiDist string, plan *devPlan, out, errOut io.Writer)
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("building scheme: %w", err)
 	}
-	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
-		return nil, fmt.Errorf("adding agents to scheme: %w", err)
-	}
 	if err := agentsv1beta1.AddToScheme(scheme); err != nil {
-		return nil, fmt.Errorf("adding agents/v1beta1 to scheme: %w", err)
+		return nil, fmt.Errorf("adding agents to scheme: %w", err)
 	}
 
 	// The local agent's /invoke is published on the host at plan.HostPort; the BFF

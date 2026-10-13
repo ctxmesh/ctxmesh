@@ -29,7 +29,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
@@ -75,7 +75,22 @@ const (
 // handleHealth serves GET /api/health — a liveness + version probe. It needs no
 // cluster access, so it works even before the SPA is authenticated (the SPA
 // dashboard renders it to prove the BFF seam).
+//
+// It fails, 503, once the async backend's connection is closed for good. The
+// client does not reopen one the broker ended, so every publish and every
+// durable consumer would stay dead until the process restarts; failing the
+// liveness probe is what restarts it. A broker that is only unreachable leaves
+// the connection reconnecting, not closed, and the probe passing.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	if b, ok := s.asyncPublisher.(asyncBackendHealth); ok {
+		if err := b.Err(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, HealthResponse{
+				Status:  "async backend connection closed: " + err.Error(),
+				Version: s.version,
+			})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, HealthResponse{
 		Status:  "ok",
 		Version: s.version,
@@ -160,7 +175,7 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listAgentDeployments(r.Context(), caller, opts...)
+	list, err := listAgentDeployments(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -261,9 +276,9 @@ func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
 	case "":
 		// Raw mode: preserve the exact M12 response. q is only meaningful under a
 		// grouping axis, so it is ignored here (raw mode already emits every node).
-		graph, err = buildTopology(r.Context(), caller, scope...)
+		graph, err = buildTopology(r.Context(), s.acrossWorkspaces(caller), scope...)
 	case groupKindRegistry, groupKindNamespace:
-		graph, err = buildGroupedTopology(r.Context(), caller, topologyGroupSpec{
+		graph, err = buildGroupedTopology(r.Context(), s.acrossWorkspaces(caller), topologyGroupSpec{
 			group:  group,
 			q:      q,
 			expand: parseExpandSet(r.URL.Query().Get("expand")),
@@ -439,7 +454,7 @@ func (s *Server) authorizeAgentKey(w http.ResponseWriter, r *http.Request, calle
 		writeError(w, http.StatusBadRequest, "agent filter must be namespace/name")
 		return false
 	}
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &ad); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -449,7 +464,7 @@ func (s *Server) authorizeAgentKey(w http.ResponseWriter, r *http.Request, calle
 			writeError(w, http.StatusNotFound, "agent not found")
 			return false
 		}
-		s.log.Error(err, "runs list: authorize agent failed", "agent", key)
+		s.log.Error(err, "authorize agent read failed", "agent", key)
 		writeError(w, http.StatusInternalServerError, "failed to authorize agent")
 		return false
 	}
@@ -465,7 +480,7 @@ func (s *Server) callerVisibleAgentKeys(ctx context.Context, caller client.Clien
 	if namespace != "" {
 		opts = append(opts, client.InNamespace(namespace))
 	}
-	list, err := listAgentDeployments(ctx, caller, opts...)
+	list, err := listAgentDeployments(ctx, s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -581,17 +596,21 @@ func (s *Server) handleCost(w http.ResponseWriter, r *http.Request) {
 // agent (m16.5). It groups a bounded window of recent Langfuse traces by their
 // `agent:<ns>/<name>` identity tag and returns per-agent cost/token/run counts.
 //
-// Caller-scoped SSAR on `costrollups` (same persona gate as forecast/chargeback/cost).
-// Cluster-wide (empty namespace) — mirrors handleCostForecast exactly.
-// A denial is 403, never a leaked or empty response.
+// Scope (ADR 0077). With ?tenant= the breakdown keeps the tenant's namespaces, behind one
+// cluster-wide SSAR on `costrollups`. Without one, see costScopeWithoutTenant: a cluster-wide cost
+// reader who sees a tenant must name it, and anyone else gets the namespaces where they may read
+// cost. A denial is 403, never a leaked or empty response.
 //
 // Supported query params:
 //
 //	?by=agent   the grouping axis; REQUIRED and "agent" is the ONLY supported
 //	             value. Any other `by` value (including missing/empty) → 400
 //	             (honest: don't silently accept a by you don't implement).
-//	?limit=N     page size over the agent list (default defaultRunLimit, no max)
+//	?tenant=T    the tenant whose namespaces the breakdown covers
+//	?limit=N     page size over the agents in scope (default defaultRunLimit, no max)
 //	?cursor=TOKEN opaque next-page token from a prior response's nextCursor
+//
+// Pages, cursors and totals count only the agents in scope (CostBreakdownQuery).
 //
 // The response is a RECENT-WINDOW ROLLUP — the totals cover a bounded recent
 // window of traces, NOT all-time historical cost. The window matches CostUsage.
@@ -604,26 +623,15 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// ADR 0077: tenant-scope the per-agent breakdown — require ?tenant= (closes the m52.Q4
-	// cross-tenant leak; the Langfuse breakdown is otherwise cluster-wide).
-	// M99 B1: a missing tenant is allowed ONLY when the cluster has genuinely ZERO tenants — then
-	// there is no tenant boundary to leak across, so the cluster-wide per-agent breakdown is safe
-	// (this is the "per-agent fallback" so the Cost page isn't empty on a tenant-less cluster). With
-	// ≥1 tenant, or if we can't verify the count (a can't-list-tenants RBAC error), keep the strict
-	// gate — never serve a cluster-wide breakdown when tenant boundaries exist.
 	tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
+	// scope is the namespaces the breakdown is narrowed to; nil is cluster-wide.
+	var scope []string
 	if tenant == "" {
-		var tenants agentsv1alpha1.TenantList
-		if err := caller.List(r.Context(), &tenants); err != nil || len(tenants.Items) > 0 {
-			writeError(w, http.StatusBadRequest, "missing required query param: tenant")
+		if scope, ok = s.costScopeWithoutTenant(w, r, caller); !ok {
 			return
 		}
-		// zero tenants → fall through to the cluster-wide per-agent breakdown (safe).
-	}
-
-	// Persona gate (never per-row): one SSAR on `costrollups`. Cluster-wide
-	// (empty namespace) — mirrors handleCostForecast exactly.
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceCostRollups, "", ""); err != nil {
+	} else if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceCostRollups, "", ""); err != nil {
+		// Persona gate (never per-row): one cluster-wide SSAR, as forecast and chargeback.
 		s.writeAuthzError(w, err, "read the cost breakdown")
 		return
 	}
@@ -652,9 +660,23 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	cursor := strings.TrimSpace(qs.Get("cursor"))
+	query := CostBreakdownQuery{Limit: limit, Cursor: strings.TrimSpace(qs.Get("cursor"))}
+	switch {
+	case tenant != "":
+		// One Tenant GET as the caller; Tenant.spec.namespaces is the membership set.
+		var tnt agentsv1beta1.Tenant
+		if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
+			s.writeGetError(w, err, "tenant")
+			return
+		}
+		query.Namespaces = tnt.Spec.Namespaces
+	case scope != nil:
+		query.Namespaces = scope
+	default:
+		query.AllNamespaces = true
+	}
 
-	resp, err := s.adapters.Langfuse.CostBreakdown(r.Context(), limit, cursor)
+	resp, err := s.adapters.Langfuse.CostBreakdown(r.Context(), query)
 	if err != nil {
 		if errors.Is(err, ErrBadParam) {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -669,6 +691,7 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 				Total:      CostSummary{ByModel: []MetricPoint{}},
 				NextCursor: "",
 				Notice:     noticeObservabilityDegraded,
+				Namespaces: scope,
 			})
 			return
 		}
@@ -679,41 +702,47 @@ func (s *Server) handleCostBreakdown(w http.ResponseWriter, r *http.Request) {
 	if resp.Agents == nil {
 		resp.Agents = []AgentCostItem{}
 	}
-	// M99 B1 zero-tenant fallback: with no tenant there is nothing to filter/isolate against — return
-	// the cluster-wide per-agent breakdown as-is (only reachable when the cluster has zero tenants, per
-	// the guard above).
-	if tenant == "" {
-		writeJSON(w, http.StatusOK, resp)
-		return
-	}
-	// ADR 0077: keep only agents whose namespace belongs to the requested tenant (one Tenant GET;
-	// Tenant.spec.namespaces is the membership set) + recompute the page total over the kept rows —
-	// the tenant-isolation filter over the cluster-wide Langfuse breakdown. NB pagination is over the
-	// pre-filter list; a tenant's agent set is bounded (one page in practice — documented, ADR 0077).
-	var tnt agentsv1alpha1.Tenant
-	if err := caller.Get(r.Context(), client.ObjectKey{Name: tenant}, &tnt); err != nil {
-		s.writeGetError(w, err, "tenant")
-		return
-	}
-	nsSet := make(map[string]struct{}, len(tnt.Spec.Namespaces))
-	for _, ns := range tnt.Spec.Namespaces {
-		nsSet[ns] = struct{}{}
-	}
-	kept := make([]AgentCostItem, 0, len(resp.Agents))
-	total := CostSummary{ByModel: []MetricPoint{}}
-	for _, a := range resp.Agents {
-		if _, in := nsSet[a.AgentNs]; in {
-			kept = append(kept, a)
-			// An UNPRICED agent contributes nothing to the total and does not make it wrong:
-			// the total is the sum of what is known. Treating unknown as zero would report a
-			// confident figure built partly from absence.
-			total.TotalCostUSD += costOrZero(a.TotalCostUSD)
-			total.TotalTokens += a.TotalTokens
-		}
-	}
-	resp.Agents = kept
-	resp.Total = total
+	resp.Namespaces = scope
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// msgCostTenantRequired refuses a breakdown that would cross a tenant boundary.
+const msgCostTenantRequired = "missing required query param: tenant"
+
+// costScopeWithoutTenant decides what a breakdown given no tenant covers, and reports whether the
+// request may proceed (a refusal has been written).
+//
+// A tenant only scopes a caller who may read cost cluster-wide: naming one needs that grant, so
+// requiring one of anyone else would refuse them everything. Anyone else gets the namespaces where
+// they may read cost, by the All-workspaces rule, whatever Tenants they can list. A cluster-wide
+// cost reader must name a tenant when they see one, or when they cannot list Tenants (the
+// boundaries they cannot see may exist); the refusal carries errCodeTenantRequired so the console
+// can pick one. On a cluster they can see has no Tenants the breakdown is cluster-wide (nil).
+func (s *Server) costScopeWithoutTenant(w http.ResponseWriter, r *http.Request, caller client.Client) ([]string, bool) {
+	all, namespaces, err := s.listableNamespaces(r.Context(), caller, resourceCostRollups)
+	if err != nil {
+		s.writeAuthzError(w, err, "read the cost breakdown")
+		return nil, false
+	}
+	if !all {
+		return namespaces, true
+	}
+	var tenants agentsv1beta1.TenantList
+	err = caller.List(r.Context(), &tenants)
+	switch {
+	case err == nil && len(tenants.Items) == 0:
+		return nil, true
+	case err == nil, apierrors.IsForbidden(err):
+		writeErrorCode(w, http.StatusBadRequest, errCodeTenantRequired, msgCostTenantRequired)
+	default:
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
+			return nil, false
+		}
+		s.log.Error(err, "list Tenants for the cost breakdown failed")
+		writeError(w, http.StatusInternalServerError, "failed to list tenants")
+	}
+	return nil, false
 }
 
 // handleTraceLink serves GET /api/traces/{id} — resolves a traceId to its one
@@ -757,36 +786,44 @@ func (s *Server) handleTraceDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing trace id")
 		return
 	}
-	// Caller-scoped authz (ADR 0011): a trace carries the full span I/O (prompts + model answers), so a
-	// trace id must not be a cross-tenant read oracle. Resolve trace→run→agent and prove the caller can
-	// read that agent through their OWN RBAC before serving. 403 on denial; 404 when no run maps the trace.
-	if _, ok := s.authorizeRunAccess(w, r, caller, id, true); !ok {
+	// Caller-scoped authz (ADR 0078): a trace carries the full span I/O (prompts + model answers), so a
+	// trace id must not be a cross-tenant read oracle.
+	access, ok := s.authorizeTraceRead(w, r, caller, id)
+	if !ok {
 		return
 	}
-	detail, err := s.adapters.Langfuse.TraceDetail(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, ErrTraceNotFound) {
-			// The caller already proved a run maps this trace, so the id is real and theirs; the
-			// spans have not arrived. Still 404 (there is no representation to serve, and changing
-			// the status would break every shipped SDK), but the code says which 404 it is.
-			writeErrorCode(w, http.StatusNotFound, errCodeTracePending,
-				"trace not recorded yet — the agent's spans have not reached the trace backend")
+	detail := access.detail
+	if detail == nil {
+		d, err := s.adapters.Langfuse.TraceDetail(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, ErrTraceNotFound) {
+				// A run maps this trace and the caller may read it, so the id is real and theirs; the
+				// spans have not arrived. Still 404 (there is no representation to serve, and changing
+				// the status would break every shipped SDK), but the code says which 404 it is.
+				writeErrorCode(w, http.StatusNotFound, errCodeTracePending,
+					"trace not recorded yet — the agent's spans have not reached the trace backend")
+				return
+			}
+			s.log.Error(err, "fetch trace detail failed", "traceID", id)
+			writeError(w, http.StatusBadGateway, "failed to fetch trace detail")
 			return
 		}
-		s.log.Error(err, "fetch trace detail failed", "traceID", id)
-		writeError(w, http.StatusBadGateway, "failed to fetch trace detail")
-		return
+		detail = &d
 	}
 	// Non-nil slice so the JSON is [] rather than null for a trace with no spans.
 	spans := detail.Spans
 	if spans == nil {
 		spans = []SpanSummary{}
 	}
-	writeJSON(w, http.StatusOK, TraceDetailResponse{
+	resp := TraceDetailResponse{
 		Rollup:     detail.Rollup,
 		Spans:      spans,
 		RootSpanID: detail.RootSpanID,
-	})
+	}
+	if access.run != nil {
+		resp.Run = s.traceRunSteps(r.Context(), access.run)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleFeedback serves GET /api/feedback?traceId=<id> — the feedback panel's
@@ -813,9 +850,8 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing required query param: traceId")
 		return
 	}
-	// Caller-scoped authz (ADR 0011): scores hang off a trace, so gate them the same as the trace detail —
-	// resolve trace→run→agent and prove the caller can read that agent through their own RBAC.
-	rn, ok := s.authorizeRunAccess(w, r, caller, traceID, true)
+	// Scores hang off a trace, so they are gated exactly as the trace detail is (ADR 0078).
+	access, ok := s.authorizeTraceRead(w, r, caller, traceID)
 	if !ok {
 		return
 	}
@@ -829,9 +865,10 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	if scores == nil {
 		scores = []FeedbackScore{}
 	}
-	// Attribute each score to the source declared by the agent's FeedbackStore, if bound (M139, ADR 0112).
-	// Best-effort: an unbound/unreadable ref leaves scores unattributed (the raw data still returns).
-	s.attributeFeedback(r, caller, rn, scores)
+	// Attribute each score to the source the agent's spec.feedback declares, if any (ADR 0152).
+	// Best-effort: no declaration, or an unreadable agent, leaves scores unattributed (the raw data still returns).
+	agentNs, agentName := access.agent()
+	s.attributeFeedback(r, caller, agentNs, agentName, scores)
 	writeJSON(w, http.StatusOK, FeedbackResponse{Scores: scores})
 }
 
@@ -859,7 +896,7 @@ func (s *Server) handleEvalGatedMetric(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(ns))
 	}
 
-	list, err := listAgentDeployments(r.Context(), caller, opts...)
+	list, err := listAgentDeployments(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -892,12 +929,45 @@ func (s *Server) handleEvalGatedMetric(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// notImplemented is the handler mounted for adapter seams (Langfuse/Prometheus/
-// invoke/expand) whose adapter is nil on the foundation. It returns 501 so the
-// route exists and is discoverable but honestly reports "not wired yet".
-func notImplemented(feature string) http.HandlerFunc {
-	return func(w http.ResponseWriter, _ *http.Request) {
-		writeError(w, http.StatusNotImplemented, feature+" is not implemented yet")
+// dependency is something a route cannot serve without: the caller-scoped cluster client, the
+// trace store, an adapter. wired is whether this server has it.
+type dependency struct {
+	name  string
+	wired bool
+}
+
+// requires is the one place an absent dependency becomes a response. Every route registers
+// exactly once, through it when it has dependencies, so the route table is the same in every
+// configuration: a server missing a dependency answers 501 naming it rather than 404, which the
+// console reads as "not available here".
+func requires(h http.HandlerFunc, deps ...dependency) http.Handler {
+	for _, d := range deps {
+		if !d.wired {
+			name := d.name
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeError(w, http.StatusNotImplemented, name+" is not configured on this server")
+			})
+		}
+	}
+	return h
+}
+
+// routeDeps are the dependencies routes are gated on, named as their 501 names them.
+type routeDeps struct {
+	cluster dependency // the caller-scoped client factory (ADR 0011)
+	scheme  dependency // decoding and applying manifests
+	traces  dependency // the trace store
+	invoke  dependency // dispatching to an agent
+	expand  dependency // the simplified-config expand core
+}
+
+func (s *Server) routeDeps() routeDeps {
+	return routeDeps{
+		cluster: dependency{"caller-scoped cluster access", s.callerClients != nil},
+		scheme:  dependency{"the platform API scheme", s.scheme != nil},
+		traces:  dependency{"the trace store", s.adapters.Langfuse != nil},
+		invoke:  dependency{"the agent invoker", s.adapters.Invoke != nil},
+		expand:  dependency{"the config expander", s.adapters.Expand != nil},
 	}
 }
 
@@ -933,6 +1003,10 @@ const (
 	// (m52.G30). Same status, opposite meaning — one is "never", the other is "not yet", and a
 	// client cannot tell them apart without this.
 	errCodeTracePending = "trace_pending"
+
+	// errCodeTenantRequired marks the 400 a cluster-wide cost reader gets for a breakdown that names
+	// no tenant while tenants exist (or may exist unseen): name one. Anyone else is never sent it.
+	errCodeTenantRequired = "tenant_required"
 )
 
 // msgInvalidJSONBody is the client-safe message for an unparseable request body,
@@ -948,4 +1022,10 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // reason (e.g. storage_quota_exceeded) without parsing the human message.
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, errorBody{Error: msg, Code: code})
+}
+
+// asyncBackendHealth is an async backend that can lose its connection for good: Err is nil while it is
+// usable.
+type asyncBackendHealth interface {
+	Err() error
 }

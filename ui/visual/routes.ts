@@ -4,9 +4,6 @@
 // resolves to a real render rather than a 404. This list is derived from the
 // route table in src/App.tsx and is asserted against it by a test, so a new
 // route cannot be added to the app without also being swept.
-//
-// `/design/*` is deliberately absent: it is a flag-gated review artifact, not a
-// product surface, and a normal build ships no route for it.
 
 export type Chrome = "shell" | "bare";
 
@@ -53,7 +50,7 @@ export const ROUTES: RouteCase[] = [
   { id: "playground", path: "/playground", label: "Playground", chrome: "shell", archetype: "playground" },
 
   // ── Library ─────────────────────────────────────────────────────────────
-  { id: "tools-catalog", path: "/tools/catalog", label: "Tool catalog", chrome: "shell", archetype: "index" },
+  { id: "tools-catalog", path: "/tools/mcp-servers?tab=tools", label: "Tool catalog (MCP servers, Tools tab)", chrome: "shell", archetype: "index" },
   { id: "mcp-servers", path: "/tools/mcp-servers", label: "MCP servers", chrome: "shell", archetype: "index" },
   { id: "mcp-add", path: "/tools/add-mcp", label: "Add MCP server", chrome: "shell", archetype: "wizard" },
   { id: "knowledgebases", path: "/knowledgebases", label: "Knowledge bases", chrome: "shell", archetype: "index" },
@@ -62,11 +59,11 @@ export const ROUTES: RouteCase[] = [
   { id: "gallery", path: "/gallery", label: "Template gallery", chrome: "shell", archetype: "gallery" },
   { id: "workflows", path: "/workflows", label: "Workflows", chrome: "shell", archetype: "index" },
   { id: "workflow-detail", path: "/workflows/default/demo-flow", label: "Workflow detail", chrome: "shell", archetype: "detail" },
-  { id: "config", path: "/config", label: "Config builder", chrome: "shell", archetype: "authoring" },
+  { id: "config", path: "/agents/new?mode=yaml", label: "Create agent, agent.yaml entrance", chrome: "shell", archetype: "authoring" },
 
   // ── Govern ──────────────────────────────────────────────────────────────
   { id: "approvals", path: "/approvals", label: "Approvals", chrome: "shell", archetype: "index" },
-  { id: "mcp-approvals", path: "/tools/approvals", label: "MCP approvals", chrome: "shell", archetype: "index" },
+  { id: "mcp-approvals", path: "/approvals?tab=mcp", label: "MCP approvals (Approvals, MCP tab)", chrome: "shell", archetype: "index" },
   { id: "stops", path: "/stops", label: "Stops", chrome: "shell", archetype: "index" },
   { id: "guardrails", path: "/guardrails", label: "Guardrails", chrome: "shell", archetype: "index" },
   { id: "evals", path: "/evals", label: "Evals", chrome: "shell", archetype: "index" },
@@ -98,7 +95,6 @@ export const ROUTES: RouteCase[] = [
   { id: "tenants", path: "/tenants", label: "Tenants", chrome: "shell", archetype: "index" },
 
   // ── Shells and edges ────────────────────────────────────────────────────
-  { id: "soon", path: "/soon/settings", label: "Placeholder (not yet built)", chrome: "shell", archetype: "placeholder" },
   { id: "notfound", path: "/no-such-page", label: "Not found", chrome: "shell", archetype: "placeholder" },
   { id: "login", path: "/login", label: "Login", chrome: "bare", archetype: "auth", signedOut: true },
   {

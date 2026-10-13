@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func smReq(t *testing.T, s *Server, method, body string) *httptest.ResponseRecorder {
@@ -51,13 +51,13 @@ func smReq(t *testing.T, s *Server, method, body string) *httptest.ResponseRecor
 // setting/clearing the folded field, preserving a configured Backend and normalizing perUser off for the
 // shared scope.
 func TestSessionMemory_EnableToggleDisable(t *testing.T) {
-	backend := &agentsv1alpha1.MemoryBackend{}
-	agent := &agentsv1alpha1.AgentDeployment{
+	backend := &agentsv1beta1.MemoryBackend{}
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "a1", Namespace: "default"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "img", ExecutionModel: "serving",
 			// Start enabled with a configured backend so we can prove PUT preserves it.
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: backend},
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{Scope: "session", Backend: backend},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
@@ -75,7 +75,7 @@ func TestSessionMemory_EnableToggleDisable(t *testing.T) {
 	// PUT: turn perUser ON (session scope) → the folded field carries it AND keeps the backend.
 	rec = smReq(t, s, http.MethodPut, `{"enabled":true,"scope":"session","perUser":true}`)
 	require.Equal(t, http.StatusOK, rec.Code)
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "a1"}, &live))
 	require.NotNil(t, live.Spec.SessionMemory)
 	assert.True(t, live.Spec.SessionMemory.PerUser)

@@ -38,6 +38,8 @@ current release is actually using.
   knowledge store are Postgres-backed and survive.
 - **Your custom resources.** AgentDeployments, ModelRoutes, SecretBindings and the rest
   live in etcd and are untouched by a chart upgrade.
+- **Agent version history.** Each agent's versions, which a rollback reverts to, are in the
+  control-plane database and survive with it.
 - **Your provider credentials.** The Secrets holding API keys are created by the connect
   flow, not by the chart, so an upgrade does not touch them.
 
@@ -76,6 +78,250 @@ before upgrading, not after.
 Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
+
+## Skill bodies are mounted, and the controller fetches them from github.com
+
+**What changed.** The controller fetches each attached skill's pinned version from a public github.com
+repository, checks it against the version's digest, and mounts it into the agent's pod, so `load()`
+returns the body (it answered 501 before). The agent's `SkillBodies` condition names any attached skill
+whose body is not mounted, and why.
+
+**During the upgrade** every agent with skills rolls one new revision, which carries the mounted bodies.
+An approval does **not** carry to it: the bodies change what the agent can read, so an agent with skills
+behind an approval gate keeps serving its approved revision and holds the new one until it is approved
+again. Agents without skills do not roll.
+
+**The controller now makes outbound requests** to `raw.githubusercontent.com:443`, once per skill version
+and not again while the body stays mounted. Where egress is restricted, allow it, or set `HTTPS_PROXY`
+(and `NO_PROXY` for in-cluster addresses) in the controller's environment; the fetch honours both.
+Without either, skills report `FetchFailed` and `load()` answers 501 for them; the agents otherwise run
+as before.
+
+**Only public repositories are read.** The controller sends no token, because whoever adds a skill
+version names the file it fetches. A version in a private repository reports `DigestMismatch`, the same
+as a file that is missing.
+
+**Version records are stricter.** `POST /api/skills/{ns}/{name}/versions` refuses a digest that is not
+`sha256:` and 64 lowercase hex characters, an over-long or unclean ref, path or object key, and an object
+key outside `skills/<namespace>/`. A version stored with one before the upgrade stays listed, and the
+controller reports it `SourceRefused` instead of fetching it.
+
+## The controller labels what it creates, and caches only that
+
+**What changed.** The controller labels every ConfigMap, Service, ResourceQuota, Deployment, Job, CronJob,
+NetworkPolicy, Knative Service, Trigger, Broker and ScaledObject it creates
+`agents.ctxmesh.ai/managed-by=ctxmesh-controller`, and its cache holds those kinds only where they carry
+the label. The install namespace's ConfigMaps and Deployments and `knative-serving/config-features` stay
+cached in full. The controller's memory no longer grows with the rest of the cluster.
+
+**During the upgrade** the controller adds the label to each object an earlier version created, the first
+time it reads it. That is one update per object and at most one extra reconcile of whatever owns it; the
+label is on the object's metadata, not its pod template, so no agent rolls a revision.
+
+**The label is reserved.** Do not remove it, and do not set it on objects of your own:
+
+- Removed from an object the controller owns, the controller misses that object's changes until it next
+  reads it, when it puts the label back.
+- Set on an object of yours, it only makes the controller cache that object.
+
+**Knative copies the label.** A Knative Service's labels go onto the Configuration and Route that Knative
+derives from it, and the Route's onto the Kubernetes Services it creates, so those carry the label too.
+The controller does not manage them; the label on them is not a sign it does.
+
+**Rolling back** to a release without the label is safe: that controller caches everything and ignores
+the label.
+
+## The token service authenticates every caller (agents on an older base image lose memory and knowledge)
+
+**What changed.** The token service now refuses any request without a projected ServiceAccount token
+(ADR 0154). The controller mounts one into every agent's egress sidecar and, for an agent with long-term
+memory or knowledge bases, into the agent's own container; the launcher in the agent's image sends it.
+
+**During the upgrade** every agent with a tool, long-term memory or a knowledge base rolls one new
+revision, which carries the token. An approval on such an agent carries to it. The token service
+restarts once more when the capability-key hook runs.
+
+**After upgrading,** rebuild agents whose image carries an older launcher (an older `ctxmesh` base image).
+Until then their long-term memory and knowledge searches fail: the launcher logs
+`token-service ... status 401 (unauthenticated: ...)`, and the token service logs the refusal. Tool calls
+are unaffected, because the sidecar rolls with the controller.
+
+**A knowledge-base reference to another namespace** no longer resolves; an agent searches only its own
+namespace's knowledge bases.
+
+**If you set `bff.mcp.grantHmacKey`,** the chart now creates a Secret `ctxmesh-grant-hmac` from it, and
+every upgrade must pass the same value. To stop passing it, create your own Secret holding the same key
+under `MCP_GRANT_HMAC_KEY` and set `bff.mcp.grantHmacKeySecret` instead of `bff.mcp.grantHmacKey`:
+
+```sh
+kubectl -n ctxmesh create secret generic ctxmesh-grant-key \
+  --from-literal=MCP_GRANT_HMAC_KEY="$(helm -n ctxmesh get values ctxmesh -o json | jq -r .bff.mcp.grantHmacKey)"
+```
+
+Using a different key re-keys every grant, and each person reconnects. If the key was in `bff-adapters`,
+it now takes effect: it was shadowed by an empty literal, so grants made until now were keyed without it
+and people reconnect once.
+
+**With an enforcing CNI,** the token service's new NetworkPolicy admits only the BFF from the install
+namespace. Anything else in that namespace that called it stops reaching it. **Agents cannot run in the
+install namespace while the policy is on:** their tool calls, memory and knowledge searches time out
+(after 20 to 30 seconds) instead of being refused. Move such agents to a namespace of their own, or set
+`tokenService.networkPolicy.enabled=false`.
+
+## Registry-scoped grants and shared scratchpads are keyed by namespace
+
+**What changed.** The trust boundary a person's grants are scoped to for an agent in an
+AgentRegistry was `r:<registryId>`, and a registry's shared scratchpad lived at
+`mem:shared:<registryId>:`. A registry's id is chosen by its author, so a registry in another
+namespace could copy it. Both now include the registry's namespace. A `registryId` must also be
+unique within its namespace: a second registry declaring one is `Ready=False`
+(`DuplicateRegistryId`) and has no members.
+
+**Before upgrading,** list registries that share an id within a namespace; after the upgrade only
+the oldest keeps its members:
+
+```sh
+kubectl get agentregistries -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.spec.registryId}{"\n"}{end}' | sort | uniq -d
+```
+
+**During the upgrade** every registry member bound to a tool rolls one new revision. A run that
+was in flight, or waiting for approval, against such an agent fails its tool calls with
+`boundary_mismatch` once the new revision serves it; start it again.
+
+**After upgrading,** each person reconnects their accounts once per registry: a grant made for a
+registry is stored under the old boundary and is not found under the new one, so the first run asks
+for consent again. Grants for agents in no registry are unchanged. Shared scratchpad entries
+written before the upgrade are not carried over; they expire with their 24-hour TTL.
+
+The superseded grants stay stored until removed. They are not used, but they hold refresh tokens.
+On the default Kubernetes backend, delete them from the credential namespace (or from each agent
+namespace, when `bff.mcp.credentialNamespace` is unset):
+
+```sh
+kubectl -n <credential-namespace> get secrets -l app.kubernetes.io/managed-by=ctxmesh-mcp-grant -o json \
+  | jq -r '.items[] | select((.metadata.annotations["agents.ctxmesh.ai/mcp-boundary"] // "") | test("^r:[^/]+$")) | .metadata.name' \
+  | xargs -r kubectl -n <credential-namespace> delete secret
+```
+
+On the Postgres backend:
+
+```sql
+DELETE FROM credential_grants WHERE boundary LIKE 'r:%' AND position('/' in boundary) = 0;
+```
+
+## The bundled NATS is off by default, and third-party images moved under `thirdPartyImages`
+
+- **NATS.** The chart no longer deploys the bundled NATS unless `devDataPlane.nats.enabled=true`.
+  An upgrade deletes the `ctxmesh-nats` Deployment and its PersistentVolumeClaim. If your install
+  sets `bff.asyncBackend=jetstream` against the bundled broker, add
+  `--set devDataPlane.nats.enabled=true` to the upgrade command, or messages queued in it are lost.
+  An install pointing `bff.natsURL` at its own NATS is unaffected.
+- **Dex image.** `auth.oidc.image` is now `thirdPartyImages.dex` (`registry`, `repository`, `tag`,
+  `digest`). The upgrade fails with a message naming the new key if your values still set the old
+  one; move the setting and re-run it.
+- **A private registry or mirror.** `thirdPartyImages.registryOverride=<registry>` pulls every
+  third-party image from that registry under the same repository path, tag and digest, and
+  `global.imagePullSecrets` adds pull secrets to every pod the chart renders. Copy the images with
+  `crane copy` (or `skopeo copy --all`) so the digests match.
+
+## Agent version history moves to the control-plane database
+
+Releases before this one recorded every spec change of an agent as an `AgentVersion` object and
+never deleted one. Version history now lives in the control-plane Postgres database, and the
+`AgentVersion` kind is retired.
+
+**Before upgrading:** nothing to move. Avoid changing agent specs while the upgrade rolls out: a
+version the old controller records after the new one has started is not copied. The serving spec's
+version is recorded again by the new controller either way.
+
+**During the upgrade** the new controller copies the existing `AgentVersion` objects into the
+database on its first start, before it reconciles anything, so each agent's history keeps its order.
+Objects whose agent no longer exists (or was deleted and recreated) are skipped. The copy runs once
+per database; if it fails, the controller exits and the copy is retried when it restarts.
+
+**After upgrading,** confirm the copy ran and check one agent's history:
+
+```sh
+kubectl -n ctxmesh logs deploy/ctxmesh-controller-manager | grep "Version history import complete"
+```
+
+The line reports how many versions were imported and skipped. In the console, an agent's Versions
+tab lists its history newest first. Then delete the retired kind. Helm keeps CRDs on upgrade, so the
+old definition and its objects are still installed until you do; deleting the CRD deletes its
+objects:
+
+```sh
+kubectl delete crd agentversions.agents.ctxmesh.ai
+```
+
+Until you delete it, rolling the release back with `helm rollback` returns to a controller that
+reads those objects, and versions recorded since the upgrade are not among them. Upgrading again
+does not copy anything a second time.
+
+**Access.** The console's version list and diff are authorized against `get` and `list` on
+`agentversions`, which the built-in `viewer`, `developer` and `operator` roles grant. A custom role
+needs the same two verbs.
+
+## Registry members admit only attested callers (BREAKING for direct calls to a member)
+
+**What changed.** An agent in an AgentRegistry used to accept any `/invoke` that carried no AMP
+envelope, and trusted whatever envelope it was sent, so any pod in the cluster could call it past its
+registry's isolation and `allowedCallers`. A member now admits an AMP call only with the platform's
+attestation of its caller, its own async consumer, and a run capability minted for it (the console,
+`/api/invoke`, `/api/runs`, workflows and the authenticating edge mint one per request). A run
+capability opens one invoke: a bound one, or one already presented, is refused. Anything else is HTTP
+403 `caller_not_allowed`. Agents in no registry are unchanged.
+
+Async deliveries follow the same rule: a CloudEvent reaches a member only with the platform's
+attestation of its sender, in the extension attribute `ampattestation`, matching the envelope's
+sender, registry and role. Hops sent with `mode=async` through the JetStream backend are attested
+by the dispatcher. Anything that publishes straight to a registry's Knative Broker must attach the
+sending agent's attestation, fetched from `POST /api/internal/amp/attestation` with that agent's
+projected pod token (audience `ctxmesh-bff`) and `{"receiver": "<agent>"}`; an event without one is
+refused with 403 and goes to the registry's dead-letter sink.
+
+**Before upgrading,** find anything that calls a member's `/invoke` directly, such as scripts that
+`curl` an agent's cluster-local URL or an edge installed with `extAuth.enabled=false`, and move it to
+`POST /api/invoke` or `/api/runs`. Remove `AGENT_REGISTRY_ID` and `AGENT_ROLE` from `spec.env`; they
+are now set by the platform from the registry and `spec.role`. On a member, so are
+`AMP_REQUIRE_ATTESTATION`, `MCP_CAPABILITY_PUBLIC_KEY`, `MCP_CAPABILITY_AUDIENCE` and
+`BFF_POD_TOKEN_PATH`: the posture is set for the whole install, never per agent.
+
+**During the upgrade** every member rolls one new revision; an approved revision stays approved.
+Launchers on old revisions do not send attestations until they roll, so AMP calls from them are
+refused for that window. To roll out in two steps, upgrade with
+`--set controllerManager.amp.requireAttestation=false`, watch the `amp.admission` span attribute on
+`agent.invoke` until no member reports `unattested`, then upgrade again without it. A bad attestation
+is refused under either setting.
+
+**After upgrading,** a member's `PlatformEnvIgnored` condition names any identity variable its
+`spec.env` still sets.
+
+## A variable the platform sets is the platform's, whatever spec.env says
+
+**What changed.** A `spec.env` entry with the name of a variable the platform sets for the agent
+(`MODEL_GATEWAY_URL`, `AGENT_PORT`, `BFF_INTERNAL_URL`, the `BUDGET_*` and `TENANT_*` caps, the memory
+and knowledge wiring and the rest) used to put the name in the container twice, and Kubernetes used
+whichever came last. The platform's value is now always used, and the entry is dropped. A name the
+platform does not set for that agent, such as `PROMPT_FILE` when `promptRef` is unset, is used as
+given. The `IdentityEnvIgnored` condition is now `PlatformEnvIgnored` and covers every dropped entry.
+
+**Before upgrading,** list the agents whose `spec.env` names a variable the platform sets, and move
+each to the field that sets it: `port` for `AGENT_PORT`, `allowedCallers` for
+`AGENT_ALLOWED_CALLERS`, `budget` or `guardrailPolicyRef` for `MODEL_GATEWAY_URL`.
+
+**During the upgrade** each such agent rolls one new revision carrying the platform's value. Its
+approval carries to the new revision, even where the old one ran the author's value, such as a
+`MODEL_GATEWAY_URL` that went straight to the provider: the change is the platform correcting the
+pod, not a new spec.
+
+**After upgrading,** an agent's `PlatformEnvIgnored` condition names every entry the platform did
+not use.
+
+On an install outside the `ctxmesh` namespace, the platform addresses agents are given now name the
+install's own namespace, so `spec.env` overrides of `MODEL_GATEWAY_URL`, `BFF_INTERNAL_URL` or the
+memory and object-store addresses are no longer needed. Remove them; each of those agents rolls one
+new revision either way.
 
 ## M162 — the agent container is hardened by default (BREAKING for root images)
 

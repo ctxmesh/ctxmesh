@@ -17,11 +17,16 @@ limitations under the License.
 package bff
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -45,6 +50,9 @@ const (
 	// dispatcher trusts these to decide where a message may be delivered.
 	headerAsyncNamespace = "X-Ctxmesh-Async-Namespace"
 	headerAsyncRegistry  = "X-Ctxmesh-Async-Registry"
+	// headerAsyncSender is the agent the verified run belongs to: the sender the dispatcher attests to the
+	// receiver (ADR 0153). Stamped and overwritten like the two above.
+	headerAsyncSender = "X-Ctxmesh-Async-Sender"
 
 	// ceIDHeader / ceTypeHeader are the CloudEvent binary-mode attributes we read: the event id is the
 	// envelope's messageId (the idempotency key), and the type is the RECEIVER agent — which is how the
@@ -76,7 +84,7 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
 	capab, capErr := s.verifyRuncapWithProof(r)
 	if capErr != nil {
-		writeError(w, http.StatusUnauthorized, capErr.Error())
+		writeRuncapError(w, capErr)
 		return
 	}
 	caller, err := s.runStore.Get(capab.RunID)
@@ -115,16 +123,30 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "the CloudEvent needs an id (ce-id) — it is the idempotency key")
 		return
 	}
-	if strings.TrimSpace(r.Header.Get(ceTypeHeader)) == "" {
+	receiver := strings.TrimSpace(r.Header.Get(ceTypeHeader))
+	if receiver == "" {
 		writeError(w, http.StatusBadRequest, "the CloudEvent needs a type (ce-type) — it names the receiver")
+		return
+	}
+	// The receiver becomes a token of the subject the hop is published on, so it must be an agent name
+	// before anything is sent: an arbitrary one could make the broker close the connection.
+	if !isAgentName(receiver) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"the CloudEvent type (ce-type) must name an agent: a DNS-1123 name of at most %d characters",
+			agentsv1beta1.AgentDeploymentNameMaxLength))
+		return
+	}
+	if !s.admitReceiver(w, r, self.RegistryID, caller.Namespace, receiver, messageID) {
 		return
 	}
 
 	msg := asyncbus.Message{
-		ID:      messageID,
-		Subject: asyncbus.Subject(self.RegistryID),
+		ID: messageID,
+		// Addressed to the receiver, so the hop waits in that agent's own queue: its pending count is what
+		// a queue-depth AgentScalingPolicy scales the agent on.
+		Subject: jsname.AgentSubject(self.RegistryID, caller.Namespace, receiver),
 		Data:    body,
-		Headers: asyncPublishHeaders(r.Header, caller.Namespace, self.RegistryID),
+		Headers: asyncPublishHeaders(r.Header, caller.Namespace, self.RegistryID, caller.Agent),
 	}
 	if err := s.asyncPublisher.Publish(r.Context(), msg); err != nil {
 		s.log.Error(err, "async publish failed", "agent", caller.Namespace+"/"+caller.Agent,
@@ -136,21 +158,53 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// isAgentName reports whether name can be an AgentDeployment's name.
+func isAgentName(name string) bool {
+	return len(name) <= agentsv1beta1.AgentDeploymentNameMaxLength && len(validation.IsDNS1123Subdomain(name)) == 0
+}
+
+// admitReceiver refuses a hop to an agent in another registry, which would never be delivered and would
+// count as work waiting in that agent's queue, scaling it for nothing. A hop to an agent in no registry is
+// accepted and logged: the dispatcher keeps a queue only for registry members, so it waits until the agent
+// joins one or the stream's retention drops it, and two agents created together can publish before the
+// controller has recorded the receiver. It writes the refusal and returns false.
+func (s *Server) admitReceiver(w http.ResponseWriter, r *http.Request, registryID, namespace, receiver, messageID string) bool {
+	row, ok, err := s.agentCapabilities.Get(r.Context(), namespace, receiver)
+	if err != nil {
+		s.log.Error(err, "async publish: reading the receiver's registry failed", "receiver", namespace+"/"+receiver)
+		writeError(w, http.StatusBadGateway, "the capability registry is unavailable")
+		return false
+	}
+	switch {
+	case ok && row.RegistryID != "" && row.RegistryID != registryID:
+		writeError(w, http.StatusForbidden, "the receiver belongs to another registry — async AMP does not cross registries")
+		return false
+	case !ok || row.RegistryID == "":
+		s.log.Info("async publish: the receiver belongs to no registry yet; the hop waits until it joins one "+
+			"or expires", "receiver", namespace+"/"+receiver, "messageId", messageID)
+	}
+	return true
+}
+
 // asyncPublishHeaders copies the CloudEvent binding headers and stamps the platform's authoritative
-// namespace + registry over the top. Copying rather than filtering keeps the wire format the AMP layer's
-// business; overwriting the two platform headers is what stops a pod choosing its own routing context.
-func asyncPublishHeaders(in http.Header, namespace, registryID string) map[string]string {
-	out := make(map[string]string, len(in)+2)
+// namespace, registry and sender over the top. Copying rather than filtering keeps the wire format the AMP
+// layer's business; overwriting the platform headers is what stops a pod choosing its own routing context
+// or its own identity.
+func asyncPublishHeaders(in http.Header, namespace, registryID, sender string) map[string]string {
+	out := make(map[string]string, len(in)+3)
 	for k := range in {
 		switch http.CanonicalHeaderKey(k) {
-		case http.CanonicalHeaderKey(runcap.HeaderName):
-			continue // never carry the run capability onto the bus
-		case headerAsyncNamespace, headerAsyncRegistry:
+		case http.CanonicalHeaderKey(runcap.HeaderName), http.CanonicalHeaderKey(runcap.PoPHeaderName):
+			continue // never carry the run capability, or its spent proof, onto the bus
+		case headerAsyncNamespace, headerAsyncRegistry, headerAsyncSender:
 			continue // caller-supplied routing context is discarded, then re-stamped below
+		case runcap.CloudEventAttestationHeader:
+			continue // the dispatcher attests the sender at delivery; a producer does not vouch for itself
 		}
 		out[k] = in.Get(k)
 	}
 	out[headerAsyncNamespace] = namespace
 	out[headerAsyncRegistry] = registryID
+	out[headerAsyncSender] = sender
 	return out
 }

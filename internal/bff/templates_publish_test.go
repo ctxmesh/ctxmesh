@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
@@ -55,14 +55,14 @@ func newTemplatesServer(t *testing.T, factory CallerClientFactory, store publish
 // agent — the only publishable kind).
 //
 //nolint:unparam // name/ns are fixed across these tests but kept as params for clarity + future reuse.
-func agentWithSourceSpec(name, ns, spec string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func agentWithSourceSpec(name, ns, spec string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   ns,
 			Annotations: map[string]string{expand.AnnotationSourceSpec: spec},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{Image: "img:live"},
+		Spec: agentsv1beta1.AgentDeploymentSpec{Image: "img:live"},
 	}
 }
 

@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, expect, vi } from "vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 // Register vitest-axe's `toHaveNoViolations` matcher for the WCAG 2.1 AA a11y gate (M100 UI99,
 // ADR-locked target). vitest-axe@0.1.0 ships no `exports` map, so its `extend-expect` subpath does
 // not resolve — we extend expect from the matchers module directly. NOTE: under jsdom axe cannot
@@ -10,6 +10,11 @@ import { cleanup } from "@testing-library/react";
 import { toHaveNoViolations } from "vitest-axe/dist/matchers.js";
 
 expect.extend({ toHaveNoViolations });
+
+// findBy*/waitFor give up after 1 s by default. Under a loaded machine (tier 0 beside other builds)
+// a drawer that renders in 50 ms idle took longer, and a correct test failed. A wider budget
+// changes nothing for a passing assertion; it only waits longer before reporting a real failure.
+configure({ asyncUtilTimeout: 5000 });
 
 // jsdom teardown between component tests so DOM state does not leak.
 afterEach(() => {

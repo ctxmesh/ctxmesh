@@ -16,7 +16,8 @@ limitations under the License.
 
 // Command token-service is the CENTRAL TOKEN SERVICE (ADR 0030 §1, the scaling split). One
 // Deployment in the locked credential namespace runs the credresolve backend behind an
-// internal mTLS API; the per-pod egress sidecars delegate cache-miss resolution to it, so
+// internal API that authenticates every caller (ADR 0154); the per-pod egress sidecars
+// delegate cache-miss resolution to it, so
 // grant-Secret reads + OAuth refresh are singleflighted GLOBALLY (one refresh across the
 // fleet), not per-pod — the two operations that hit ceilings are amortized here.
 package main
@@ -36,21 +37,25 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory/recall"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
-	"github.com/ctxmesh/ctxmesh/internal/credstore"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/storage"
 	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 )
 
@@ -101,11 +106,11 @@ func main() {
 }
 
 // newInClusterClient builds the token-service's in-cluster client with the schemes it reads through:
-// core (grant Secrets, via credresolve) plus both agents API versions.
+// core (grant Secrets, via credresolve) plus the agents API.
 func newInClusterClient() (client.Client, error) {
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		clientgoscheme.AddToScheme, agentsv1alpha1.AddToScheme, agentsv1beta1.AddToScheme,
+		clientgoscheme.AddToScheme, agentsv1beta1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			return nil, fmt.Errorf("build scheme: %w", err)
@@ -122,6 +127,19 @@ func newInClusterClient() (client.Client, error) {
 	return c, nil
 }
 
+// newCallerAuth builds the caller authentication over an in-cluster clientset for TokenReview.
+func newCallerAuth(log logr.Logger) (credplane.CallerAuth, error) {
+	restCfg, err := ctrl.GetConfig()
+	if err != nil {
+		return credplane.CallerAuth{}, fmt.Errorf("in-cluster config: %w", err)
+	}
+	cs, err := kubernetes.NewForConfig(restCfg)
+	if err != nil {
+		return credplane.CallerAuth{}, fmt.Errorf("build the TokenReview client: %w", err)
+	}
+	return callerAuth(log, cs, os.Getenv)
+}
+
 // wireMemoryAndKnowledge attaches the token-service's pgvector-backed data planes to the server:
 // long-term memory (ADR 0045) and managed-RAG retrieval (ADR 0061), plus the two OPTIONAL
 // retrieval-quality stages (cross-encoder rerank, ADR 0117; LLM query-rewrite, M140.3). All of it hangs
@@ -131,23 +149,24 @@ func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.L
 	// the gateway; agent launchers proxy memory.remember/search_agent here (no DB creds in agent pods). Enabled
 	// when the model gateway is reachable — reuses the already-open control-plane DB (cpDB).
 	if gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL")); gwURL != "" {
-		embedder := credplane.NewGatewayEmbedder(
+		embedder := embedding.NewGatewayEmbedder(
 			gwURL, os.Getenv("MODEL_GATEWAY_KEY"), &http.Client{Timeout: 30 * time.Second})
-		tsServer.WithMemory(agentmemory.NewPostgresStore(cpDB), embedder)
+		tsServer.WithMemory(recall.New(agentmemory.NewPostgresStore(cpDB), embedder, log))
 		log.Info("long-term memory enabled (ADR 0045): pgvector store + gateway embeddings", "gateway", gwURL)
 		// Managed-RAG retrieval (ADR 0061 Fork 3 + governance #8): the token-service is the sole holder of the
 		// pgvector knowledge store; agent launchers proxy the READ path here (no DB creds in agent pods). The
 		// ingestion WRITE path is the run-worker holding its own store (m68.6). Reuses the same control-plane DB
 		// (cpDB) + gateway embedder as long-term memory — enabled on the same gateway-reachable condition.
-		tsServer.WithKnowledge(knowledge.NewPostgresStore(cpDB), embedder)
+		searcher := retrieval.NewSearcher(knowledge.NewPostgresStore(cpDB), embedder, log)
+		tsServer.WithKnowledge(searcher)
 		log.Info("managed-RAG retrieval enabled (ADR 0061): pgvector knowledge store + gateway embeddings", "gateway", gwURL)
 
 		// Cross-encoder rerank (M140.2, ADR 0117): an OPTIONAL retrieval-quality stage. Wired when a rerank
 		// service URL is set; only ACTIVATES per request when KNOWLEDGE_RERANK="true". Called directly (not via
 		// the gateway) — an internal pipeline stage, not a model call. Fail-open: a dead reranker never breaks
-		// retrieval (2s timeout + store-order fallback in the handler).
+		// retrieval (2s timeout + store-order fallback in the Searcher).
 		if rerankURL := strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL")); rerankURL != "" {
-			tsServer.WithReranker(credplane.NewHTTPReranker(rerankURL, nil))
+			searcher.WithReranker(retrieval.NewHTTPReranker(rerankURL, nil))
 			log.Info("cross-encoder rerank wired (M140.2, ADR 0117): rerank service reachable", "reranker", rerankURL)
 		}
 
@@ -155,7 +174,7 @@ func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.L
 		// Wired when a rewrite model is set; only ACTIVATES per request when KNOWLEDGE_QUERY_REWRITE="true".
 		// Fail-open: a rewrite failure falls back to the raw query.
 		if rewriteModel := strings.TrimSpace(os.Getenv("KNOWLEDGE_REWRITE_MODEL")); rewriteModel != "" {
-			tsServer.WithRewriter(credplane.NewGatewayRewriter(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), rewriteModel, nil))
+			searcher.WithRewriter(retrieval.NewGatewayRewriter(gwURL, os.Getenv("MODEL_GATEWAY_KEY"), rewriteModel, nil))
 			log.Info("LLM query-rewrite wired (M140.3): gateway rewriter reachable", "model", rewriteModel)
 		}
 	}
@@ -163,9 +182,21 @@ func wireMemoryAndKnowledge(tsServer *credplane.Server, cpDB *sql.DB, log logr.L
 
 func run(log logr.Logger) error {
 	credentialNS := strings.TrimSpace(os.Getenv("MCP_CREDENTIAL_NAMESPACE"))
+	// Parsed before anything waits on the network, so a bad CREDENTIAL_BACKEND* value refuses to
+	// start at once, naming the variable (ADR 0152 §1).
+	backendCfg, err := storage.ConfigFromEnv(os.Environ())
+	if err != nil {
+		return fmt.Errorf("credential backend configuration: %w", err)
+	}
 
 	// In-cluster client: reads grant Secrets (credresolve) + ToolRegistry auth-type.
 	k8sClient, err := newInClusterClient()
+	if err != nil {
+		return err
+	}
+	// Every caller is authenticated by a TokenReview of its projected token (ADR 0154); decided before
+	// anything waits on the network, so a bad capability key refuses to start at once.
+	auth, err := newCallerAuth(log)
 	if err != nil {
 		return err
 	}
@@ -213,61 +244,33 @@ func run(log logr.Logger) error {
 		return orgScopedFromLabels(tr.Labels), nil
 	}
 
-	// The credential backend is CONFIG-SELECTED per the CredentialStore / ClusterCredentialStore
-	// CRDs (ADR 0032); with no CRD present it is the built-in kubernetes backend, so existing
-	// installs are unchanged. Backends are shared per resolved config, so the cache + singleflight
-	// + optimistic writeback stay global across every delegating sidecar (ADR 0030 §1).
 	auditFn := func(e credresolve.AuditEvent) {
 		log.Info("grant use", "action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
 	}
-	router := credstore.NewRouter(k8sClient, credstore.Deps{
+	resolver, migrated, err := credentialResolver(logr.NewContext(context.Background(), log), backendCfg, storage.Deps{
 		Client:                     k8sClient,
 		DefaultCredentialNamespace: credentialNS,
 		Exchanger:                  &credresolve.HTTPTokenExchanger{},
 		AuthTypeIsOAuth:            authTypeIsOAuth,
 		IsOrgScoped:                isOrgScoped,
 		Audit:                      auditFn,
+		StoreRetry: func(err error, in time.Duration) {
+			log.Info("credential store not ready yet; retrying", "retryIn", in, "err", err.Error())
+		},
 	})
-
-	// A legacy k8s backend — the source for a one-time migration and the fallback for the
-	// dual-read cutover window (m28.2, ADR 0032).
-	k8sBackend := credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
-		Client:              k8sClient,
-		CredentialNamespace: credentialNS,
-		Exchanger:           &credresolve.HTTPTokenExchanger{},
-		AuthTypeIsOAuth:     authTypeIsOAuth,
-		OrgCredential:       credresolve.NewOrgCredentialFunc(k8sClient, credentialNS, isOrgScoped),
-		Audit:               auditFn,
-	})
-
-	// One-time backfill: TOKEN_SERVICE_MIGRATE_GRANTS=true lifts every legacy k8s grant into
-	// the config-selected backend (per namespace via the Router), logs the count, and exits.
-	if envTrue("TOKEN_SERVICE_MIGRATE_GRANTS") {
-		n, mErr := credstore.Migrate(context.Background(), k8sBackend, router)
-		if mErr != nil {
-			return fmt.Errorf("migrate grants: %w", mErr)
-		}
-		log.Info("grant migration complete", "migrated", n)
-		return nil
+	if err != nil || migrated {
+		return err
 	}
 
-	// Dual-read cutover window: TOKEN_SERVICE_DUAL_READ=true resolves fall back to the legacy
-	// k8s backend on a miss, so a cutover to a non-kubernetes backend loses no connected account.
-	var resolver credresolve.CredentialResolver = router
-	if envTrue("TOKEN_SERVICE_DUAL_READ") {
-		resolver = credstore.NewDualRead(router, k8sBackend)
-		log.Info("dual-read enabled: legacy k8s grants still resolve during the migration window")
-	}
-
-	tsServer := credplane.NewServer(resolver, log)
+	tsServer := credplane.NewServer(resolver, auth, log)
 	wireMemoryAndKnowledge(tsServer, cpDB, log)
 	handler := tsServer.Handler()
 	listenAddr := envOr("TOKEN_SERVICE_LISTEN_ADDR", defaultListenAddr)
 	srv := &http.Server{Addr: listenAddr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
 
-	// mTLS: only platform sidecars holding a client cert from the platform CA may call the
-	// credential API. Certs are mounted from a Secret (Helm, m25.8). Absent ⇒ plain HTTP with
-	// a LOUD warning (dev only — never run the credential API without mTLS in production).
+	// TLS encrypts the wire and lets callers verify the service; it does not authenticate callers,
+	// which the projected-token review above does on every request. Certs are mounted from a Secret
+	// (Helm, m25.8). Absent ⇒ plain HTTP with a LOUD warning (dev only).
 	certFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TLS_KEY_FILE"))
 	caFile := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_CA_FILE"))
@@ -279,18 +282,10 @@ func run(log logr.Logger) error {
 	//   - serving = a serving cert+key is provisioned → the wire is encrypted + the server is verifiable.
 	//   - E-2 (mutual): a client CA is ALSO provisioned → REQUIRE + verify a client cert.
 	//   - E-1 (server-auth): serving cert, no client CA → present the serving cert, don't require a client
-	//     cert (client identity is the app-layer run capability, ADR 0030). The honest GA bar.
+	//     cert (callers authenticate with projected tokens, ADR 0154). The honest GA bar.
 	serving := certFile != "" && keyFile != "" && filesExist(certFile, keyFile)
 	clientCAPresent := caFile != "" && filesExist(caFile)
-	// clientAuth knob: default = require iff a client CA is provisioned (NEVER downgrade an operator who
-	// deployed mutual material — ADR 0102 §3); TOKEN_SERVICE_CLIENT_AUTH=require|none forces it.
-	requireClient := clientCAPresent
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_AUTH"))) {
-	case "require":
-		requireClient = true
-	case "none":
-		requireClient = false
-	}
+	requireClient := requireClientCert(clientCAPresent)
 	if requireClient && !clientCAPresent {
 		return fmt.Errorf("TOKEN_SERVICE_CLIENT_AUTH=require but no client CA is provisioned " +
 			"(missing/absent TOKEN_SERVICE_CLIENT_CA_FILE) — refusing to start a mutual-mTLS server without a client CA")
@@ -318,7 +313,8 @@ func run(log logr.Logger) error {
 		log.Info("token-service TLS enabled", "posture", posture)
 	} else {
 		log.Info("WARNING: token-service running WITHOUT TLS (no TOKEN_SERVICE_TLS_CERT_FILE/KEY_FILE) — " +
-			"the credential API is unauthenticated; provision platform certs before production (ADR 0030 §1 / ADR 0102 §3)")
+			"callers' tokens and credentials cross the wire in plaintext; " +
+			"provision platform certs before production (ADR 0102 §3)")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -356,6 +352,20 @@ func run(log logr.Logger) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
 		defer cancel()
 		return srv.Shutdown(shutdownCtx)
+	}
+}
+
+// requireClientCert is the clientAuth knob: require a client certificate iff a client CA is provisioned
+// (NEVER downgrade an operator who deployed mutual material — ADR 0102 §3); TOKEN_SERVICE_CLIENT_AUTH=
+// require|none forces it.
+func requireClientCert(clientCAPresent bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("TOKEN_SERVICE_CLIENT_AUTH"))) {
+	case "require":
+		return true
+	case "none":
+		return false
+	default:
+		return clientCAPresent
 	}
 }
 
@@ -411,6 +421,55 @@ func serverTLS(certFile, keyFile, caFile string, requireClient bool) (*tls.Confi
 	return cfg, watcher, nil
 }
 
+// credentialResolver builds the configured credential backend (ADR 0152 §1): one backend, shared by
+// every delegating sidecar, so the cache + singleflight + optimistic writeback stay global (ADR 0030
+// §1). migrated is true when TOKEN_SERVICE_MIGRATE_GRANTS ran the one-time backfill; the process then
+// exits without serving.
+func credentialResolver(
+	ctx context.Context, cfg storage.Config, deps storage.Deps,
+) (resolver credresolve.CredentialResolver, migrated bool, err error) {
+	log := logr.FromContextOrDiscard(ctx)
+	backend, err := storage.BackendFor(ctx, cfg, deps)
+	if err != nil {
+		return nil, false, fmt.Errorf("build the %s credential backend: %w", cfg.Backend(), err)
+	}
+	log.Info("credential backend ready", "backend", cfg.Backend())
+
+	// A legacy k8s backend — the source for a one-time migration and the fallback for the
+	// dual-read cutover window (m28.2, ADR 0032).
+	k8sBackend := secretbackend.New(secretbackend.Config{
+		Client:              deps.Client,
+		CredentialNamespace: deps.DefaultCredentialNamespace,
+		Exchanger:           deps.Exchanger,
+		AuthTypeIsOAuth:     deps.AuthTypeIsOAuth,
+		OrgCredential:       secretbackend.OrgCredentialFunc(deps.Client, deps.DefaultCredentialNamespace, deps.IsOrgScoped),
+		Audit:               deps.Audit,
+	})
+
+	// One-time backfill: TOKEN_SERVICE_MIGRATE_GRANTS=true lifts every legacy k8s grant into
+	// the configured backend, logs the count, and exits.
+	if envTrue("TOKEN_SERVICE_MIGRATE_GRANTS") {
+		writer, ok := backend.(credresolve.GrantWriter)
+		if !ok {
+			return nil, false, fmt.Errorf("migrate grants: the %s credential backend does not support writes", cfg.Backend())
+		}
+		n, mErr := storage.Migrate(ctx, k8sBackend, writer)
+		if mErr != nil {
+			return nil, false, fmt.Errorf("migrate grants: %w", mErr)
+		}
+		log.Info("grant migration complete", "migrated", n)
+		return nil, true, nil
+	}
+
+	// Dual-read cutover window: TOKEN_SERVICE_DUAL_READ=true resolves fall back to the legacy
+	// k8s backend on a miss, so a cutover to a non-kubernetes backend loses no connected account.
+	if envTrue("TOKEN_SERVICE_DUAL_READ") {
+		log.Info("dual-read enabled: legacy k8s grants still resolve during the migration window")
+		return storage.NewDualRead(backend, k8sBackend), false, nil
+	}
+	return backend, false, nil
+}
+
 func envOr(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v
@@ -419,14 +478,7 @@ func envOr(key, fallback string) string {
 }
 
 // envTrue reports whether an env var is a truthy string.
-func envTrue(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
-	case "true", "1", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
+func envTrue(key string) bool { return isTruthy(os.Getenv(key)) }
 
 // filesExist reports whether every path is a readable regular file — used to gate mTLS on
 // an OPTIONAL cert Secret actually being mounted (absent ⇒ degrade to plain HTTP, not crash).

@@ -38,7 +38,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
 )
 
@@ -71,20 +72,20 @@ func getDetail(t *testing.T, s *Server, name string) *httptest.ResponseRecorder 
 // Knative URL, readiness/phase, the bindings referencing THIS agent (tool +
 // memory), and the version history — with []-not-null slices — read caller-scoped.
 func TestAgentDetailHappyPath(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "img:1",
 			ExecutionModel: "serving",
 			Role:           "worker",
 			PromptRef:      "system-prompt-v2",
 			Env:            []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "anthropic"}},
-			Scaling:        &agentsv1alpha1.ScalingSpec{Min: 1, Max: 5},
+			Scaling:        &agentsv1beta1.ScalingSpec{Min: 1, Max: 5},
 			// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired):
 			// the detail projection surfaces it as a "memory" binding row.
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session"},
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{Scope: "session"},
 		},
-		Status: agentsv1alpha1.AgentDeploymentStatus{
+		Status: agentsv1beta1.AgentDeploymentStatus{
 			Conditions:    []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "serving")},
 			URL:           "http://echo.team-a.example",
 			LatestVersion: "echo-abc123",
@@ -92,27 +93,21 @@ func TestAgentDetailHappyPath(t *testing.T) {
 	}
 	// A tool binding referencing echo, plus a decoy binding for a different agent
 	// that must NOT appear. (Memory comes from ad.Spec.SessionMemory above.)
-	toolBinding := &agentsv1alpha1.MCPToolBinding{
+	toolBinding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://x"}},
-		Status:     agentsv1alpha1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "reg", Mode: "remote", Server: agentsv1beta1.ToolServer{URL: "http://x"}},
+		Status:     agentsv1beta1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
 	}
-	decoyBinding := &agentsv1alpha1.MCPToolBinding{
+	decoyBinding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "other-tool", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.MCPToolBindingSpec{AgentRef: "other", ToolName: "nope", RegistryRef: "reg", Mode: "remote", Server: agentsv1alpha1.ToolServer{URL: "http://y"}},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "other", ToolName: "nope", RegistryRef: "reg", Mode: "remote", Server: agentsv1beta1.ToolServer{URL: "http://y"}},
 	}
-	version := &agentsv1alpha1.AgentVersion{
-		ObjectMeta: metav1.ObjectMeta{Name: "echo-abc123", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: "echo", Snapshot: agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"}},
-	}
-	decoyVersion := &agentsv1alpha1.AgentVersion{
-		ObjectMeta: metav1.ObjectMeta{Name: "other-v1", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentVersionSpec{DeploymentName: "other", Snapshot: agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"}},
-	}
+	ad.UID = echoUID
+	versions := agentversion.NewMemStore()
+	recordVersion(t, versions, "echo", echoUID, "echo-abc123", "img:1")
+	recordVersion(t, versions, "other", "other-uid", "other-v1", "img:1")
 
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithObjects(ad, toolBinding, decoyBinding, version, decoyVersion).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s := versionServer(t, versions, allowEveryReview, ad, toolBinding, decoyBinding)
 
 	rec := getDetail(t, s, "echo")
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -162,7 +157,7 @@ func TestAgentDetailHappyPath(t *testing.T) {
 // fields (U14, m101.4) — the banner previously keyed on a `labels` map the BFF never sent (dead in
 // prod). NeedsRebinding comes from the label; ForkUnresolvedRefs is parsed from the annotation.
 func TestAgentDetailForkNeedsRebinding(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "forked",
 			Namespace: detailNS,
@@ -171,8 +166,8 @@ func TestAgentDetailForkNeedsRebinding(t *testing.T) {
 				annForkUnresolvedRefs: `["model route: gpt4","prompt: greeting"]`,
 			},
 		},
-		Spec:   agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status: agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionFalse, "NotReady", "pending")}},
+		Spec:   agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status: agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionFalse, "NotReady", "pending")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -189,10 +184,10 @@ func TestAgentDetailForkNeedsRebinding(t *testing.T) {
 
 // TestAgentDetailNoForkStateIsClean proves a normal agent carries no needs-rebinding state.
 func TestAgentDetailNoForkStateIsClean(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "clean", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -208,10 +203,10 @@ func TestAgentDetailNoForkStateIsClean(t *testing.T) {
 // TestAgentDetailPublishedState proves the durable published-template state is projected onto the
 // detail (U13, m101.4) — so the badge survives a reload (it was in-session only).
 func TestAgentDetailPublishedState(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -235,10 +230,10 @@ func TestAgentDetailPublishedState(t *testing.T) {
 
 // TestAgentDetailNotPublishedIsNil proves an unpublished agent carries no published state.
 func TestAgentDetailNotPublishedIsNil(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Deployed", "ok")}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -281,13 +276,13 @@ func TestAgentDetailForbiddenAgentIs403(t *testing.T) {
 // list is degraded (200 with empty bindings), not fatal — the caller can read the
 // agent, so hiding it behind a binding-RBAC 403 would be worse than a partial view.
 func TestAgentDetailForbiddenBindingsIsDegraded(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
 		WithInterceptorFuncs(interceptor.Funcs{
-			// The agent Get succeeds; the binding/version LISTs are forbidden.
+			// The agent Get succeeds; the binding LIST is forbidden.
 			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "mcptoolbindings"}, "", errors.New("viewer denied"),
@@ -311,9 +306,9 @@ func TestAgentDetailForbiddenBindingsIsDegraded(t *testing.T) {
 // TestAgentDetailScalingDefault proves a nil spec.Scaling projects the CRD default
 // (min=0, max=3) so the page never shows a bare 0/0.
 func TestAgentDetailScalingDefault(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -336,26 +331,26 @@ func TestAgentDetailScalingDefault(t *testing.T) {
 // parallelLimit), and resilience (modelCall + toolCall + circuitBreaker).
 func TestAgentDetailRuntimeProjected(t *testing.T) {
 	schemaRaw := []byte(`{"type":"object","properties":{"answer":{"type":"string"}}}`)
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "img:1",
-			Runtime: &agentsv1alpha1.RuntimeSpec{
+			Runtime: &agentsv1beta1.RuntimeSpec{
 				OutputSchema: &k8sruntime.RawExtension{Raw: schemaRaw},
-				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+				ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 					Default: "allow",
-					Overrides: []agentsv1alpha1.ToolPolicyOverride{
+					Overrides: []agentsv1beta1.ToolPolicyOverride{
 						{Name: "send_email", Rule: "require-approval", Retryable: false},
 					},
 					ForcedChoice:  "auto",
 					ParallelLimit: 4,
 				},
-				Resilience: &agentsv1alpha1.ResilienceSpec{
-					ModelCall: &agentsv1alpha1.CallResilience{TimeoutSeconds: 30, MaxRetries: 2},
-					ToolCall: &agentsv1alpha1.ToolCallResilience{
+				Resilience: &agentsv1beta1.ResilienceSpec{
+					ModelCall: &agentsv1beta1.CallResilience{TimeoutSeconds: 30, MaxRetries: 2},
+					ToolCall: &agentsv1beta1.ToolCallResilience{
 						TimeoutSeconds: 10,
 						MaxRetries:     1,
-						CircuitBreaker: &agentsv1alpha1.CircuitBreakerSpec{FailureThreshold: 5, CooldownSeconds: 60},
+						CircuitBreaker: &agentsv1beta1.CircuitBreakerSpec{FailureThreshold: 5, CooldownSeconds: 60},
 					},
 				},
 			},
@@ -398,9 +393,9 @@ func TestAgentDetailRuntimeProjected(t *testing.T) {
 // JSON field is omitted entirely (nil, not an empty object) so agents without a
 // runtime config don't produce noise on the wire.
 func TestAgentDetailRuntimeAbsentIsNil(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "team-a"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -422,14 +417,15 @@ func TestAgentDetailRuntimeAbsentIsNil(t *testing.T) {
 // real cluster. It records the last request so a test can assert the follow/tail
 // flags and the label selector flowed through.
 type fakePodLogAccessor struct {
-	pods        []corev1.Pod
-	listErr     error
-	stream      io.ReadCloser
-	streamErr   error
-	gotFollow   bool
-	gotTail     *int64
-	gotPod      string
-	gotSelector string
+	pods         []corev1.Pod
+	listErr      error
+	stream       io.ReadCloser
+	streamErr    error
+	gotFollow    bool
+	gotTail      *int64
+	gotPod       string
+	gotContainer string
+	gotSelector  string
 }
 
 func (a *fakePodLogAccessor) ListPods(ctx context.Context, namespace, labelSelector string) (*corev1.PodList, error) {
@@ -442,6 +438,7 @@ func (a *fakePodLogAccessor) ListPods(ctx context.Context, namespace, labelSelec
 
 func (a *fakePodLogAccessor) StreamPodLog(ctx context.Context, namespace, pod, container string, follow bool, tailLines *int64) (io.ReadCloser, error) {
 	a.gotPod = pod
+	a.gotContainer = container
 	a.gotFollow = follow
 	a.gotTail = tailLines
 	if a.streamErr != nil {
@@ -574,6 +571,100 @@ func TestAgentLogsPodNotRunningIsWaiting(t *testing.T) {
 	assert.Empty(t, acc.gotPod)
 }
 
+// knativePod is an agent pod as Knative runs it: the agent's container beside queue-proxy.
+func knativePod(phase corev1.PodPhase, user corev1.ContainerStatus) corev1.Pod {
+	p := runningPod("echo-xyz", time.Now())
+	p.Spec.Containers = []corev1.Container{{Name: agentUserContainer}, {Name: "queue-proxy"}}
+	p.Status.Phase = phase
+	user.Name = agentUserContainer
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{
+		user,
+		{Name: "queue-proxy", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+	}
+	return p
+}
+
+var (
+	userRunning  = corev1.ContainerStatus{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}
+	userCreating = corev1.ContainerStatus{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}}}
+)
+
+// The API server refuses a log read with no container on a pod with two, so the tail names the
+// agent's own container unless the request or the pod's default-container annotation says otherwise.
+func TestAgentLogsTailsTheAgentsContainer(t *testing.T) {
+	for _, c := range []struct {
+		name, query, annotation, want string
+	}{
+		{"by default, the agent's container", "", "", agentUserContainer},
+		{"the one the request names", "container=queue-proxy", "", "queue-proxy"},
+		{"the pod's declared default", "", "queue-proxy", "queue-proxy"},
+		{"never a declared default the pod does not have", "", "sidecar", agentUserContainer},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			pod := knativePod(corev1.PodRunning, userRunning)
+			if c.annotation != "" {
+				pod.Annotations = map[string]string{defaultContainerAnnotation: c.annotation}
+			}
+			acc := &fakePodLogAccessor{pods: []corev1.Pod{pod}, stream: io.NopCloser(strings.NewReader("hello\n"))}
+			s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+			body := getLogs(t, s, c.query, true).Body.String()
+			assert.Equal(t, c.want, acc.gotContainer)
+			assert.Contains(t, body, "event: log\ndata: hello\n")
+		})
+	}
+}
+
+// A pod that exists but has no log yet is the agent starting, not a broken tail: the console
+// asks again until the container runs. A container that ran before still has a log to read.
+func TestAgentLogsWaitForTheContainerToStart(t *testing.T) {
+	crashed := corev1.ContainerStatus{
+		State:                corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}},
+		LastTerminationState: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+		RestartCount:         3,
+	}
+	for _, c := range []struct {
+		name    string
+		pod     corev1.Pod
+		waiting bool
+	}{
+		{"a pod still pending", knativePod(corev1.PodPending, userCreating), true},
+		{"a running pod whose agent container has not started", knativePod(corev1.PodRunning, userCreating), true},
+		{"a running agent container", knativePod(corev1.PodRunning, userRunning), false},
+		{"a container restarting after a crash keeps its last log", knativePod(corev1.PodRunning, crashed), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			acc := &fakePodLogAccessor{pods: []corev1.Pod{c.pod}, stream: io.NopCloser(strings.NewReader("hello\n"))}
+			s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+			rec := getLogs(t, s, "follow=true", true)
+			require.Equal(t, http.StatusOK, rec.Code)
+			body := rec.Body.String()
+			if c.waiting {
+				assert.Contains(t, body, "event: waiting\n")
+				assert.NotContains(t, body, "event: error")
+				assert.Empty(t, acc.gotPod, "no log read is attempted before the container starts")
+				return
+			}
+			assert.Contains(t, body, "event: log\ndata: hello\n")
+			assert.NotContains(t, body, "event: waiting")
+		})
+	}
+}
+
+// A started container whose log cannot be read is a real failure, and still says so.
+func TestAgentLogsAStreamFailureOnAStartedContainerIsAnError(t *testing.T) {
+	acc := &fakePodLogAccessor{
+		pods:      []corev1.Pod{knativePod(corev1.PodRunning, userRunning)},
+		streamErr: apierrors.NewBadRequest("kubelet unreachable"),
+	}
+	s := newCallerServer(t, &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).Build(), podLogs: acc})
+
+	body := getLogs(t, s, "follow=true", true).Body.String()
+	assert.Contains(t, body, "event: error\ndata: failed to open log stream\n")
+	assert.NotContains(t, body, "event: waiting")
+}
+
 // TestAgentLogsAnonIs401 proves a request with no bearer token is rejected 401
 // BEFORE any K8s call — the caller-scoped seam never falls back to the BFF SA.
 func TestAgentLogsAnonIs401(t *testing.T) {
@@ -599,11 +690,11 @@ func TestSelectActivePod(t *testing.T) {
 	newer := runningPod("run-new", base.Add(2*time.Hour))
 
 	// Running beats a newer Pending.
-	assert.Equal(t, "run-old", selectActivePod([]corev1.Pod{pending, older}))
+	assert.Equal(t, "run-old", activePod([]corev1.Pod{pending, older}).Name)
 	// Between two Running, the newer wins.
-	assert.Equal(t, "run-new", selectActivePod([]corev1.Pod{older, newer}))
-	// No pods → "".
-	assert.Equal(t, "", selectActivePod(nil))
+	assert.Equal(t, "run-new", activePod([]corev1.Pod{older, newer}).Name)
+	// No pods → nil.
+	assert.Nil(t, activePod(nil))
 }
 
 // TestParseTailLines proves the bound: default when absent/invalid, honored when in
@@ -634,10 +725,10 @@ func getRuns(t *testing.T, s *Server, ns, name, query string) *httptest.Response
 }
 
 // agentFixture is a minimal AgentDeployment the caller can Get for the runs route.
-func agentFixture(ns, name string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func agentFixture(ns, name string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 }
 
@@ -747,12 +838,16 @@ func TestAgentRunsUpstreamErrorIs502(t *testing.T) {
 
 // TestAgentRunsLangfuseAbsentIs501: when the Langfuse adapter is not wired the route
 // serves an honest 501 (the m14.8 degrade), never a 500 or a fabricated empty list.
-func TestAgentRunsLangfuseAbsentIs501(t *testing.T) {
+// This asserted 501. A stock install has no trace store, so that 501 meant the agent page could never
+// show a run; the runs now come from the run store (ADR 0150), and a 501 here would be the regression.
+// TestStoreAgentRuns_ListsTheAgentsRuns holds the full contract.
+func TestAgentRunsLangfuseAbsentServesTheRunStore(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agentFixture("default", "foo")).Build()
 	s := serverWithCallerAndAdapters(t, &fakeCallerClientFactory{client: c}, Adapters{}) // no Langfuse
 
 	rec := getRuns(t, s, "default", "foo", "")
-	assert.Equal(t, http.StatusNotImplemented, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"namespace":"default","name":"foo","runs":[]}`, rec.Body.String())
 }
 
 // TestAgentRunsAnonIs401: no bearer token → 401 before any K8s or Langfuse call.

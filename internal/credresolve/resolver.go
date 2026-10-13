@@ -42,7 +42,7 @@ type Credential struct {
 // the resolver operates purely in user-hash space and never sees a raw username.
 //
 // This is the seam the injecting egress sidecar and the central token service both
-// implement/consume (ADR 0030). K8sBackend is the self-hosted baseline; external-vault
+// implement/consume (ADR 0030). secretbackend.Backend (grant Secrets) is the self-hosted baseline; external-vault
 // backends (Scalekit / Auth0 / Vault) implement the same interface for managed installs.
 type CredentialResolver interface {
 	// Resolve returns the credential for (boundary, server, userHash). boundary is the
@@ -75,7 +75,7 @@ type Grant struct {
 	ServerURL string
 }
 
-// GrantWriter persists a user's grant to the backend the CredentialStore selects — so a
+// GrantWriter persists a user's grant to the configured credential backend — so a
 // grant minted by the OAuth callback lands in the config-selected store (kubernetes /
 // postgres / remote), not always a k8s Secret. The write is an UPSERT (re-consent replaces).
 type GrantWriter interface {

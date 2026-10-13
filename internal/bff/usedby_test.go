@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func usedByReq(t *testing.T, s *Server, kind, name string) UsedByResponse {
@@ -48,20 +48,20 @@ func usedByReq(t *testing.T, s *Server, kind, name string) UsedByResponse {
 // reference a PromptVersion (spec.promptRef) or a ModelRoute (MODEL_ROUTE env) —
 // and not the agents that don't (m18.8).
 func TestUsedBy_ByPromptAndRoute(t *testing.T) {
-	usesPrompt := &agentsv1alpha1.AgentDeployment{
+	usesPrompt := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "a-prompt", Namespace: "default"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "i:1", PromptRef: "sys-v2"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "i:1", PromptRef: "sys-v2"},
 	}
-	usesRoute := &agentsv1alpha1.AgentDeployment{
+	usesRoute := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "a-route", Namespace: "default"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "i:1",
 			Env:   []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "anthropic"}},
 		},
 	}
-	unrelated := &agentsv1alpha1.AgentDeployment{
+	unrelated := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "a-none", Namespace: "default"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "i:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "i:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(usesPrompt, usesRoute, unrelated).Build()
@@ -83,18 +83,18 @@ func TestUsedBy_ByPromptAndRoute(t *testing.T) {
 // TestUsedBy_BySecretBinding proves it returns the ModelRoutes referencing a
 // SecretBinding.
 func TestUsedBy_BySecretBinding(t *testing.T) {
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "anthropic", Namespace: "default"},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "anthropic", Model: "m", Priority: 1, SecretBindingRef: "anthropic-key",
 			}},
 		},
 	}
-	other := &agentsv1alpha1.ModelRoute{
+	other := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: "mock", Namespace: "default"},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{Provider: "mock", Model: "m", Priority: 1}},
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{Provider: "mock", Model: "m", Priority: 1}},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(route, other).Build()

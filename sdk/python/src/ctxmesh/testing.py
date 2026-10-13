@@ -507,7 +507,8 @@ class MeshStub(_BaseStub):
             response if response is not None else {"ok": True, "answer": "from the peer"}
         )
         #: target -> the status the launcher would answer with: 403 caller_not_allowed
-        #: or cross_registry_denied, 404 unknown_target, 502 blocked.
+        #: or cross_registry_denied, 404 unknown_target, 502 blocked, 503
+        #: attestation_unavailable.
         self.deny = deny or {}
         super().__init__()
 
@@ -516,7 +517,11 @@ class MeshStub(_BaseStub):
             target = req.path.rstrip("/").rsplit("/", 1)[-1]
             status = self.deny.get(target)
             if status:
-                reason = {403: "caller_not_allowed", 404: "unknown_target"}.get(
+                reason = {
+                    403: "caller_not_allowed",
+                    404: "unknown_target",
+                    503: "attestation_unavailable",
+                }.get(
                     status, "upstream_failure"
                 )
                 body = json.dumps({"error": reason}).encode()

@@ -27,8 +27,9 @@ package main
 //  2. the consumer dedupe (messageId idempotency, M11 fail-closed): first-seen
 //     invokes the agent; a duplicate within the TTL is acked WITHOUT re-invoking;
 //     an unreachable seen-set FAILS CLOSED (NACK — not processed, broker retries);
-//     a transient error followed by a successful MarkSeen → the message is
-//     processed exactly once (no double-process).
+//     a transient error followed by a successful claim → the message is
+//     processed exactly once (no double-process); a failed invoke releases the
+//     message id so the broker's retry is processed.
 //
 // Run with -race. No real Valkey / broker: the SeenSet and the invoker are stubs.
 
@@ -47,6 +48,8 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	cehttp "github.com/cloudevents/sdk-go/v2/protocol/http"
 	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/ctxmesh/ctxmesh/internal/deliveryclaim"
 )
 
 // sampleEnvelope builds a representative platform envelope with a nested opaque
@@ -190,22 +193,21 @@ func TestCloudEventToEnvelope_Errors(t *testing.T) {
 
 // ── dedupe / consume ──────────────────────────────────────────────────────────
 
-// fakeSeenSet is an in-memory SeenSet stub. When failWith is set, every MarkSeen
-// returns it (to exercise fail-closed NACK behaviour); otherwise it tracks seen
-// ids like Valkey SetNX (first sighting → true, subsequent → false). failAfter,
-// when positive, injects failWith for that many calls and then clears it so
-// subsequent calls succeed — used to simulate a transient store error.
+// fakeSeenSet is an in-memory SeenSet with the claim semantics of deliveryclaim. When
+// failWith is set, every Claim returns it (to exercise fail-closed NACK behaviour).
+// failAfter, when positive, injects failWith for that many calls and then clears it, to
+// simulate a transient store error. calls counts Claims.
 type fakeSeenSet struct {
 	mu        sync.Mutex
-	seen      map[string]bool
+	ids       map[string]string // messageID → "done" or the holder's token
 	failWith  error
 	failAfter int // if > 0: fail this many calls, then clear failWith
 	calls     atomic.Int32
 }
 
-func newFakeSeenSet() *fakeSeenSet { return &fakeSeenSet{seen: map[string]bool{}} }
+func newFakeSeenSet() *fakeSeenSet { return &fakeSeenSet{} }
 
-func (f *fakeSeenSet) MarkSeen(_ context.Context, id string, _ time.Duration) (bool, error) {
+func (f *fakeSeenSet) Claim(_ context.Context, id, token string, _ time.Duration) (deliveryclaim.State, error) {
 	f.calls.Add(1)
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -217,13 +219,36 @@ func (f *fakeSeenSet) MarkSeen(_ context.Context, id string, _ time.Duration) (b
 				f.failWith = nil // transient: clear after exhausting the fail budget
 			}
 		}
-		return false, err
+		return "", err
 	}
-	if f.seen[id] {
-		return false, nil // duplicate
+	if f.ids == nil {
+		f.ids = map[string]string{}
 	}
-	f.seen[id] = true
-	return true, nil // first-seen
+	switch cur, ok := f.ids[id]; {
+	case !ok:
+		f.ids[id] = token
+		return deliveryclaim.Claimed, nil
+	case cur == "done":
+		return deliveryclaim.Done, nil
+	default:
+		return deliveryclaim.InFlight, nil
+	}
+}
+
+func (f *fakeSeenSet) Complete(_ context.Context, id string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ids[id] = "done"
+	return nil
+}
+
+func (f *fakeSeenSet) Release(_ context.Context, id, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.ids[id] == token {
+		delete(f.ids, id)
+	}
+	return nil
 }
 
 // newTestConsumer builds an asyncConsumer with a counting invoker. invokeCount
@@ -238,8 +263,16 @@ func newTestConsumer(seen SeenSet, invokeStatus int, invokeErr error) (*asyncCon
 			atomic.AddInt32(&invokeCount, 1)
 			return invokeStatus, invokeErr
 		},
+		guard: acceptingDeliveryGuard(),
 	}
 	return c, &invokeCount
+}
+
+// acceptingDeliveryGuard admits unattested deliveries, as the accept posture does, so a test of dedupe,
+// offload or ack semantics is not a test of admission.
+func acceptingDeliveryGuard() *ampGuard {
+	return newAMPGuard(ampConfig{SelfName: "worker-agent", Namespace: "team-a", AcceptUnattested: true},
+		noop.NewTracerProvider().Tracer("test"), nil, "")
 }
 
 // cloudEventRequest builds an HTTP request carrying env as a CloudEvent (binary
@@ -301,7 +334,7 @@ func TestConsume_FailClosed_WhenSeenSetErrors(t *testing.T) {
 	// A seen-set that always errors (Valkey persistently unreachable): the
 	// consumer must NACK (503) and NOT invoke the agent — fail-closed (M11).
 	// The broker retries; after the retry budget it DLQs (M7 machinery).
-	seen := &fakeSeenSet{seen: map[string]bool{}, failWith: errors.New("valkey down")}
+	seen := &fakeSeenSet{failWith: errors.New("valkey down")}
 	c, invokeCount := newTestConsumer(seen, http.StatusOK, nil)
 
 	env := sampleEnvelope("msg-failclosed", "worker-agent")
@@ -324,7 +357,6 @@ func TestConsume_TransientSeenSetError_ExactlyOnce(t *testing.T) {
 	// exactly once (no double-process). This is the key fail-closed invariant:
 	// transient blip → broker retry → dedupe succeeds → exactly-once.
 	seen := &fakeSeenSet{
-		seen:      map[string]bool{},
 		failWith:  errors.New("valkey transient"),
 		failAfter: 1, // fail once, then succeed
 	}
@@ -431,64 +463,195 @@ func TestConsume_BadCloudEvent_400(t *testing.T) {
 
 // ── real redisSeenSet (miniredis) ─────────────────────────────────────────────
 
-// TestRedisSeenSet_SetNXSemantics exercises the production redisSeenSet against
-// a real (mini) Valkey: the first MarkSeen of a messageId is first-seen (true),
-// a second is a duplicate (false), the key carries the dedupe TTL, and once it
-// expires the id is first-seen again (the dedupe window is bounded).
-func TestRedisSeenSet_SetNXSemantics(t *testing.T) {
+// TestRedisSeenSet_ClaimLifecycle drives the production redisSeenSet against a real
+// (mini) Valkey: a claim holds the id under the launcher's key prefix for dedupeClaimTTL,
+// completing it leaves a done marker for dedupeTTL, and once that expires the id is
+// processed again (the dedupe window is bounded).
+func TestRedisSeenSet_ClaimLifecycle(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
 	s := newRedisSeenSet(mr.Addr())
 	ctx := context.Background()
+	key := dedupeKeyPrefix + "id-1"
 
-	first, err := s.MarkSeen(ctx, "id-1", dedupeTTL)
-	if err != nil {
-		t.Fatalf("first MarkSeen: %v", err)
+	if st, err := s.Claim(ctx, "id-1", "a", dedupeClaimTTL); err != nil || st != deliveryclaim.Claimed {
+		t.Fatalf("first claim = %q, %v; want claimed", st, err)
 	}
-	if !first {
-		t.Error("first sighting must be first-seen (true)")
+	if ttl := mr.TTL(key); ttl != dedupeClaimTTL {
+		t.Errorf("claim TTL = %v, want %v", ttl, dedupeClaimTTL)
 	}
-
-	dup, err := s.MarkSeen(ctx, "id-1", dedupeTTL)
-	if err != nil {
-		t.Fatalf("second MarkSeen: %v", err)
+	if st, _ := s.Claim(ctx, "id-1", "b", dedupeClaimTTL); st != deliveryclaim.InFlight {
+		t.Errorf("concurrent claim = %q, want inflight", st)
 	}
-	if dup {
-		t.Error("second sighting must be a duplicate (false)")
+	if err := s.Release(ctx, "id-1", "a"); err != nil {
+		t.Fatalf("release: %v", err)
 	}
-
-	// The key carries a TTL near dedupeTTL (bounded dedupe window).
-	ttl := mr.TTL(dedupeKeyPrefix + "id-1")
-	if ttl <= 0 || ttl > dedupeTTL {
-		t.Errorf("dedupe key TTL = %v, want in (0, %v]", ttl, dedupeTTL)
+	if st, _ := s.Claim(ctx, "id-1", "c", dedupeClaimTTL); st != deliveryclaim.Claimed {
+		t.Errorf("claim after release = %q, want claimed", st)
 	}
-
-	// Advance past the TTL: the id is first-seen again (window expired).
+	if err := s.Complete(ctx, "id-1", dedupeTTL); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	if ttl := mr.TTL(key); ttl != dedupeTTL {
+		t.Errorf("done TTL = %v, want %v", ttl, dedupeTTL)
+	}
+	if st, _ := s.Claim(ctx, "id-1", "d", dedupeClaimTTL); st != deliveryclaim.Done {
+		t.Errorf("claim after complete = %q, want done", st)
+	}
 	mr.FastForward(dedupeTTL + time.Second)
-	reSeen, err := s.MarkSeen(ctx, "id-1", dedupeTTL)
-	if err != nil {
-		t.Fatalf("MarkSeen after expiry: %v", err)
-	}
-	if !reSeen {
-		t.Error("after the TTL expires the id must be first-seen again")
+	if st, _ := s.Claim(ctx, "id-1", "e", dedupeClaimTTL); st != deliveryclaim.Claimed {
+		t.Errorf("claim after the dedupe window = %q, want claimed", st)
 	}
 }
 
 // TestRedisSeenSet_BackendDown_Errors confirms an unreachable Valkey surfaces an
-// error from MarkSeen (which the consumer then fails CLOSED on — covered by
+// error from Claim (which the consumer then fails CLOSED on — covered by
 // TestConsume_FailClosed_WhenSeenSetErrors with the stub; here we prove the real
 // store reports the error rather than hanging).
 func TestRedisSeenSet_BackendDown_Errors(t *testing.T) {
 	t.Parallel()
 	// Port 1 rather than a closed miniredis: binding it needs root, so nothing in this
 	// package can take it, and the dial is refused immediately. Closing a miniredis frees
-	// its port, and under CI's parallelism another miniredis rebinds it — MarkSeen then
+	// its port, and under CI's parallelism another miniredis rebinds it — Claim then
 	// SUCCEEDS against the wrong server and the test fails claiming Valkey was reachable.
 	s := newRedisSeenSet("127.0.0.1:1")
 	ctx, cancel := context.WithTimeout(context.Background(), dedupeOpTimeout+time.Second)
 	defer cancel()
-	if _, err := s.MarkSeen(ctx, "id-x", dedupeTTL); err == nil {
+	if _, err := s.Claim(ctx, "id-x", "t", dedupeClaimTTL); err == nil {
 		t.Fatal("expected an error from an unreachable Valkey")
+	}
+}
+
+// ── a failed delivery is retried, not deduplicated (m184.37l) ─────────────────
+
+// sequencedInvoker answers each invoke with the next status in order (repeating the last),
+// and counts invokes.
+func sequencedInvoker(statuses ...int) (func(context.Context, envelope) (int, error), *int32) {
+	var n int32
+	return func(context.Context, envelope) (int, error) {
+		i := int(atomic.AddInt32(&n, 1)) - 1
+		return statuses[min(i, len(statuses)-1)], nil
+	}, &n
+}
+
+func deliver(t *testing.T, c *asyncConsumer, env envelope) int {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	c.consume(rr, cloudEventRequest(t, env))
+	return rr.Code
+}
+
+// A delivery whose invoke failed answers 502 and releases its message id, so the broker's
+// retry invokes the agent again; once that retry succeeds, a further redelivery is a
+// duplicate. Before the fix the retry was acked 204 as a duplicate and the message was lost.
+func TestConsume_FailedInvokeIsRetriedNotDeduplicated(t *testing.T) {
+	t.Parallel()
+	for name, seen := range map[string]SeenSet{
+		"fake":   newFakeSeenSet(),
+		"valkey": newRedisSeenSet(miniredis.RunT(t).Addr()),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, _ := newTestConsumer(seen, 0, nil)
+			invoke, invoked := sequencedInvoker(http.StatusInternalServerError, http.StatusOK)
+			c.invoke = invoke
+			env := sampleEnvelope("msg-retry-"+name, "worker-agent")
+
+			if got := deliver(t, c, env); got != http.StatusBadGateway {
+				t.Fatalf("failed delivery: status = %d, want 502 (NACK)", got)
+			}
+			if got := deliver(t, c, env); got != http.StatusNoContent {
+				t.Fatalf("retry: status = %d, want 204", got)
+			}
+			if got := atomic.LoadInt32(invoked); got != 2 {
+				t.Fatalf("agent invoked %d times, want 2 (the retry must be processed)", got)
+			}
+			if got := deliver(t, c, env); got != http.StatusNoContent {
+				t.Fatalf("redelivery after success: status = %d, want 204", got)
+			}
+			if got := atomic.LoadInt32(invoked); got != 2 {
+				t.Errorf("agent invoked %d times, want still 2 (a succeeded delivery is deduplicated)", got)
+			}
+		})
+	}
+}
+
+// A message that fails every time answers the failure status on every delivery, each one a
+// real attempt, so the broker spends its retry budget and dead-letters it.
+func TestConsume_PersistentFailureReachesTheDeadLetterPath(t *testing.T) {
+	t.Parallel()
+	c, invoked := newTestConsumer(newFakeSeenSet(), http.StatusInternalServerError, nil)
+	env := sampleEnvelope("msg-poison-retry", "worker-agent")
+	const attempts = 4
+	for i := range attempts {
+		if got := deliver(t, c, env); got != http.StatusBadGateway {
+			t.Fatalf("attempt %d: status = %d, want 502 (NACK → retry, then DLQ)", i, got)
+		}
+	}
+	if got := atomic.LoadInt32(invoked); got != attempts {
+		t.Errorf("agent invoked %d times, want %d (every retry is a real attempt)", got, attempts)
+	}
+}
+
+// A duplicate that arrives while the first delivery is still being processed is not
+// processed, and is not acked either: it answers 503 so the broker retries it.
+func TestConsume_ConcurrentDuplicateIsNotProcessedTwice(t *testing.T) {
+	t.Parallel()
+	c, _ := newTestConsumer(newFakeSeenSet(), 0, nil)
+	entered, finish := make(chan struct{}), make(chan struct{})
+	var invoked atomic.Int32
+	c.invoke = func(context.Context, envelope) (int, error) {
+		if invoked.Add(1) == 1 {
+			close(entered)
+			<-finish
+		}
+		return http.StatusOK, nil
+	}
+	env := sampleEnvelope("msg-concurrent", "worker-agent")
+
+	first := make(chan int, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		c.consume(rr, cloudEventRequest(t, env))
+		first <- rr.Code
+	}()
+	<-entered
+	if got := deliver(t, c, env); got != http.StatusServiceUnavailable {
+		t.Errorf("duplicate during processing: status = %d, want 503 (retry later, not ack)", got)
+	}
+	close(finish)
+	if got := <-first; got != http.StatusNoContent {
+		t.Errorf("first delivery: status = %d, want 204", got)
+	}
+	if got := deliver(t, c, env); got != http.StatusNoContent {
+		t.Errorf("redelivery after success: status = %d, want 204", got)
+	}
+	if got := invoked.Load(); got != 1 {
+		t.Errorf("agent invoked %d times, want 1", got)
+	}
+}
+
+// A consumer that dies mid-invoke never releases its claim. The message is refused as in
+// flight until the claim expires, and the first retry after that is processed.
+func TestConsume_CrashMidInvokeIsRetriedAfterTheClaimExpires(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	seen := newRedisSeenSet(mr.Addr())
+	c, invoked := newTestConsumer(seen, http.StatusOK, nil)
+	env := sampleEnvelope("msg-crashed", "worker-agent")
+
+	// The dead consumer's claim, as it left it.
+	if _, err := seen.Claim(context.Background(), env.MessageID, "dead-consumer", dedupeClaimTTL); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if got := deliver(t, c, env); got != http.StatusServiceUnavailable {
+		t.Fatalf("retry while the claim is held: status = %d, want 503", got)
+	}
+	mr.FastForward(dedupeClaimTTL + time.Second)
+	if got := deliver(t, c, env); got != http.StatusNoContent {
+		t.Fatalf("retry after the claim expired: status = %d, want 204", got)
+	}
+	if got := atomic.LoadInt32(invoked); got != 1 {
+		t.Errorf("agent invoked %d times, want 1", got)
 	}
 }
 

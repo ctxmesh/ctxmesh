@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
 // AuditEventSummary is one audit row on the wire (GET /api/audit). It NEVER carries secret
@@ -68,10 +68,10 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 
 	namespace := strings.TrimSpace(r.URL.Query().Get("namespace"))
 
-	// Persona gate (never per-row): one SSAR on `auditlogs`. Scoped to ?namespace= when given (a
-	// namespaced audit-reader sees only their namespace); empty ⇒ a cluster-wide audit-read check.
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceAuditLogs, namespace, ""); err != nil {
-		s.writeAuthzError(w, err, "read the audit log")
+	// Persona gate (never per-row): an SSAR on `auditlogs` in ?namespace=, or for "All workspaces"
+	// the caller's namespaces where it is allowed. Cluster-scoped entries need the cluster-wide grant.
+	scope := controlplane.ListOptions{Namespace: namespace}
+	if !s.authorizeStoreList(w, r, caller, resourceAuditLogs, &scope, "read the audit log") {
 		return
 	}
 
@@ -89,6 +89,7 @@ func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
 
 	page, err := s.auditStore.List(r.Context(), auditlog.Query{
 		Namespace:    namespace,
+		Namespaces:   scope.Namespaces,
 		Actor:        strings.TrimSpace(r.URL.Query().Get("actor")),
 		Action:       strings.TrimSpace(r.URL.Query().Get("action")),
 		ResourceKind: strings.TrimSpace(r.URL.Query().Get("kind")),

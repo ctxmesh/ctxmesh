@@ -70,6 +70,8 @@ export interface AgentSummary {
   drift?: boolean;
   managedOutsideUI?: boolean;
   isDraft?: boolean;
+  /** metadata.creationTimestamp (RFC3339) — how Home finds the agent a person just created. */
+  createdAt?: string;
 }
 
 // CustomDetector / TracePolicyResponse mirror the redaction-editor DTO (m18.13):
@@ -264,6 +266,45 @@ export interface AgentDetailResponse {
   // latest published_artifacts release, read server-side — so the "Published" badge + Unpublish
   // survive a reload (they were in-session only). Absent when the agent is not published.
   published?: { visibility: string; version: number };
+  // dependencies is everything the agent references, each resolved as the caller: the model route
+  // and the secret bindings its providers use, the guardrail policy, tool bindings, knowledge bases,
+  // memory, approval rules and approvers, and feedback sources. A reference that does not resolve is
+  // listed as `missing`, never dropped. Absent from a BFF older than the Bindings panel; null when
+  // the read asked for none (agentDetail's `dependencies: false`).
+  dependencies?: AgentDependency[] | null;
+}
+
+export type AgentDependencyKind =
+  | "modelRoute"
+  | "secretBinding"
+  | "guardrailPolicy"
+  | "toolBinding"
+  | "knowledgeBase"
+  | "sessionMemory"
+  | "longTermMemory"
+  | "approvalRule"
+  | "approver"
+  | "feedbackSource";
+
+/**
+ * ready — found, and its own status says it works. notReady — found, not working yet (reason +
+ * message are the condition's words). missing — nothing of that name exists. unknown — the caller
+ * may not read it, or the read failed; nothing is claimed. declared — a spec field with nothing
+ * behind it to resolve.
+ */
+export type AgentDependencyState = "ready" | "notReady" | "missing" | "unknown" | "declared";
+
+export interface AgentDependency {
+  kind: AgentDependencyKind;
+  name: string;
+  namespace?: string;
+  /** The subject: a tool name, a memory scope, an approver's kind, a score list. */
+  detail?: string;
+  /** What it is reached through: the route a secret binding serves, a tool binding's MCP server. */
+  via?: string;
+  state: AgentDependencyState;
+  reason?: string;
+  message?: string;
 }
 
 // AgentVersionDiffResponse (V3) — a read-only TEXTUAL diff of two agent-version snapshots (deployed
@@ -334,9 +375,14 @@ export interface AgentRunSummary {
   traceId: string;
   name: string;
   timestamp: string;
-  costUSD: number;
-  tokens: number;
-  latencyMs: number;
+  // Cost and tokens come from a trace backend; without one (a stock install, where the list is read from
+  // the run store, ADR 0150) they are absent, never 0. latencyMs is absent until the run finishes.
+  costUSD?: number;
+  tokens?: number;
+  latencyMs?: number;
+  // The run's id when the row came from the run store: link to /runs/{runId}, not the trace page.
+  runId?: string;
+  status?: string;
 }
 
 export interface AgentRunListResponse {
@@ -439,7 +485,8 @@ export interface RollbackResponse {
 export interface SpanSummary {
   id: string;
   parentId: string;
-  // "SPAN" | "GENERATION" | "EVENT" — the tool call surfaces as a SPAN/GENERATION.
+  // The Langfuse observation type: "GENERATION" (a model call), "TOOL" (a tool
+  // call), "SPAN", "EVENT", and the other agent types Langfuse records.
   type: string;
   name: string;
   startMs: number;
@@ -487,6 +534,19 @@ export interface TraceDetailResponse {
   rollup: TraceRollup;
   spans: SpanSummary[];
   rootSpanId?: string;
+  // run is present when a run maps the trace; a direct /api/invoke trace has none.
+  run?: TraceRunSteps;
+}
+
+// TraceRunSteps is what the run behind a trace recorded, so a reader can tell a complete trace
+// from one whose spans are still arriving (the backend ingests generation and tool spans after
+// the root). The counts are 0 until the run is terminal, and endedAt is set only then.
+export interface TraceRunSteps {
+  runId: string;
+  status: string;
+  endedAt?: string; // RFC3339
+  modelSteps: number;
+  toolSteps: number;
 }
 
 // --- Feedback (GET /api/feedback?traceId=<id>, m16.4) ------------------------
@@ -505,10 +565,10 @@ export interface FeedbackScore {
   stringValue?: string;
   comment?: string;
   source?: string;
-  // attributedSource is the feedback source declared by the agent's FeedbackStore
-  // (M139, ADR 0112): "human", "external:<channel>", or "unattributed". Absent when
-  // the agent binds no FeedbackStore. Distinct from `source` (the raw Langfuse origin,
-  // always "API" for platform-written scores) — this is the CRD-driven attribution.
+  // attributedSource is the feedback source the agent's spec.feedback declares
+  // (ADR 0152): "human", "external:<channel>", or "unattributed". Absent when the
+  // agent declares no spec.feedback. Distinct from `source` (the raw Langfuse origin,
+  // always "API" for platform-written scores) — this is the declaration-driven attribution.
   attributedSource?: string;
 }
 
@@ -544,6 +604,10 @@ export interface NamespaceSummary {
   /** Human-readable label from the agents.ctxmesh.ai/display-name annotation.
    *  Absent (undefined) when the annotation is not set — fall back to `name`. */
   displayName?: string;
+  /** True for a namespace the platform or Kubernetes occupies (the control-plane namespace,
+   *  kube-*, knative-*, *-system). Set only on a cluster-wide list. Selectable, but never the
+   *  console's default workspace. */
+  platform?: boolean;
 }
 
 export interface NamespaceListResponse {
@@ -677,6 +741,10 @@ export interface CostBreakdownResponse {
   // notice — see CostResponse.notice: transient "temporarily unavailable" degrade
   // (m23.6). Distinguish from a true-empty breakdown.
   notice?: string;
+  // namespaces is set when a breakdown asked for with no tenant covers only the
+  // caller's workspaces (a caller who may not read cost cluster-wide); total then
+  // sums their rows.
+  namespaces?: string[];
 }
 
 // CostBreakdownParams are the query params for GET /api/cost/breakdown:
@@ -721,9 +789,13 @@ export interface RunSummary {
   traceId: string;
   name: string;
   timestamp: string;
-  costUSD: number;
-  tokens: number;
-  latencyMs: number;
+  // Absent, never 0, when the list is read from the run store (no trace backend, ADR 0150): cost and
+  // tokens come from traces, and latencyMs exists only once the run has finished.
+  costUSD?: number;
+  tokens?: number;
+  latencyMs?: number;
+  // The run's id when the row came from the run store; such a row links to /runs/{runId}.
+  runId?: string;
   // The run's originating agent (m54.2), parsed from the trace's agent:<ns>/<name>
   // tag — lets the runs list link each row straight to the agent. Absent for an
   // ambient/untagged trace.
@@ -770,6 +842,15 @@ export interface RunsFilteredParams {
   // API cannot carry. Off (undefined) → the cheap, unenriched list. The Runs browser sets it; the
   // dashboard's recent-runs peek does not (it only needs cost/latency).
   enrich?: boolean;
+  // namespace scopes the global list to one namespace — what a namespace-bound caller needs, since the
+  // unscoped list requires cluster-wide RBAC. "" / absent = every namespace the caller can see.
+  namespace?: string;
+}
+
+// runHref is where a Runs-list row opens: the run itself when the row came from the run store (it has a
+// runId), otherwise the trace page.
+export function runHref(r: { runId?: string; traceId: string }): string {
+  return r.runId ? `/runs/${encodeURIComponent(r.runId)}` : `/traces/${encodeURIComponent(r.traceId)}`;
 }
 
 // --- Trace link (GET /api/traces/{id}) --------------------------------------
@@ -1162,11 +1243,11 @@ export interface CreateTeamRequest {
   namespace?: string;
 }
 
-// --- Config builder (POST /api/expand, POST /api/agents) --------------------
-// The config-builder submits the SAME simplified agent.yaml the CLI consumes:
-// the form builds the YAML, /api/expand previews the CRD (server-side, the CLI
-// expand core), and /api/agents applies it (client-go create, RBAC-scoped). The
-// browser never hand-edits raw CRDs.
+// --- Agent config (POST /api/expand, POST /api/agents) ----------------------
+// The create-agent review submits the SAME simplified agent.yaml the CLI
+// consumes: /api/expand previews the CRDs it becomes (server-side, the CLI expand
+// core), and /api/agents applies it (client-go create, RBAC-scoped). The browser
+// never hand-edits raw CRDs.
 
 // One created CRD object's flat identity (mirrors the BFF createdObject DTO).
 export interface CreatedObject {
@@ -1380,6 +1461,30 @@ export interface OAuthInitResponse {
   state: string;
 }
 
+// McpConsentTicket is a single-use consent ticket minted by a chatbox on an agent hostname
+// (POST /api/mcp/oauth/ticket, ADR 0040 amendment). It goes to the console's /connect page by
+// postMessage, never in a URL.
+export interface McpConsentTicket {
+  ticket: string;
+  // The console's /connect page, which redeems the ticket.
+  connectURL: string;
+  // The ticket's lifetime in seconds.
+  expiresIn: number;
+}
+
+// McpConsentRedeemResponse is the console's answer to a redeemed ticket: the authorization URL
+// the /connect page navigates to once the user confirms, and what it shows them first. No
+// token, verifier or state.
+export interface McpConsentRedeemResponse {
+  status: string;
+  authorizationURL: string;
+  // The username of whoever pressed Connect: the grant is stored as theirs.
+  minter: string;
+  server: string;
+  agent: string;
+  namespace: string;
+}
+
 // McpApproval is one pending MCP server awaiting operator approval
 // (GET /api/mcp/approvals). The operator approves/rejects via
 // POST /api/mcp/approvals/{ns}/{name}[/reject].
@@ -1492,6 +1597,8 @@ export interface ConnectMcpRequest {
   originNamespace: string;
   originName: string;
   name?: string;
+  /** The caller's namespace the copy lands in. */
+  namespace?: string;
 }
 
 // ConnectMcpResponse is the 200 body from POST /api/mcp/connect.
@@ -1595,6 +1702,9 @@ export interface CatalogTool {
   // registry is the MCP server / ToolRegistry the tool belongs to (e.g.
   // "scalekit-mcp-server") — the grouping key for "group tools by MCP server".
   registry?: string;
+  // namespace is where that server is registered. A binding names its server in its own
+  // namespace, so only agents in this namespace can be bound to the tool.
+  namespace?: string;
   // source is the ORIGIN CLASS ("user-added" | "curated"), not the server name.
   source?: string;
   approvalStatus?: "approved" | "pending";
@@ -1710,13 +1820,6 @@ export interface EvalSuiteCreateRequest {
   threshold?: number;
 }
 
-export interface EvalSuiteUpdateRequest {
-  datasetRef?: string;
-  scorers?: string[];
-  gate?: string;
-  threshold?: number;
-}
-
 // --- PromptVersion DTOs (m17.8) -----------------------------------------------
 // A PromptVersion pins a named prompt to a version ref. The diff endpoint
 // returns a textual line diff (resolveMode="textual" — ALWAYS explicit).
@@ -1820,11 +1923,6 @@ export interface PromptVersionCreateRequest {
   content?: string;
 }
 
-export interface PromptVersionUpdateRequest {
-  ref?: string;
-  content?: string;
-}
-
 // --- AgentScalingPolicy DTOs (m17.6) ------------------------------------------
 // An AgentScalingPolicy lets operators attach a custom scaling policy to an agent
 // (min/max replicas + an optional schedule). The controller validates:
@@ -1892,43 +1990,37 @@ export interface AgentScalingPolicyUpdateRequest {
 // one AgentDeployment. The controller reconciles it and sets a Ready condition
 // whose status reflects actual propagation — "propagated" (hot-updated live) or
 // the reason it hasn't propagated yet. The SPA NEVER fakes the propagation
-// state: it reads the controller's Ready condition truthfully.
+// state: it reads the controller's Ready condition truthfully. These mirror the
+// BFF's DTOs (internal/bff/mcptoolbindings.go), which mirror MCPToolBindingSpec.
 
-// MCPToolBindingCondition mirrors one status.Condition from the controller.
-export interface MCPToolBindingCondition {
-  type: string;
-  // "True" | "False" | "Unknown"
-  status: string;
-  reason: string;
-  message: string;
-  lastTransitionTime: string;
+export type MCPToolMode = "remote" | "sidecar";
+
+// MCPToolServer locates the tool server: url for remote mode, image for sidecar.
+export interface MCPToolServer {
+  url?: string;
+  image?: string;
 }
 
-// MCPToolBindingSummary is one binding in a list response (minimal projection).
+// MCPToolBindingSummary is one binding in a list response.
 export interface MCPToolBindingSummary {
   name: string;
   namespace: string;
-  agentName: string;
-  agentNamespace: string;
+  // agentRef names the bound AgentDeployment, in the binding's namespace.
+  agentRef: string;
+  // registryRef names the MCP server (ToolRegistry) that provides the tool.
+  registryRef: string;
   toolName: string;
+  mode: MCPToolMode;
+  // propagationStatus is "propagated" when Ready is True, "pending" before the
+  // controller has reconciled, otherwise the Ready condition's reason.
+  propagationStatus: string;
+  phase: string;
   ready: boolean;
 }
 
-// MCPToolBindingDetail is the full binding projection including the controller's
-// Ready condition. `propagationStatus` is the BFF's flat projection of the Ready
-// condition: "propagated" (Ready: True) or the reason string (not yet ready,
-// e.g. "Pending", "ToolNotFound"). NEVER faked — it reflects the controller.
-export interface MCPToolBindingDetail {
-  name: string;
-  namespace: string;
-  agentName: string;
-  agentNamespace: string;
-  toolName: string;
-  ready: boolean;
-  // propagationStatus is "propagated" when Ready is True; otherwise the reason
-  // (e.g. "Pending", "ToolApprovalRequired", or the actual failure reason).
-  propagationStatus: string;
-  conditions: MCPToolBindingCondition[];
+// MCPToolBindingDetail is one binding's full projection, including its server.
+export interface MCPToolBindingDetail extends MCPToolBindingSummary {
+  server: MCPToolServer;
 }
 
 export interface MCPToolBindingListResponse {
@@ -1936,26 +2028,20 @@ export interface MCPToolBindingListResponse {
   nextCursor: string;
 }
 
-// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body. The binding
-// attaches `toolName` (from the merged catalog) to `agentRef` (namespace/name).
-// A pending-approval tool is REJECTED by the controller (m17.4 gate) — the UI
-// must disable binding for pending-approval tools before ever calling this.
+// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body, shaped like
+// MCPToolBindingSpec: the agent and the MCP server are in the binding's namespace.
+// registryRef, mode and server may be left out; the BFF then reads them from the
+// tool's entry in the MCP server that provides it. A pending-approval tool is
+// REJECTED by the controller (m17.4 gate) — the UI must disable binding for
+// pending-approval tools before ever calling this.
 export interface MCPToolBindingCreateRequest {
-  name?: string;
-  namespace?: string;
-  agentRef: {
-    namespace: string;
-    name: string;
-  };
+  name: string;
+  namespace: string;
+  agentRef: string;
+  registryRef?: string;
   toolName: string;
-}
-
-// MCPToolBindingListParams are the list-contract query params for bindings.
-export interface MCPToolBindingListParams {
-  limit?: number;
-  cursor?: string;
-  agentName?: string;
-  namespace?: string;
+  mode?: MCPToolMode;
+  server?: MCPToolServer;
 }
 
 // --- Create-from-prompt generation (POST /api/agents/generate, ADR 0014) -----
@@ -2267,6 +2353,16 @@ async function apiError(res: Response, fallback: string): Promise<ApiError> {
   return new ApiError(message, res.status, code);
 }
 
+// datasetNamespaceQuery is the `namespace=` query every dataset call carries. The BFF reads
+// `default` when a dataset request names no namespace, so an empty one is refused here rather
+// than sent: it would read or write another namespace's datasets.
+function datasetNamespaceQuery(namespace: string): string {
+  if (!namespace.trim()) {
+    throw new Error("a dataset request needs a workspace namespace");
+  }
+  return `namespace=${encodeURIComponent(namespace)}`;
+}
+
 // RequestExtras lets a caller override the token (login-validation, which runs
 // BEFORE a session exists) and mark a call as a login-validation call so a 401 is
 // NOT treated as a session expiry (it's a wrong-token login error the login page
@@ -2388,7 +2484,8 @@ export async function whoami(opts: WhoAmIOptions = {}): Promise<WhoAmI> {
 
 // LogEventType names the four SSE frame types the BFF emits (agent_detail.go):
 //   log     — one log line, in order.
-//   waiting — no running pod yet (the agent is starting) — HTTP 200, clean close.
+//   waiting — no started container yet (the agent is starting) — HTTP 200, clean
+//             close; the caller asks again (lib/log-tail.ts).
 //   error   — an IN-STREAM failure (forbidden pods/log, or a mid-stream break).
 //   end     — a clean end of the stream.
 export type LogEventType = "log" | "waiting" | "error" | "end";
@@ -2529,10 +2626,12 @@ function parseSSEFrame(
 
 // --- Run-oriented execution stream (ADR 0034, m32.8) -------------------------
 // The console chat consumes a run's SSE event stream (GET /api/runs/{id}/events):
-// `id:<seq>\nevent:<kind>\ndata:<json>\n\n`. Kinds: `token` (a live content delta),
-// `message` (a completed assistant turn), `state` (a status transition — the data
-// is the new status), `step` (a loop/tool boundary). The stream closes when the run
-// is terminal, so onClose fires exactly once (clean end or abort).
+// `id: <seq>\nevent: <kind>\n` then the payload, one `data:` line per line of it.
+// Kinds: `token` (a live content delta), `message` (a completed assistant turn),
+// `state` (a status transition — the payload is the new status), `step` (a loop/tool
+// boundary — step metadata JSON or a label). The stream closes when the run is
+// terminal, so onClose fires exactly once (clean end or abort); it stays open while
+// the run waits in requires_action. sdk/run-events.golden.sse is the server's bytes.
 
 export type CreateRunRequest = InvokeRequest;
 
@@ -2622,7 +2721,22 @@ export interface RunDetail {
   nodes?: WorkflowNodeStatus[];
 }
 
-export type RunEventKind = "state" | "message" | "token" | "step";
+// RunEventKind is a run stream event's `event:` name. `descendant-requires-action` is posted on a
+// root run when a delegated sub-run pauses; its payload is that sub-run's id (ADR 0075 §4).
+export type RunEventKind =
+  | "state"
+  | "message"
+  | "token"
+  | "step"
+  | "descendant-requires-action";
+
+const RUN_EVENT_KINDS: ReadonlySet<string> = new Set<RunEventKind>([
+  "state",
+  "message",
+  "token",
+  "step",
+  "descendant-requires-action",
+]);
 
 // StepMeta is the metadata a `step` run event carries (M78, ADR 0071 §4/§C3): the loop step
 // number, the boundary kind (model/tool), the tool name (tool steps), and best-effort token
@@ -2787,8 +2901,10 @@ export function openRunStream(
   return () => controller.abort();
 }
 
-// parseRunSSEFrame parses one run SSE frame ("id:<seq>\nevent:<kind>\ndata:<json>")
-// into a typed event. Unknown/absent event names default to "message".
+// parseRunSSEFrame parses one run SSE frame into a typed event: the data lines rejoined
+// with "\n" are the payload. An absent event name is "message" (the SSE default); an
+// event name this console does not know is skipped, as EventSource skips a named event
+// nobody listens for, so a new kind can never overwrite the answer being streamed.
 function parseRunSSEFrame(
   frame: string,
 ): { seq: number; kind: RunEventKind; data: string } | null {
@@ -2803,10 +2919,8 @@ function parseRunSSEFrame(
       dataLines.push(line.slice(5).replace(/^ /, ""));
   }
   if (dataLines.length === 0 && event === "") return null; // keep-alive.
-  const kind: RunEventKind =
-    event === "state" || event === "token" || event === "step"
-      ? event
-      : "message";
+  if (event !== "" && !RUN_EVENT_KINDS.has(event)) return null;
+  const kind = (event === "" ? "message" : event) as RunEventKind;
   return { seq, kind, data: dataLines.join("\n") };
 }
 
@@ -3076,6 +3190,12 @@ function agentsQuery(params: AgentListParams = {}): string {
 
 // listQuery is the general list-contract query builder for the three new resource
 // endpoints (modelroutes, secretbindings, agentregistries). Matches agentsQuery.
+// namespaceQuery scopes a list to one namespace; "" ("All workspaces") sends none, and the BFF then
+// reads every namespace the caller works in.
+function namespaceQuery(namespace: string): string {
+  return namespace ? `?namespace=${encodeURIComponent(namespace)}` : "";
+}
+
 function listQuery(params: AgentListParams = {}): string {
   const qs = new URLSearchParams();
   if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
@@ -3087,8 +3207,6 @@ function listQuery(params: AgentListParams = {}): string {
 }
 
 export const api = {
-  health: (signal?: AbortSignal) =>
-    getJSON<HealthResponse>("/api/health", signal),
   // devMode probes whether the console runs under `ctxmesh dev --ui` (ADR 0021).
   // Unauthenticated, so it resolves before any login. Callers treat any failure as
   // false (login wall stays on) — never accidentally drop auth on a real cluster.
@@ -3114,7 +3232,6 @@ export const api = {
       throw err;
     }
   },
-  whoami: (signal?: AbortSignal) => whoami({ signal }),
 
   // listAgents reads one page window through the list contract (§4): it returns
   // { items, nextCursor } — the DataTable keys "more pages" off nextCursor, never
@@ -3145,30 +3262,6 @@ export const api = {
   namespaces: (signal?: AbortSignal) =>
     getJSON<NamespaceListResponse>("/api/namespaces", signal),
 
-  // setNamespaceDisplayName sets or clears the human-readable display label on a
-  // namespace via PUT /api/namespaces/{name}/display-name (ADR 0068 §7). An empty
-  // displayName removes the annotation. A 403 means the caller lacks "update
-  // namespaces" — the API server enforces it. This is the only write path that
-  // touches namespace metadata; "workspace" is a UI-only label over this.
-  setNamespaceDisplayName: async (
-    name: string,
-    displayName: string,
-    signal?: AbortSignal,
-  ): Promise<NamespaceSummary> => {
-    const res = await apiFetch(
-      `/api/namespaces/${encodeURIComponent(name)}/display-name`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ displayName }),
-        signal,
-      },
-    );
-    if (!res.ok) {
-      throw await apiError(res, `set display-name failed (${res.status})`);
-    }
-    return (await res.json()) as NamespaceSummary;
-  },
   // topology fetches the cluster graph. In raw mode (no params / params.group="")
   // it returns the flat {nodes, edges} graph (M12 dashboard backward-compatible).
   // In grouped mode (params.group="registry"|"namespace") the response includes
@@ -3183,17 +3276,9 @@ export const api = {
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     return getJSON<TopologyResponse>(`/api/topology${suffix}`, signal);
   },
-  // cost reads the TENANT-SCOPED cost summary (ADR 0077) from GET /api/cost?tenant=.
-  // As of m86.1 this endpoint is tenant-scoped: TotalCostUSD/TotalTokens come from
-  // the durable per-tenant rollup (the same source forecast reads), and byModel is
-  // intentionally EMPTY (the durable rollup carries no per-model detail). ?tenant=
-  // is REQUIRED — a missing tenant is a 400 — so callers must supply one.
-  cost: (tenant: string, signal?: AbortSignal) =>
-    getJSON<CostResponse>(
-      `/api/cost?tenant=${encodeURIComponent(tenant)}`,
-      signal,
-    ),
-  runs: (signal?: AbortSignal) => getJSON<RunListResponse>("/api/runs", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  runs: (namespace: string, signal?: AbortSignal) =>
+    getJSON<RunListResponse>(`/api/runs${namespaceQuery(namespace)}`, signal),
 
   // runsFiltered reads one paginated window of runs from the global /api/runs
   // endpoint (m16.3) with server-side agent/from/to filters + client-side q
@@ -3214,6 +3299,7 @@ export const api = {
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     if (params.enrich) qs.set("enrich", "1");
+    if (params.namespace) qs.set("namespace", params.namespace);
     const suffix = qs.toString() ? `?${qs.toString()}` : "";
     const res = await apiFetch(`/api/runs${suffix}`, {
       headers: { Accept: "application/json" },
@@ -3292,10 +3378,18 @@ export const api = {
 
   // agentDetail reads one AgentDeployment's full landing projection (m14.7). A
   // 404 = not-found (no such agent), 403 = viewer-can't-read (ForbiddenInline),
-  // 400 = a malformed ns/name — all surface as a typed ApiError.
-  agentDetail: (ns: string, name: string, signal?: AbortSignal) =>
+  // 400 = a malformed ns/name — all surface as a typed ApiError. `dependencies: false`
+  // skips resolving the agent's references (one read each) for a caller that never shows them.
+  agentDetail: (
+    ns: string,
+    name: string,
+    signal?: AbortSignal,
+    opts?: { dependencies?: boolean },
+  ) =>
     getJSON<AgentDetailResponse>(
-      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
+      `/api/agents/${encodeURIComponent(ns)}/${encodeURIComponent(name)}${
+        opts?.dependencies === false ? "?dependencies=0" : ""
+      }`,
       signal,
     ),
 
@@ -3324,7 +3418,7 @@ export const api = {
     ),
 
   // expand posts the form's agent.yaml and returns the expanded CRD manifest(s)
-  // as plain YAML text — the config-builder's read-only preview. A validation
+  // as plain YAML text — the create-agent review's read-only preview. A validation
   // failure (400) surfaces the BFF's message via ApiError.
   expand: async (agentYAML: string, signal?: AbortSignal): Promise<string> => {
     const res = await apiFetch("/api/expand", {
@@ -3510,17 +3604,6 @@ export const api = {
       signal,
     ),
 
-  // providerModels re-fetches a connected provider's live model list (proxied
-  // server-side via the stored Secret). Not on the connect happy path (the POST
-  // response already carries them) — kept for a re-connect / refresh.
-  providerModels: (name: string, signal?: AbortSignal) =>
-    // The real BFF DTO is { provider, models: string[] } — NOT ProviderModel[]
-    // objects (the m18.4 fixture pins the connect/list shapes; this matches them).
-    getJSON<{ provider: string; models: string[] }>(
-      `/api/providers/${encodeURIComponent(name)}/models`,
-      signal,
-    ),
-
   // rotateProviderKey rewrites the stored provider key server-side, validated with
   // one live probe first (a bad key → 401, the stored key unchanged; ADR 0018).
   // The new key lives ONLY in the POST body; the response is the refreshed summary,
@@ -3597,6 +3680,42 @@ export const api = {
     throw await apiError(res, `beginMcpGrant failed (${res.status})`);
   },
 
+  // mintMcpConsentTicket asks the BFF at THIS origin (an agent hostname) for a single-use ticket
+  // that begins the caller's consent on the console origin, where the binding cookie must land
+  // (ADR 0040 amendment). 201 + { ticket, connectURL }.
+  mintMcpConsentTicket: (
+    req: { server: string; namespace?: string; agent: string },
+    signal?: AbortSignal,
+  ) =>
+    postJSON<{ server: string; namespace?: string; agent: string }, McpConsentTicket>(
+      "/api/mcp/oauth/ticket",
+      req,
+      signal,
+    ),
+
+  // redeemMcpConsentTicket is the console /connect page's call: the ticket is the credential, so
+  // no bearer is sent. openerOrigin is the origin the ticket's message came from; the BFF accepts
+  // only the hostname of the agent the ticket names. 202 + { authorizationURL }.
+  redeemMcpConsentTicket: async (
+    req: { ticket: string; openerOrigin: string },
+    signal?: AbortSignal,
+  ): Promise<McpConsentRedeemResponse> => {
+    const res = await apiFetch(
+      "/api/mcp/oauth/grant/redeem",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+        signal,
+      },
+      { token: "" },
+    );
+    if (res.status === 202) {
+      return (await res.json()) as McpConsentRedeemResponse;
+    }
+    throw await apiError(res, `redeemMcpConsentTicket failed (${res.status})`);
+  },
+
   // addMcpServerOAuth starts the OAuth 2.1 MCP connect flow. The BFF returns 202
   // + { authorizationURL, state } — the SPA redirects the browser to that URL and
   // NEVER sees a token (the full exchange happens server-side on callback). A 403
@@ -3633,8 +3752,9 @@ export const api = {
 
   // listMcpServers lists the registered BYO-MCP servers (GET /api/mcpservers) for
   // the MCP Servers page. Read-open (a viewer sees the list); an empty list is normal.
-  listMcpServers: (signal?: AbortSignal) =>
-    getJSON<McpServerListResponse>("/api/mcpservers", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listMcpServers: (namespace: string, signal?: AbortSignal) =>
+    getJSON<McpServerListResponse>(`/api/mcpservers${namespaceQuery(namespace)}`, signal),
 
   // getCatalog fetches the cross-namespace MCP server catalog (GET /api/catalog,
   // m73). Returns servers discoverable by this caller — their org-in-tenant +
@@ -3664,14 +3784,17 @@ export const api = {
   // connectMcpServer materializes a discovered catalog server into the caller's
   // namespace (POST /api/mcp/connect, m73). Returns the new summary or
   // { status: "already-connected" } if already present. A 404 = not discoverable.
+  // namespace is where the copy lands; omitted, the BFF uses "default".
   connectMcpServer: async (
     originNamespace: string,
     originName: string,
     name?: string,
+    namespace?: string,
     signal?: AbortSignal,
   ): Promise<ConnectMcpResponse> => {
     const body: ConnectMcpRequest = { originNamespace, originName };
     if (name) body.name = name;
+    if (namespace) body.namespace = namespace;
     const res = await apiFetch("/api/mcp/connect", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3728,8 +3851,9 @@ export const api = {
   // mcpApprovals lists the pending MCP servers awaiting operator approval
   // (GET /api/mcp/approvals). An empty list is normal ([] on wire). A 403 = the
   // caller can't list approvals (non-operator); a 501 = approval queue not enabled.
-  mcpApprovals: (signal?: AbortSignal) =>
-    getJSON<McpApprovalsResponse>("/api/mcp/approvals", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  mcpApprovals: (namespace: string, signal?: AbortSignal) =>
+    getJSON<McpApprovalsResponse>(`/api/mcp/approvals${namespaceQuery(namespace)}`, signal),
 
   // approveMcp approves a pending MCP server (POST /api/mcp/approvals/{ns}/{name}).
   // Operator-only: a non-operator gets a real 403 from the API (display gating is
@@ -3779,8 +3903,12 @@ export const api = {
   // is an honest "can't list tools" surfaced via ApiError (the picker degrades
   // to an empty catalog + note); a 200 carries every bindable tool with its
   // source + approval state. The `tools` slice is non-null on the wire.
-  listTools: (signal?: AbortSignal) =>
-    getJSON<ToolListResponse>("/api/tools", signal),
+  // namespace "" lists every namespace the caller may list tool registries in.
+  listTools: (namespace: string, signal?: AbortSignal) =>
+    getJSON<ToolListResponse>(
+      `/api/tools${namespace ? `?namespace=${encodeURIComponent(namespace)}` : ""}`,
+      signal,
+    ),
 
   // generateAgent runs create-from-prompt (ADR 0014): a description → a
   // server-side LLM → the simplified agent.yaml, expand-validated. It NEVER
@@ -4245,8 +4373,9 @@ export const api = {
 
   // listTeams reads the AgentTeams (M64) — orchestration rosters (caller-scoped). A 403 surfaces
   // as a typed ApiError (isForbidden) so the page shows an honest forbidden state.
-  listTeams: (signal?: AbortSignal) =>
-    getJSON<AgentTeamListResponse>("/api/teams", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listTeams: (namespace: string, signal?: AbortSignal) =>
+    getJSON<AgentTeamListResponse>(`/api/teams${namespaceQuery(namespace)}`, signal),
 
   // generateTeam composes an AgentTeam YAML from existing registry members via a
   // server-side LLM call (ADR 0065 D4). Like generateAgent, a 422 with
@@ -4295,22 +4424,24 @@ export const api = {
 
   // listGuardrailPolicies reads the GuardrailPolicies (m66.10, ADR 0059) — content-governance
   // policies (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).
-  listGuardrailPolicies: (signal?: AbortSignal) =>
-    getJSON<GuardrailPolicyListResponse>("/api/guardrailpolicies", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listGuardrailPolicies: (namespace: string, signal?: AbortSignal) =>
+    getJSON<GuardrailPolicyListResponse>(
+      `/api/guardrailpolicies${namespaceQuery(namespace)}`,
+      signal,
+    ),
 
   // listWorkflows reads the Workflow CRs (m67.9, ADR 0060) — declarative agent graphs (caller-scoped).
   // A 403 surfaces as a typed ApiError (isForbidden).
-  listWorkflows: (signal?: AbortSignal) =>
-    getJSON<WorkflowListResponse>("/api/workflows", signal),
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listWorkflows: (namespace: string, signal?: AbortSignal) =>
+    getJSON<WorkflowListResponse>(`/api/workflows${namespaceQuery(namespace)}`, signal),
 
   // listKnowledgeBases reads the KnowledgeBase CRs (m68.13, ADR 0061) — managed RAG corpora
   // (caller-scoped). A 403 surfaces as a typed ApiError (isForbidden).
-  listKnowledgeBases: (signal?: AbortSignal, namespace?: string) => {
-    const path = namespace
-      ? `/api/knowledgebases?namespace=${encodeURIComponent(namespace)}`
-      : "/api/knowledgebases";
-    return getJSON<KBListResponse>(path, signal);
-  },
+  // namespace "" is "All workspaces": every namespace the caller works in.
+  listKnowledgeBases: (namespace: string, signal?: AbortSignal) =>
+    getJSON<KBListResponse>(`/api/knowledgebases${namespaceQuery(namespace)}`, signal),
 
   // getKnowledgeBase reads one KnowledgeBase's full detail (spec + status + conditions)
   // (m68.13, ADR 0061). A 403 → isForbidden; a 404 → isNotFound.
@@ -4485,11 +4616,13 @@ export const api = {
     return (await res.json()) as FeedbackResponse;
   },
 
-  // costBreakdown reads the TENANT-SCOPED per-agent cost rollup (m16.10, ADR 0077)
-  // from GET /api/cost/breakdown?by=agent&tenant=&limit=&cursor=. The data reflects
-  // a RECENT WINDOW of traces (≤200), NOT all-time spend, and is filtered to the
-  // agents in the tenant's namespaces (ADR 0077). ?tenant= is REQUIRED — a missing
-  // tenant is a 400 — so callers must supply one. Returns null on 501 (Langfuse not
+  // costBreakdown reads the per-agent cost rollup (m16.10, ADR 0077) from
+  // GET /api/cost/breakdown?by=agent&tenant=&limit=&cursor=. The data reflects a
+  // RECENT WINDOW of traces (≤200), NOT all-time spend, filtered to the agents in
+  // the tenant's namespaces. An empty tenant asks for none: the BFF then answers
+  // for the caller's workspaces, or the cluster when it has no tenants, and is a
+  // 400 with code `tenant_required` for a cluster-wide cost reader who must name
+  // one. Returns null on 501 (Langfuse not
   // configured) as the calm sentinel — callers render "unavailable", NOT an error.
   // Throws ApiError on 502 (Langfuse configured but upstream fetch FAILED) — a real,
   // likely-transient error the UI should surface. This mirrors the 501-calm /
@@ -4501,7 +4634,7 @@ export const api = {
   ): Promise<CostBreakdownResponse | null> => {
     const qs = new URLSearchParams();
     qs.set("by", "agent");
-    qs.set("tenant", tenant);
+    if (tenant) qs.set("tenant", tenant);
     if (params.limit && params.limit > 0) qs.set("limit", String(params.limit));
     if (params.cursor) qs.set("cursor", params.cursor);
     const res = await apiFetch(`/api/cost/breakdown?${qs.toString()}`, {
@@ -4609,26 +4742,6 @@ export const api = {
   },
 
   // --- MCPToolBinding CRUD (m17.5 / m17.10) -----------------------------------
-  // listMcpToolBindings reads one page window of MCPToolBindings through the
-  // list contract. Pass agentName/namespace to scope to a single agent.
-  // A 403 surfaces as a typed ApiError (isForbidden).
-  listMcpToolBindings: (
-    params?: MCPToolBindingListParams,
-    signal?: AbortSignal,
-  ): Promise<MCPToolBindingListResponse> => {
-    const qs = new URLSearchParams();
-    if (params?.limit && params.limit > 0)
-      qs.set("limit", String(params.limit));
-    if (params?.cursor) qs.set("cursor", params.cursor);
-    if (params?.agentName) qs.set("agentName", params.agentName);
-    if (params?.namespace) qs.set("namespace", params.namespace);
-    const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return getJSON<MCPToolBindingListResponse>(
-      `/api/mcptoolbindings${suffix}`,
-      signal,
-    );
-  },
-
   // createMcpToolBinding creates a new MCPToolBinding — attaching a catalog
   // tool to an agent. The controller reconciles it and sets the Ready condition.
   // A 403 (viewer-can't-create) or 409 (already exists) surfaces via ApiError.
@@ -4681,12 +4794,6 @@ export const api = {
       signal,
     );
   },
-
-  agentScalingPolicyDetail: (ns: string, name: string, signal?: AbortSignal) =>
-    getJSON<AgentScalingPolicyDetail>(
-      `/api/agentscalingpolicies/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      signal,
-    ),
 
   // createAgentScalingPolicy attaches a scaling policy to an agent. A 403
   // (viewer-can't-create), 409 (already exists), or 422 (XValidation: max<min or
@@ -4757,12 +4864,6 @@ export const api = {
     return getJSON<EvalSuiteListResponse>(`/api/evalsuites${suffix}`, signal);
   },
 
-  evalSuiteDetail: (ns: string, name: string, signal?: AbortSignal) =>
-    getJSON<EvalSuiteDetail>(
-      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      signal,
-    ),
-
   // createEvalSuite creates a new EvalSuite. A 403 (viewer), 409 (exists), or
   // 422 (validation) surfaces as ApiError.
   createEvalSuite: async (
@@ -4777,27 +4878,6 @@ export const api = {
     });
     if (!res.ok) {
       throw await apiError(res, `create eval suite failed (${res.status})`);
-    }
-    return (await res.json()) as EvalSuiteDetail;
-  },
-
-  updateEvalSuite: async (
-    ns: string,
-    name: string,
-    req: EvalSuiteUpdateRequest,
-    signal?: AbortSignal,
-  ): Promise<EvalSuiteDetail> => {
-    const res = await apiFetch(
-      `/api/evalsuites/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-        signal,
-      },
-    );
-    if (!res.ok) {
-      throw await apiError(res, `update eval suite failed (${res.status})`);
     }
     return (await res.json()) as EvalSuiteDetail;
   },
@@ -4846,12 +4926,6 @@ export const api = {
     );
   },
 
-  promptVersionDetail: (ns: string, name: string, signal?: AbortSignal) =>
-    getJSON<PromptVersionDetail>(
-      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      signal,
-    ),
-
   createPromptVersion: async (
     req: PromptVersionCreateRequest,
     signal?: AbortSignal,
@@ -4864,27 +4938,6 @@ export const api = {
     });
     if (!res.ok) {
       throw await apiError(res, `create prompt version failed (${res.status})`);
-    }
-    return (await res.json()) as PromptVersionDetail;
-  },
-
-  updatePromptVersion: async (
-    ns: string,
-    name: string,
-    req: PromptVersionUpdateRequest,
-    signal?: AbortSignal,
-  ): Promise<PromptVersionDetail> => {
-    const res = await apiFetch(
-      `/api/promptversions/${encodeURIComponent(ns)}/${encodeURIComponent(name)}`,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(req),
-        signal,
-      },
-    );
-    if (!res.ok) {
-      throw await apiError(res, `update prompt version failed (${res.status})`);
     }
     return (await res.json()) as PromptVersionDetail;
   },
@@ -4949,13 +5002,13 @@ export const api = {
   },
 
   // --- Datasets labeling API (m69.3, ADR 0062 Fork 5) -------------------------
-  // listDatasets reads all datasets in the caller's namespace. 501-calm when the store is
+  // Datasets are namespaced, and the BFF reads `default` when a request names none, so every
+  // call takes the caller's workspace explicitly (datasetNamespaceQuery refuses an empty one).
+  //
+  // listDatasets reads all datasets in the namespace. 501-calm when the store is
   // unconfigured (dataset store needs CONTROLPLANE_DSN); 502-error on a fetch failure.
-  listDatasets: async (signal?: AbortSignal, namespace?: string): Promise<DatasetListResponse> => {
-    const path = namespace
-      ? `/api/datasets?namespace=${encodeURIComponent(namespace)}`
-      : "/api/datasets";
-    const res = await apiFetch(path, { signal });
+  listDatasets: async (namespace: string, signal?: AbortSignal): Promise<DatasetListResponse> => {
+    const res = await apiFetch(`/api/datasets?${datasetNamespaceQuery(namespace)}`, { signal });
     if (res.status === 501) return { items: [] }; // calm unconfigured degrade
     if (!res.ok) {
       throw await apiError(res, `list datasets failed (${res.status})`);
@@ -4966,13 +5019,12 @@ export const api = {
   // listDatasetCases reads the draft-head cases + latest label for one dataset.
   // 501-calm (unconfigured); 404 when the dataset does not exist → throws.
   listDatasetCases: async (
+    namespace: string,
     name: string,
     signal?: AbortSignal,
-    namespace?: string,
   ): Promise<DatasetCasesResponse> => {
-    const ns = namespace ?? "default";
     const res = await apiFetch(
-      `/api/datasets/${encodeURIComponent(name)}/cases?namespace=${encodeURIComponent(ns)}`,
+      `/api/datasets/${encodeURIComponent(name)}/cases?${datasetNamespaceQuery(namespace)}`,
       { signal },
     );
     if (res.status === 501) return { datasetId: "", name, cases: [] }; // calm degrade
@@ -4985,15 +5037,14 @@ export const api = {
   // appendLabel appends a label to a case. The author is always the authenticated caller.
   // 201 on success; throws on any error (404 case not found, 400 missing value, 501 unconfigured).
   appendLabel: async (
+    namespace: string,
     datasetName: string,
     caseId: string,
     req: AppendLabelRequest,
     signal?: AbortSignal,
-    namespace?: string,
   ): Promise<void> => {
-    const ns = namespace ?? "default";
     const res = await apiFetch(
-      `/api/datasets/${encodeURIComponent(datasetName)}/cases/${encodeURIComponent(caseId)}/labels?namespace=${encodeURIComponent(ns)}`,
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/${encodeURIComponent(caseId)}/labels?${datasetNamespaceQuery(namespace)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -5010,14 +5061,13 @@ export const api = {
   // 201 on success with {caseId}; 501-calm when unconfigured (store or Langfuse adapter absent).
   // Throws on 400 (missing traceId), 422 (trace has no input), or 502 (Langfuse fetch failed).
   addRunToDataset: async (
+    namespace: string,
     datasetName: string,
     req: FromRunRequest,
     signal?: AbortSignal,
-    namespace?: string,
   ): Promise<{ caseId: string }> => {
-    const ns = namespace ?? "default";
     const res = await apiFetch(
-      `/api/datasets/${encodeURIComponent(datasetName)}/cases/from-run?namespace=${encodeURIComponent(ns)}`,
+      `/api/datasets/${encodeURIComponent(datasetName)}/cases/from-run?${datasetNamespaceQuery(namespace)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -5068,26 +5118,6 @@ export const api = {
       throw await apiError(res, `cost forecast failed (${res.status})`);
     }
     return (await res.json()) as CostForecastResponse;
-  },
-
-  // costChargebackJSON reads the per-day rollup for a calendar month as JSON
-  // (M70, ADR 0063 D3) from GET /api/cost/chargeback?tenant=&period=YYYY-MM.
-  // Returns null on 501 (control-plane store absent).
-  costChargebackJSON: async (
-    tenant: string,
-    period: string,
-    signal?: AbortSignal,
-  ): Promise<ChargebackResponse | null> => {
-    const qs = new URLSearchParams({ tenant, period });
-    const res = await apiFetch(`/api/cost/chargeback?${qs.toString()}`, {
-      headers: { Accept: "application/json" },
-      signal,
-    });
-    if (res.status === 501) return null;
-    if (!res.ok) {
-      throw await apiError(res, `cost chargeback failed (${res.status})`);
-    }
-    return (await res.json()) as ChargebackResponse;
   },
 
   // costChargebackCSVUrl returns the URL for a chargeback CSV download (no fetch;
@@ -5164,14 +5194,17 @@ export const api = {
   // (POST /api/agents/{ns}/{name}/fork, m74.6). Returns the fork outcome:
   // needsRebinding lists dangling refs (model routes, tools) the caller must
   // rebind. A 404 = not discoverable; 409 = name collision with a different origin.
+  // namespace is where the fork lands; omitted, the BFF uses "default".
   forkAgent: async (
     originNamespace: string,
     originName: string,
     name?: string,
+    namespace?: string,
     signal?: AbortSignal,
   ): Promise<ForkAgentResponse> => {
-    const body: { name?: string } = {};
+    const body: { name?: string; namespace?: string } = {};
     if (name) body.name = name;
+    if (namespace) body.namespace = namespace;
     const res = await apiFetch(
       `/api/agents/${encodeURIComponent(originNamespace)}/${encodeURIComponent(originName)}/fork`,
       {

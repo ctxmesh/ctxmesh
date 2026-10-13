@@ -4,7 +4,8 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { ToastProvider } from "@/components/kit";
-import { buildCrumbs } from "@/lib/nav";
+import { buildCrumbs, NAV_ITEMS } from "@/lib/nav";
+import census from "@/test/contract/capabilities.json";
 import { THEME_STORAGE_KEY } from "@/lib/theme";
 
 // The console FRAME (M151 §4.2). These tests pin, in order:
@@ -28,7 +29,14 @@ interface FetchOptions {
   namespaces?: { name: string; displayName?: string }[];
   stops?: unknown;
   approvals?: unknown;
+  /**
+   * What GET /api/agents answers: an array is the page's items, a number an HTTP
+   * error status. Defaults to one agent, so the whole nav shows.
+   */
+  agents?: unknown[] | number;
 }
+
+const ONE_AGENT = [{ name: "checkout-bot", namespace: "team-a" }];
 
 let killBodies: unknown[] = [];
 
@@ -67,6 +75,21 @@ function installFetch(caps: FetchOptions) {
           json: async () => ({ scope: "ns/team-a", applied: true }),
         } as Response);
       }
+      if (url === "/api/agents" || url.startsWith("/api/agents?")) {
+        const agents = caps.agents ?? ONE_AGENT;
+        if (typeof agents === "number") {
+          return Promise.resolve({
+            ok: false,
+            status: agents,
+            json: async () => ({ error: "refused" }),
+          } as Response);
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ items: agents, nextCursor: "" }),
+        } as Response);
+      }
       if (url.startsWith("/api/approvals")) {
         return Promise.resolve({
           ok: true,
@@ -93,6 +116,7 @@ function renderShell(initialEntry = "/") {
           <Route path="/" element={<AppShell />}>
             <Route index element={<div>index surface</div>} />
             <Route path="agents" element={<div>agents surface</div>} />
+            <Route path="tenants" element={<div>tenants surface</div>} />
           </Route>
         </Routes>
       </ToastProvider>
@@ -146,18 +170,15 @@ describe("AppShell — the approved IA", () => {
     expect(within(nav).getByRole("link", { name: /Home/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Agents/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Runs/ })).toBeInTheDocument();
-    // With create allowed, the write surfaces are present.
+    // With create allowed, the write surface is present.
     await waitFor(() =>
-      expect(screen.getByRole("link", { name: /Config builder/ })).toBeInTheDocument(),
+      expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument(),
     );
-    expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument();
     // The workspace switcher (friendly label over namespace — ADR 0068 §7) is in the top bar.
     expect(screen.getByLabelText("Workspace")).toBeInTheDocument();
   });
 
-  it("routes the Stops destination to its real surface (m151.7)", async () => {
-    // Was /soon/stops while the page was unbuilt. The page shipped, so the frame's kill-switch
-    // count now leads somewhere that can actually be acted on.
+  it("routes the Stops destination to its real surface", async () => {
     installFetch(ALLOW_ALL);
     renderShell();
     const stops = await screen.findByRole("link", { name: /Stops/ });
@@ -169,11 +190,31 @@ describe("AppShell — the approved IA", () => {
     renderShell();
     expect(await screen.findByRole("link", { name: /Agents/ })).toBeInTheDocument();
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: /Config builder/ })).toBeNull(),
+      expect(screen.queryByRole("link", { name: /Playground/ })).toBeNull(),
     );
-    expect(screen.queryByRole("link", { name: /Playground/ })).toBeNull();
     // No banner — a definite deny is not a probe failure.
     expect(screen.queryByTestId("capability-banner")).toBeNull();
+  });
+
+  // Tenants are cluster-scoped: a person bound to a namespace cannot list them and is not a
+  // tenant admin, so the destination is absent rather than a page that refuses them.
+  it("hides Tenants from a caller who cannot list them, and shows it to one who can", async () => {
+    const withTenants = (list: boolean) => ({
+      ...DENY_WRITE,
+      body: {
+        ...DENY_WRITE.body,
+        allowed: { ...DENY_WRITE.body.allowed, tenants: { list, create: false } },
+      },
+    });
+    installFetch(withTenants(false));
+    const first = renderShell();
+    expect(await screen.findByRole("link", { name: /Agents/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("link", { name: /Tenants/ })).toBeNull());
+    first.unmount();
+
+    installFetch(withTenants(true));
+    renderShell();
+    expect(await screen.findByRole("link", { name: /Tenants/ })).toBeInTheDocument();
   });
 
   it("shows the honest capability banner (not all-disabled) on a probe 500, and keeps write nav visible", async () => {
@@ -185,7 +226,6 @@ describe("AppShell — the approved IA", () => {
     });
     renderShell();
     expect(await screen.findByTestId("capability-banner")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Config builder/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Playground/ })).toBeInTheDocument();
   });
 
@@ -201,6 +241,124 @@ describe("AppShell — the approved IA", () => {
     );
     expect(within(picker).queryByText("prod")).not.toBeNull();
     expect(within(picker).queryByText("All workspaces")).not.toBeNull();
+  });
+});
+
+// Every gated destination, one at a time: a caller denied exactly that cell loses exactly the
+// items gated on it. The allow map is the BFF's own census (TestCapabilityCensus), so each cell
+// here is one the probe really answers — a gate on an unprobed cell could never be denied.
+function censusAllowing(deny: { resource: string; verb: string }) {
+  const allowed: Record<string, Record<string, boolean>> = {};
+  for (const [resource, verbs] of Object.entries(census as Record<string, string[]>)) {
+    allowed[resource] = Object.fromEntries(
+      verbs.map((verb) => [verb, !(resource === deny.resource && verb === deny.verb)]),
+    );
+  }
+  return allowed;
+}
+
+const GATED = NAV_ITEMS.filter((i) => i.requiresCapability);
+
+describe("AppShell — every capability gate hides its destination", () => {
+  it.each(GATED.map((i) => [i.id, i] as const))(
+    "%s hides for a caller denied its cell, and nothing else does",
+    async (_id, item) => {
+      const gate = item.requiresCapability!;
+      installFetch({
+        ok: true,
+        namespaces: [{ name: "team-a" }],
+        body: { namespace: "team-a", allowed: censusAllowing(gate) },
+      });
+      renderShell();
+      const nav = await screen.findByRole("navigation", { name: "Sections" });
+      await waitFor(() => expect(nav.querySelector(`a[href="${item.route}"]`)).toBeNull());
+      for (const other of GATED) {
+        const same =
+          other.requiresCapability!.resource === gate.resource &&
+          other.requiresCapability!.verb === gate.verb;
+        expect(nav.querySelector(`a[href="${other.route}"]`) === null, other.id).toBe(same);
+      }
+    },
+  );
+});
+
+// A workspace with no agent yet gets the first-run nav: the three destinations the Home
+// checklist walks through, and nothing that would only show an empty page.
+describe("AppShell — the nav before the first agent", () => {
+  const sections = () => screen.findByRole("navigation", { name: "Sections" });
+  const hrefs = (nav: HTMLElement) =>
+    Array.from(nav.querySelectorAll("a")).map((a) => a.getAttribute("href"));
+
+  it("shows only Home, Agents and Providers, flat, with a line saying more is coming", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell();
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toEqual(["/", "/agents", "/providers"]));
+    expect(within(nav).getByTestId("nav-first-run-note")).toHaveTextContent(
+      "The rest of the console appears once you have an agent.",
+    );
+    // No section eyebrows over a three-item list.
+    for (const heading of ["Agents", "Library", "Govern", "Activity", "Admin"]) {
+      expect(within(nav).queryByText(heading, { selector: "p" })).toBeNull();
+    }
+  });
+
+  it("asks about the workspace in view, drafts included", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell();
+    await waitFor(() =>
+      expect(
+        vi.mocked(fetch).mock.calls.map(([u]) => String(u)),
+      ).toContain("/api/agents?limit=1&namespace=team-a&includeDrafts=true"),
+    );
+  });
+
+  it("collapses the drawer the same way", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell();
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toHaveLength(3));
+    fireEvent.click(screen.getByRole("button", { name: "Open the navigation" }));
+    const drawer = await screen.findByTestId("nav-drawer");
+    expect(
+      Array.from(drawer.querySelectorAll("nav a")).map((a) => a.getAttribute("href")),
+    ).toEqual(["/", "/agents", "/providers"]);
+  });
+
+  it("widens to the whole nav on the next page once an agent exists", async () => {
+    const options: FetchOptions = { ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] };
+    installFetch(options);
+    renderShell();
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toHaveLength(3));
+
+    options.agents = ONE_AGENT;
+    fireEvent.click(within(nav).getByRole("link", { name: /Agents/ }));
+    expect(await within(nav).findByRole("link", { name: /Runs/ })).toBeInTheDocument();
+    expect(within(nav).getByRole("link", { name: /Tenants/ })).toBeInTheDocument();
+    expect(within(nav).queryByTestId("nav-first-run-note")).toBeNull();
+  });
+
+  it.each([403, 500, 501])("keeps the whole nav when the agent list answers %i", async (status) => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: status });
+    renderShell();
+    const nav = await sections();
+    await waitFor(() =>
+      expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).startsWith("/api/agents?"))).toBe(true),
+    );
+    // Let the refusal land before asserting nothing collapsed.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(within(nav).getByRole("link", { name: /Runs/ })).toBeInTheDocument();
+    expect(within(nav).queryByTestId("nav-first-run-note")).toBeNull();
+  });
+
+  it("still serves a deep link to a page the short nav leaves out", async () => {
+    installFetch({ ...ALLOW_ALL, namespaces: [{ name: "team-a" }], agents: [] });
+    renderShell("/tenants");
+    const nav = await sections();
+    await waitFor(() => expect(hrefs(nav)).toHaveLength(3));
+    expect(screen.getByText("tenants surface")).toBeInTheDocument();
+    expect(within(nav).queryByRole("link", { name: /Tenants/ })).toBeNull();
   });
 });
 
@@ -277,11 +435,10 @@ describe("buildCrumbs — the trail that replaced the 'Control plane' h1", () =>
     expect(crumbs[crumbs.length - 1]).toEqual({ label: "MCP servers" });
   });
 
-  it("resolves a /soon placeholder through the IA", () => {
+  it("no longer resolves the retired /soon placeholder through the IA", () => {
     expect(buildCrumbs("/soon/stops")).toEqual([
       { label: "Home", to: "/" },
-      { label: "Govern" },
-      { label: "Stops" },
+      { label: "Soon" },
     ]);
   });
 
@@ -333,6 +490,16 @@ describe("AppShell — the overlay drawer (<1024)", () => {
     // The two things the bar gave up on the way down (§4.2's <768 row).
     expect(within(drawer).getByLabelText("Workspace")).toBeInTheDocument();
     expect(within(drawer).getByRole("button", { name: "Sign out" })).toBeInTheDocument();
+  });
+
+  it("closes itself when the current page's nav item is tapped", async () => {
+    installFetch(ALLOW_ALL);
+    renderShell("/agents");
+    await screen.findByText("agents surface");
+    fireEvent.click(screen.getByRole("button", { name: "Open the navigation" }));
+    const drawer = await screen.findByTestId("nav-drawer");
+    fireEvent.click(within(drawer).getByRole("link", { name: /Agents/ }));
+    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).toBeNull());
   });
 
   it("closes itself when a nav item routes away", async () => {

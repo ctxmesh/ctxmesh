@@ -1,0 +1,39 @@
+# BFF routes with no caller in the console, an SDK or the platform, and why each stays.
+# Format: METHOD /api/path | kind | reason. Kinds and rules: hack/bff-route-callers.sh.
+# An entry whose route gains a caller, or disappears, fails the gate: remove it then.
+
+# Called from outside this repository.
+ANY /api/extauth | external | Envoy Gateway's ext-auth filter calls it for every request to an agent hostname (deploy/edge/values.yaml extAuth.path)
+ANY /api/extauth/ | external | Envoy prepends its path_prefix to the original path, so ext-auth for POST /invoke arrives as /api/extauth/invoke
+GET /api/mcp/oauth/client-metadata | external | OAuth authorization servers fetch it: its URL is this console's OAuth client_id (CIMD, ADR 0028)
+
+# Public API on the docs site (reference/http-api.md) that no shipped code calls.
+GET /api/toolregistries | documented | Tool registry CRUD; the console reads tools through /api/tools and /api/catalog
+GET /api/toolregistries/{ns}/{name} | documented | Tool registry CRUD
+POST /api/toolregistries | documented | Tool registry CRUD; the harness seeds Postgres-backed registries through it
+PUT /api/toolregistries/{ns}/{name} | documented | Tool registry CRUD
+DELETE /api/toolregistries/{ns}/{name} | documented | Tool registry CRUD
+PUT /api/mcptoolbindings/{ns}/{name} | documented | MCP tool binding CRUD; the console creates and reads bindings but never edits one
+DELETE /api/mcptoolbindings/{ns}/{name} | documented | MCP tool binding CRUD; the console has no unbind
+DELETE /api/mcp/oauth/grant/{server} | documented | Revoking your own OAuth grant; the console has no revoke control
+POST /api/feedback | documented | The external feedback write path (guides/feedback-and-improvement.md); the console only reads feedback
+POST /api/datasets/{name}/export | documented | Dataset export from traces; the console has no export control
+POST /api/datasets/{name}/pin | documented | Dataset pinning; the console has no pin control
+POST /api/workflows/runs | documented | The inline-spec (planning-mode) workflow run
+GET /api/workflows/spec-schema | documented | The WorkflowSpec JSON Schema
+GET /api/health | documented | Liveness; the console's client for it was never called (m184.43)
+PUT /api/namespaces/{name}/display-name | documented | Setting a namespace's display name; the console has no control for it (m184.43)
+GET /api/providers/{name}/models | documented | A provider's live model list; the console reads models from the provider list (m184.43)
+GET /api/mcptoolbindings | documented | MCP tool binding CRUD; the console lists an agent's bindings from its detail (m184.43)
+GET /api/agentscalingpolicies/{ns}/{name} | documented | Scaling policy CRUD; the console reads policies from the list (m184.43)
+GET /api/evalsuites/{ns}/{name} | documented | Eval suite CRUD; the console reads suites from the list (m184.43)
+PUT /api/evalsuites/{ns}/{name} | documented | Eval suite CRUD; the console has no suite edit (m184.43)
+GET /api/promptversions/{ns}/{name} | documented | Prompt version CRUD; the console reads versions from the list (m184.43)
+PUT /api/promptversions/{ns}/{name} | documented | Prompt version CRUD; the console has no version edit (m184.43)
+
+# Kept for the reason given.
+GET /api/skills | kept | The only way a skill reaches the store (ADR 0137): without these routes spec.skillRefs and the SDK skills client cannot be used. Their console surface is not built
+GET /api/skills/{ns}/{name} | kept | As GET /api/skills
+POST /api/skills | kept | As GET /api/skills: the only write path for a skill
+POST /api/skills/{ns}/{name}/versions | kept | As GET /api/skills: the only way to add a skill version
+DELETE /api/skills/{ns}/{name} | kept | As GET /api/skills

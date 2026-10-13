@@ -175,3 +175,33 @@ func TestPoP_HeaderNameIsDistinctFromTheCapabilityHeader(t *testing.T) {
 	assert.NotEqual(t, runcap.HeaderName, runcap.PoPHeaderName,
 		"the proof and the capability must travel in separate headers, or one could be mistaken for the other")
 }
+
+func TestInspectUnverified(t *testing.T) {
+	pub, priv, err := runcap.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = pub
+	s := runcap.NewSigner(priv, "aud", nil)
+	bearer, err := s.Mint(runcap.MintRequest{User: "u", Agent: "a", RunID: "r", TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := runcap.InspectUnverified(bearer)
+	if err != nil || u.KeyThumbprint != "" {
+		t.Fatalf("bearer: got %+v, %v; want unbound", u, err)
+	}
+	if d := time.Until(u.ExpiresAt); d <= 0 || d > time.Minute+time.Second {
+		t.Errorf("bearer expiry %v is not about a minute away", d)
+	}
+	bound, err := s.Mint(runcap.MintRequest{User: "u", Agent: "a", RunID: "r", TTL: time.Minute, KeyThumbprint: "jkt-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u, err := runcap.InspectUnverified(bound); err != nil || u.KeyThumbprint != "jkt-1" {
+		t.Fatalf("bound: got %+v, %v; want jkt-1", u, err)
+	}
+	if _, err := runcap.InspectUnverified("not-a-token"); err == nil {
+		t.Error("a malformed token must be refused")
+	}
+}

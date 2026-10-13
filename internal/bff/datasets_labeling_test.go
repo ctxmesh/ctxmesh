@@ -24,12 +24,13 @@ package bff
 //   POST /api/datasets/{name}/cases/from-run        — single-run on-ramp (redacted case from a trace)
 //
 // All unit tests run against the in-memory store (NewMemStore) and a fake Langfuse server (for from-run).
-// The label-author tests use ssrClient to drive callerUsername (the SelfSubjectReview path).
+// The label-author tests drive callerUsername through a SelfSubjectReview interceptor.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -37,31 +38,43 @@ import (
 	"testing"
 
 	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
 // ── test helpers ─────────────────────────────────────────────────────────────
 
+// labelingAgentNs / labelingAgentName name the agent the fake Langfuse tags its trace with, and the one
+// AgentDeployment the labeling caller can read — so from-run's trace authorization (ADR 0078) admits it.
+const (
+	labelingAgentNs   = "default"
+	labelingAgentName = "labeling-agent"
+)
+
 // newLabelingServer builds a server with the labeling routes fully wired:
 //   - a fake caller-client factory that resolves callerUsername to `username`
-//     via a SelfSubjectReview interceptor (ssrClient)
+//     via a SelfSubjectReview interceptor, and can read the labeling agent
 //   - an in-memory dataset store
 //   - an optional Langfuse adapter (set to nil when the from-run endpoint should degrade)
 func newLabelingServer(t *testing.T, username string, lf LangfuseAdapter) (*Server, dataset.Store) {
 	t.Helper()
 	sc := testScheme(t)
-	c := fake.NewClientBuilder().WithScheme(sc).Build()
+	agent := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: labelingAgentName, Namespace: labelingAgentNs},
+	}
+	c := fake.NewClientBuilder().WithScheme(sc).WithObjects(agent).
+		WithInterceptorFuncs(ssrInterceptor(username, nil)).Build()
 	ds := dataset.NewMemStore()
 
-	factory := newFakeFactory(ssrClient(username, nil))
-
 	s := NewServer(Options{
-		CallerClients: factory,
+		CallerClients: newFakeFactory(c),
 		Scheme:        sc,
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
@@ -69,7 +82,8 @@ func newLabelingServer(t *testing.T, username string, lf LangfuseAdapter) (*Serv
 		DatasetStore:  ds,
 		Adapters:      Adapters{Langfuse: lf},
 	})
-	_ = c // fake client registered via factory; suppress lint warning
+	// The caller may read and write datasets in every namespace; datasets_authz_test.go covers the refusals.
+	s.authorizer = &recordingAuthorizer{}
 	return s, ds
 }
 
@@ -108,14 +122,25 @@ func seedCase(t *testing.T, ds dataset.Store, ns, dsName, input string) string {
 }
 
 // newFakeLabelingLangfuse creates a minimal fake Langfuse serving ONE trace's detail — enough for from-run.
+// The trace carries the labeling agent's tag; no run maps it.
 func newFakeLabelingLangfuse(t *testing.T, traceID, input, output string) LangfuseAdapter {
 	t.Helper()
+	return newFakeLabelingLangfuseTagged(t, traceID, input, output, agentRunTag(labelingAgentNs, labelingAgentName))
+}
+
+// newFakeLabelingLangfuseTagged is newFakeLabelingLangfuse with the trace's tags chosen by the test.
+func newFakeLabelingLangfuseTagged(t *testing.T, traceID, input, output string, tags ...string) LangfuseAdapter {
+	t.Helper()
+	if tags == nil {
+		tags = []string{}
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/public/traces/") {
 			detail := map[string]any{
 				"id":        traceID,
 				"name":      "test-agent",
 				"timestamp": "2026-01-01T00:00:00Z",
+				"tags":      tags,
 				"observations": []map[string]any{{
 					"id":        "obs-root",
 					"type":      "SPAN",
@@ -169,6 +194,28 @@ func TestHandleListDatasets_ReturnsDatasetsWithCaseCount(t *testing.T) {
 	}
 	assert.Equal(t, 2, counts["goldens"], "goldens has 2 cases")
 	assert.Equal(t, 1, counts["evals"], "evals has 1 case")
+}
+
+// failingCasesStore is a dataset store whose case read fails.
+type failingCasesStore struct{ dataset.Store }
+
+func (failingCasesStore) ListCases(context.Context, string) ([]dataset.Case, error) {
+	return nil, errors.New("cases table unavailable")
+}
+
+// TestHandleListDatasets_CaseReadFailureIs500: a dataset whose cases cannot be read is a 500, not a
+// dataset listed with 0 cases, and the store's error is logged rather than sent.
+func TestHandleListDatasets_CaseReadFailureIs500(t *testing.T) {
+	s, ds := newLabelingServer(t, "alice", nil)
+	seedCase(t, ds, "default", "goldens", "input-a")
+	logs := &logBuffer{}
+	s.datasetStore = failingCasesStore{Store: ds}
+	s.log = funcr.New(func(prefix, args string) { logs.write(prefix, args) }, funcr.Options{})
+
+	code, body := labelingRequest(t, s, http.MethodGet, "/api/datasets?namespace=default", nil)
+	require.Equal(t, http.StatusInternalServerError, code, string(body))
+	assert.NotContains(t, string(body), "cases table unavailable")
+	assert.Contains(t, logs.String(), "cases table unavailable")
 }
 
 // TestHandleListDatasets_EmptyNamespace_Returns501 proves the endpoint degrades honestly (501) when the
@@ -443,6 +490,35 @@ func TestHandleFromRun_EnsuresDatasetIdempotently(t *testing.T) {
 	cases, err := ds.ListCases(context.Background(), d.ID)
 	require.NoError(t, err)
 	assert.Len(t, cases, 2, "each from-run call appends one case (dataset create is idempotent)")
+}
+
+// TestHandleFromRun_RefusesATraceTheCallerCannotRead: from-run copies a trace's input and output into a
+// dataset, so it reads the trace and must authorize it first (ADR 0078). A trace no run maps is readable
+// only through its agent tag; an untagged trace and one tagged for an agent the caller cannot read are the
+// same 404, and neither seeds a case.
+func TestHandleFromRun_RefusesATraceTheCallerCannotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tags []string
+	}{
+		{name: "untagged", tags: nil},
+		{name: "another tenant's agent", tags: []string{agentRunTag("victim-ns", "victim-agent")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const traceID = "tr-not-yours"
+			lf := newFakeLabelingLangfuseTagged(t, traceID, "secret question", "secret answer", tc.tags...)
+			s, ds := newLabelingServer(t, "alice", lf)
+
+			code, body := labelingRequest(t, s, http.MethodPost, "/api/datasets/goldens/cases/from-run",
+				FromRunRequest{TraceID: traceID})
+			require.Equal(t, http.StatusNotFound, code, "body: %s", string(body))
+			assert.NotContains(t, string(body), "secret")
+
+			datasets, err := ds.ListDatasets(context.Background(), "default")
+			require.NoError(t, err)
+			assert.Empty(t, datasets, "a refused from-run must not create a dataset or seed a case")
+		})
+	}
 }
 
 // TestHandlePinDataset_PinsDraftHead (m69.12): POST /api/datasets/{name}/pin freezes the draft head into

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"sync"
 
@@ -117,7 +116,31 @@ var (
 		resKnowledgeBases,
 	}
 	goldenVerbs = []string{verbGet, verbList, verbCreate, verbUpdate, "delete"}
+
+	// readGatedResources are agents-group resources the console gates only on reading, so each
+	// is probed with list alone: the Approvals queue and its nav count (list workflows, the
+	// resource GET /api/approvals authorizes against) and the Alerts feed (list alertpolicies,
+	// GET /api/alerts). Left unprobed, their cells read as allowed and the gates hid nothing.
+	readGatedResources = []string{resourceWorkflows, resourceAlerts}
 )
+
+// probeCell is one agents-group (resource, verb) question the capability probe asks.
+type probeCell struct{ resource, verb string }
+
+// agentsGroupProbes is every agents-group cell the capability probe asks about: the golden
+// cross product, and list on each read-gated resource.
+func agentsGroupProbes() []probeCell {
+	cells := make([]probeCell, 0, len(goldenResources)*len(goldenVerbs)+len(readGatedResources))
+	for _, res := range goldenResources {
+		for _, verb := range goldenVerbs {
+			cells = append(cells, probeCell{res, verb})
+		}
+	}
+	for _, res := range readGatedResources {
+		cells = append(cells, probeCell{res, verbList})
+	}
+	return cells
+}
 
 // handleWhoAmI serves GET /api/whoami — the caller's identity (username +
 // groups) as the API server reports it. It issues a SelfSubjectReview
@@ -192,19 +215,21 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// probeCapabilities runs one SelfSubjectAccessReview per golden resource × verb
+// probeCapabilities runs one SelfSubjectAccessReview per agents-group probe cell
 // against the caller-scoped client and folds them into resource → verb →
 // allowed. The SSARs run concurrently (each is an independent read-only probe);
 // the first true API error (not an allowed/denied answer) is returned so the
 // handler can surface it honestly. The result map is fully populated for every
-// resource × verb (an errored request never yields a partial matrix).
+// cell (an errored request never yields a partial matrix).
 func probeCapabilities(ctx context.Context, caller client.Client, namespace string) (map[string]map[string]bool, error) {
-	// Pre-size and pre-seed the result so concurrent writers only ever touch
-	// their own (resource, verb) cell — no map-growth race, no shared verb map
-	// written by two goroutines.
-	allowed := make(map[string]map[string]bool, len(goldenResources)+1)
-	for _, res := range goldenResources {
-		allowed[res] = make(map[string]bool, len(goldenVerbs))
+	cells := agentsGroupProbes()
+	// Pre-seed every resource's verb map before the fan-out, so no goroutine
+	// ever grows the outer map.
+	allowed := make(map[string]map[string]bool, len(goldenResources)+len(readGatedResources)+3)
+	for _, c := range cells {
+		if allowed[c.resource] == nil {
+			allowed[c.resource] = make(map[string]bool, len(goldenVerbs))
+		}
 	}
 	// The synthetic `logs` capability is a SINGLE `get pods/log` probe (core group + subresource),
 	// distinct from the agents-group golden cross-product — seed its own cell.
@@ -218,23 +243,21 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 		mu       sync.Mutex
 		firstErr error
 	)
-	for _, res := range goldenResources {
-		for _, verb := range goldenVerbs {
-			wg.Add(1)
-			go func(res, verb string) {
-				defer wg.Done()
-				ok, err := reviewAccess(ctx, caller, namespace, res, verb)
-				mu.Lock()
-				defer mu.Unlock()
-				if err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-					return
+	for _, c := range cells {
+		wg.Add(1)
+		go func(res, verb string) {
+			defer wg.Done()
+			ok, err := reviewAccess(ctx, caller, namespace, res, verb)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
 				}
-				allowed[res][verb] = ok
-			}(res, verb)
-		}
+				return
+			}
+			allowed[res][verb] = ok
+		}(c.resource, c.verb)
 	}
 	wg.Wait()
 
@@ -261,8 +284,24 @@ func probeCapabilities(ctx context.Context, caller client.Client, namespace stri
 		}
 		allowed[resSecrets][verb] = ok
 	}
+
+	// Tenants are cluster-scoped, so these probes name no namespace: asked "in" a namespace, a
+	// RoleBinding there would answer yes for a list that Kubernetes refuses. The console hides its
+	// tenant surfaces from a caller who cannot list them.
+	allowed[resourceTenants] = make(map[string]bool, len(tenantProbeVerbs))
+	for _, verb := range tenantProbeVerbs {
+		ok, err := reviewAccess(ctx, caller, "", resourceTenants, verb)
+		if err != nil {
+			return nil, err
+		}
+		allowed[resourceTenants][verb] = ok
+	}
 	return allowed, nil
 }
+
+// tenantProbeVerbs are the Tenant verbs the console gates on: list for every tenant surface,
+// create for the Tenants page's create action.
+var tenantProbeVerbs = []string{verbList, verbCreate}
 
 // reviewAccess issues one SelfSubjectAccessReview for (namespace, resource, verb)
 // in the agents API group and returns the API server's allow decision. A
@@ -316,66 +355,59 @@ func reviewCoreAccess(ctx context.Context, caller client.Client, namespace, reso
 	return ssar.Status.Allowed, nil
 }
 
-// handleNamespaces serves GET /api/namespaces — the namespaces the CALLER can
-// list, through the CALLER-SCOPED client (ADR 0011). A caller whose RBAC does
-// not permit listing namespaces gets an honest 403 (via classifyReadError), NEVER
-// a silent empty list that would masquerade as "no namespaces exist". An
-// authentically empty cluster still yields {"namespaces":[]}.
+// handleNamespaces serves GET /api/namespaces — the namespaces the CALLER works
+// in, through the CALLER-SCOPED client (ADR 0011). It is the same set a list given
+// no namespace reads (workspaces.go). When nothing can be learned about the caller
+// the answer is the honest 403, NEVER a silent empty list that would masquerade as
+// "no namespaces exist". An authentically empty cluster still yields
+// {"namespaces":[]}.
 func (s *Server) handleNamespaces(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
 		return
 	}
 
-	var list corev1.NamespaceList
-	if err := caller.List(r.Context(), &list); err != nil {
-		if _, _, isRBAC := classifyReadError(err); isRBAC {
-			// The caller cannot `list namespaces` cluster-wide. That is the NORMAL state for
-			// every persona bound per-namespace — which is the binding shape ADR 0136 and
-			// catalog.go's tenant-isolation precondition both require. Returning 403 here left
-			// the picker empty and the console with no namespace to work in, so it fell back to
-			// "" — a cluster-scoped capability probe that no namespaced RoleBinding can satisfy.
-			//
-			// The projects pattern instead (what the OpenShift console does): enumerate
-			// CANDIDATES with the platform's own view, then filter to what THIS caller may use.
-			// Only SSAR-approved names reach the wire, so this is not a namespace-existence
-			// oracle. The BFF gains no Kubernetes privilege — the mirror is its own Postgres
-			// projection, and every allow decision is still the API server's, made as the caller.
-			allowed, learned, ferr := s.callerVisibleNamespaces(r.Context(), caller)
-			if ferr != nil {
-				s.log.Error(ferr, "namespace discovery fallback failed")
-				writeError(w, http.StatusInternalServerError, "failed to determine your namespaces")
-				return
-			}
-			if !learned {
-				// The fallback had nothing to enumerate (no mirror, or no namespace in it), so it
-				// learned NOTHING about this caller. Returning [] here would assert "you have no
-				// namespaces" — a fact we do not have. The honest answer is still the denial.
-				status, msg, _ := classifyReadError(err)
-				writeError(w, status, msg)
-				return
-			}
-			writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: allowed})
+	// A caller who may list namespaces gets every one, platform namespaces flagged so the
+	// console's first visit skips them. A caller bound per namespace (the chart's default)
+	// cannot, and gets the mirror's namespaces filtered to those they may use: only names the
+	// API server approved for this caller reach the wire, so this is not an existence oracle.
+	set, err := s.callerWorkspaces(r.Context(), caller)
+	if err != nil {
+		if status, msg, isRBAC := classifyReadError(err); isRBAC {
+			writeError(w, status, msg)
 			return
 		}
 		s.log.Error(err, "list namespaces failed")
-		writeError(w, http.StatusInternalServerError, "failed to list namespaces")
+		writeError(w, http.StatusInternalServerError, "failed to determine your namespaces")
 		return
 	}
-
-	summaries := make([]NamespaceSummary, 0, len(list.Items))
-	for i := range list.Items {
-		ns := &list.Items[i]
-		s := NamespaceSummary{Name: ns.Name}
-		if dn := ns.Annotations[annNamespaceDisplayName]; dn != "" {
-			s.DisplayName = dn
-		}
-		summaries = append(summaries, s)
+	if !set.known {
+		// Nothing to enumerate (no mirror, or an empty one), so nothing was learned about this
+		// caller: [] would assert "you have no namespaces". The denial is the honest answer.
+		status, msg, _ := classifyReadError(set.denial)
+		writeError(w, status, msg)
+		return
 	}
-	// Stable order so the SPA's namespace picker is deterministic.
-	slices.SortFunc(summaries, func(a, b NamespaceSummary) int { return strings.Compare(a.Name, b.Name) })
+	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: set.namespaces})
+}
 
-	writeJSON(w, http.StatusOK, NamespaceListResponse{Namespaces: summaries})
+// isPlatformNamespace reports whether the platform or Kubernetes itself occupies the namespace:
+// the BFF's own (control-plane) namespace, the MCP credential namespace, kube-* and knative-*,
+// cert-manager, and the *-system convention platform components install into (kourier-system,
+// calico-system). A user may still select one; it is never the console's default.
+// The *-system suffix also flags a workspace a team happened to name that way, which then only
+// stops being the first-visit default.
+func (s *Server) isPlatformNamespace(name string) bool {
+	const certManagerNamespace = "cert-manager"
+	switch {
+	case name == "":
+		return false
+	case name == s.installNamespace, name == s.credentialNamespace, name == certManagerNamespace:
+		return true
+	case strings.HasPrefix(name, "kube-"), strings.HasPrefix(name, "knative-"), strings.HasSuffix(name, "-system"):
+		return true
+	}
+	return false
 }
 
 // callerVisibleNamespaces is the fallback for a caller who cannot `list namespaces`: the
@@ -403,14 +435,16 @@ func (s *Server) callerVisibleNamespaces(ctx context.Context, caller client.Clie
 	if len(candidates) == 0 {
 		return nil, false, nil
 	}
+	allowed, errs := probeEach(ctx, candidates, func(ctx context.Context, ns string) (bool, error) {
+		return reviewAccess(ctx, caller, ns, resAgentDeployments, verbList)
+	})
 	out := make([]NamespaceSummary, 0, len(candidates))
-	for _, ns := range candidates {
-		ok, rerr := reviewAccess(ctx, caller, ns, resAgentDeployments, verbList)
-		if rerr != nil {
-			s.log.Error(rerr, "namespace membership probe failed (omitting)", "namespace", ns)
+	for i, ns := range candidates {
+		if errs[i] != nil {
+			s.log.Error(errs[i], "namespace membership probe failed (omitting)", "namespace", ns)
 			continue
 		}
-		if ok {
+		if allowed[i] {
 			out = append(out, NamespaceSummary{Name: ns})
 		}
 	}

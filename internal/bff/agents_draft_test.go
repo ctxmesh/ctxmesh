@@ -30,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // --- Test helpers for draft endpoints ----------------------------------------
@@ -77,23 +77,23 @@ func getAgentsList(t *testing.T, s *Server, query string) AgentListResponse {
 }
 
 // draftAgent builds an AgentDeployment carrying the stage=draft label.
-func draftAgent(name, ns string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func draftAgent(name, ns string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 			Labels:    map[string]string{stageLabel: stageDraft},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{Image: "img:draft"},
+		Spec: agentsv1beta1.AgentDeploymentSpec{Image: "img:draft"},
 	}
 }
 
 // publishedAgent builds an AgentDeployment with no stage label (a normal
 // published agent).
-func publishedAgent(name, ns string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func publishedAgent(name, ns string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:live"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:live"},
 	}
 }
 
@@ -111,7 +111,7 @@ func TestCreateAgentWithStageDraftStampsLabel(t *testing.T) {
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 		// The primary AgentDeployment must carry the stage=draft label.
-		var got agentsv1alpha1.AgentDeployment
+		var got agentsv1beta1.AgentDeployment
 		require.NoError(t, c.Get(context.Background(),
 			client.ObjectKey{Name: "echo-agent", Namespace: "prod"}, &got))
 		assert.Equal(t, stageDraft, got.Labels[stageLabel],
@@ -130,7 +130,7 @@ func TestCreateAgentWithStageDraftStampsLabel(t *testing.T) {
 		s.Handler().ServeHTTP(rec, req)
 		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-		var got agentsv1alpha1.AgentDeployment
+		var got agentsv1beta1.AgentDeployment
 		require.NoError(t, c.Get(context.Background(),
 			client.ObjectKey{Name: "echo-agent", Namespace: "prod"}, &got))
 		assert.Empty(t, got.Labels[stageLabel],
@@ -216,7 +216,7 @@ func TestPublishAgentRemovesDraftLabel(t *testing.T) {
 	assert.Equal(t, detailNS, resp.Namespace)
 
 	// The label must be gone from the live object.
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(),
 		client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
 	assert.Empty(t, got.Labels[stageLabel],
@@ -239,7 +239,7 @@ func TestPublishAgentIsIdempotent(t *testing.T) {
 	assert.Equal(t, statusPublished, resp.Status)
 
 	// Pre-existing labels must be intact (the no-op must not clobber them).
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(),
 		client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
 	assert.Equal(t, "echo", got.Labels["app"],
@@ -258,7 +258,7 @@ func TestPublishAgentPreservesOtherLabels(t *testing.T) {
 	rec := postPublish(t, s, detailNS, "echo")
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(),
 		client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
 	assert.Empty(t, got.Labels[stageLabel], "stage label must be removed")
@@ -296,10 +296,10 @@ func TestPublishAgentWithoutTokenIs401(t *testing.T) {
 // TestStampDraftLabelStampsOnlyAgentDeployment proves stampDraftLabel sets the
 // stage=draft label only on the AgentDeployment and not on other object kinds.
 func TestStampDraftLabelStampsOnlyAgentDeployment(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo"},
 	}
-	binding := &agentsv1alpha1.MCPToolBinding{
+	binding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo-search"},
 	}
 	objs := []decodedObject{
@@ -324,7 +324,7 @@ func TestIsDraftAgent(t *testing.T) {
 	assert.False(t, isDraftAgent(live))
 
 	// An agent with the label set to a different value is not a draft.
-	other := &agentsv1alpha1.AgentDeployment{
+	other := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{stageLabel: "deprecated"}},
 	}
 	assert.False(t, isDraftAgent(other))

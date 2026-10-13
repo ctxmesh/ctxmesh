@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -123,11 +123,11 @@ func startTestRunWorkers(t *testing.T, s *Server) {
 
 // readyAgent is an AgentDeployment with an assigned endpoint (status.url) — the
 // happy-path fixture the Playground resolves and dispatches to.
-func readyAgent(name, namespace, url string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func readyAgent(name, namespace, url string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "echo:1"},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{URL: url},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "echo:1"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{URL: url},
 	}
 }
 
@@ -735,6 +735,40 @@ func TestHTTPInvokeStreamToleratesNilOnStep(t *testing.T) {
 	final, _, err := sa.InvokeStream(context.Background(), srv.URL, []byte(`{}`), nil, nil)
 	require.NoError(t, err)
 	assert.Contains(t, string(final), "ok")
+}
+
+// An agent that does not stream answers the streaming request with its whole JSON envelope. That is the
+// result, as the execution contract says; the quickstart's echo agent failed every durable run before.
+func TestHTTPInvokeStreamTakesAPlainReplyAsTheResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_, _ = w.Write([]byte(`{"output":"MOCK_OK"}`))
+	}))
+	defer srv.Close()
+
+	sa := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()}).(StreamingInvokeAdapter)
+	var tokens []string
+	final, traceID, err := sa.InvokeStream(context.Background(), srv.URL, []byte(`{"input":"hi"}`),
+		func(text string) { tokens = append(tokens, text) }, nil)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"output":"MOCK_OK"}`, string(final))
+	assert.NotEmpty(t, traceID)
+	assert.Empty(t, tokens, "a plain reply has no token frames")
+}
+
+// A stream is still held to its contract: one that ends without a `done` frame is a failed run.
+func TestHTTPInvokeStreamWithoutDoneStillFails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"token\",\"text\":\"half\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	sa := NewInvokeAdapter(InvokeAdapterConfig{HTTPClient: srv.Client()}).(StreamingInvokeAdapter)
+	_, _, err := sa.InvokeStream(context.Background(), srv.URL, []byte(`{}`), nil, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no result frame")
 }
 
 // TestHTTPInvokeAdapterSurfacesNon2xx proves a non-2xx agent response is returned

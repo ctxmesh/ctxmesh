@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { hasCompletedRun, markRunCompleted } from "./first-run";
+import { firstRunPlaygroundLink, hasCompletedRun, markRunCompleted } from "./first-run";
 
 describe("first-run latch", () => {
   beforeEach(() => {
@@ -17,6 +17,21 @@ describe("first-run latch", () => {
   it("is scoped per workspace — a run in one namespace does not check the step off in another", () => {
     markRunCompleted("team-a");
     expect(hasCompletedRun("team-b")).toBe(false);
+  });
+
+  // All workspaces spans every workspace, and the chats record the concrete namespace they ran in,
+  // so a run anywhere is a run here. This used to read only the all-workspaces key, which nothing
+  // writes since the chat records under the agent's own namespace: the step never checked off.
+  it("counts a run in any workspace under All workspaces", () => {
+    expect(hasCompletedRun("")).toBe(false);
+    markRunCompleted("team-a");
+    expect(hasCompletedRun("")).toBe(true);
+  });
+
+  it("does not count another key on the origin as a run under All workspaces", () => {
+    window.localStorage.setItem("ctxmesh.namespace", "team-a");
+    window.localStorage.setItem("ctxmesh.firstRun.ranAgentLater", "1");
+    window.localStorage.setItem("ctxmesh.firstRun.ranAgent:team-a", "0");
     expect(hasCompletedRun("")).toBe(false);
   });
 
@@ -44,5 +59,38 @@ describe("first-run latch", () => {
     });
     expect(() => markRunCompleted("team-a")).not.toThrow();
     expect(hasCompletedRun("team-a")).toBe(false);
+  });
+});
+
+describe("firstRunPlaygroundLink", () => {
+  it("picks the newest agent by creation time", () => {
+    expect(
+      firstRunPlaygroundLink(
+        [
+          { name: "a", namespace: "ns1", createdAt: "2026-10-01T00:00:00Z" },
+          { name: "b", namespace: "ns2", createdAt: "2026-10-02T00:00:00Z" },
+        ],
+        "/playground",
+      ),
+    ).toBe("/playground?agent=b&ns=ns2");
+  });
+
+  it("uses a lone agent even without a creation time", () => {
+    expect(firstRunPlaygroundLink([{ name: "solo", namespace: "default" }], "/playground")).toBe(
+      "/playground?agent=solo&ns=default",
+    );
+  });
+
+  it("falls back to the picker when it cannot tell which agent is new", () => {
+    expect(
+      firstRunPlaygroundLink(
+        [
+          { name: "a", namespace: "x" },
+          { name: "b", namespace: "x" },
+        ],
+        "/playground",
+      ),
+    ).toBe("/playground");
+    expect(firstRunPlaygroundLink([], "/playground")).toBe("/playground");
   });
 });

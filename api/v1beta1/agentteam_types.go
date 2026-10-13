@@ -21,10 +21,6 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 )
 
-// AgentTeam is a NEW type (M64, ADR 0057) with no v1alpha1 history, so it is born directly in the
-// storage version (v1beta1) as a SINGLE-version CRD — no deprecated spoke, no conversion. The
-// CRD-version-parity guard (hack/check-crd-version-parity.sh) skips single-version CRDs.
-
 // AgentTeamSupervisor identifies the orchestrating agent of a team.
 type AgentTeamSupervisor struct {
 	// agentRef is the name of a standing AgentDeployment (same namespace) that orchestrates the team
@@ -173,6 +169,7 @@ type AgentTeamStatus struct {
 // boundary); at runtime the supervisor delegates to a roster member via the `delegate_to` tool, which
 // starts the member as a durable SUB-RUN on the run-worker path — inheriting the invoking user's OBO
 // (no re-consent), the conversation, and the trace, bounded by the spawn budget + tenant quota.
+// This kind is feature-frozen: it receives fixes, not new fields (ADR 0152).
 type AgentTeam struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

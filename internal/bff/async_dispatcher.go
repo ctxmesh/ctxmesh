@@ -23,9 +23,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // The async AMP DISPATCHER (M141.4, ADR 0121) — the half that turns a durable message back into a call.
@@ -41,22 +44,35 @@ import (
 // It runs as a background worker inside the BFF, alongside the run-worker, the online scorer and the
 // cost-rollup worker, rather than as a new Deployment: it needs the same control-plane reach they have
 // and nothing else.
+//
+// Each registry member has a durable consumer of its own (jsname.AgentDurable), so the consumer's pending
+// count is the number of hops waiting for that agent: the metric a queue-depth AgentScalingPolicy scales
+// the agent on. The set follows the capability registry. A hop to an agent that is not a member yet waits
+// in the stream and is delivered once the agent joins, within the stream's retention. Each durable
+// delivers several hops at once (the bus's MaxInFlight), so an agent KEDA has scaled out gets work for
+// every replica.
 
 const (
-	// asyncDispatchTimeout bounds one delivery attempt. Generous, because the callee may be a ksvc cold
-	// starting from zero — and a timeout here is a NACK, which costs a backoff cycle, not a lost message.
-	asyncDispatchTimeout = 60 * time.Second
+	// asyncDispatchTimeout bounds one delivery attempt, from reading the capability registry to the agent's
+	// answer. It outlasts the receiving launcher, which bounds processing a delivery at 90s plus a few
+	// seconds of admission and dedupe, so the dispatcher never gives up on a run the agent is still
+	// finishing. It stays under asyncbus.AckWait, so the broker never redelivers a hop still being
+	// delivered. A timeout is a NACK, which costs a backoff cycle, not a lost message.
+	asyncDispatchTimeout = 105 * time.Second
 
-	// asyncDurableName is the JetStream durable consumer this dispatcher rejoins across restarts. It is a
-	// fixed name on purpose: a generated one would create a NEW consumer on every boot, so the messages
-	// waiting for the old one would never be delivered — the exact failure durability is meant to prevent.
+	// asyncDurableName is the durable that drains hops published on the registry-only subject
+	// (jsname.RegistrySubjects) before hops were addressed to their receiver. It is a fixed name on
+	// purpose: a generated one would create a NEW consumer on every boot, so the messages waiting for the
+	// old one would never be delivered — the exact failure durability is meant to prevent.
 	asyncDurableName = "ctxmesh-async-dispatcher"
 
-	// asyncAllRegistries is the subject filter covering every registry's traffic. One dispatcher serves
-	// them all; isolation is not weakened by that, because the callee still hard-denies a cross-registry
-	// envelope at AMP layer 1, and this dispatcher independently refuses to cross a registry boundary
-	// (see deliver).
-	asyncAllRegistries = "ctxmesh.a2a.>"
+	// asyncDeliveryAttestationTTL bounds the attestation minted for one delivery attempt: it is used at once,
+	// by a receiver that may be cold-starting.
+	asyncDeliveryAttestationTTL = asyncDispatchTimeout + time.Minute
+
+	// defaultAsyncMemberResync is how often the dispatcher re-reads the registry members it keeps a
+	// consumer for, and how long it waits before retrying a consumer the backend refused.
+	defaultAsyncMemberResync = 15 * time.Second
 )
 
 // AsyncDispatcherConfig configures the dispatcher.
@@ -65,10 +81,12 @@ type AsyncDispatcherConfig struct {
 	Subscriber asyncbus.Subscriber
 	// Client delivers to agents. Nil ⇒ a bounded default.
 	Client *http.Client
+	// MemberResync is how often the registry members are re-read. Zero ⇒ defaultAsyncMemberResync.
+	MemberResync time.Duration
 }
 
 // StartAsyncDispatcher consumes async AMP hops and delivers them to their target agents until ctx is
-// done. It returns immediately; the loop runs in a goroutine, like the other BFF workers.
+// done. It returns immediately; the consumers run in goroutines, like the other BFF workers.
 func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherConfig) {
 	if cfg.Subscriber == nil {
 		return
@@ -77,18 +95,103 @@ func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherCo
 	if client == nil {
 		client = &http.Client{Timeout: asyncDispatchTimeout}
 	}
-	go func() {
-		// Subscribe blocks until ctx is done. A backend error is worth surfacing loudly: with the
-		// dispatcher down, hops accumulate in the stream (they are durable, so nothing is lost) but
-		// nothing is delivered, and that is not a state to discover from a user report.
-		if err := cfg.Subscriber.Subscribe(ctx, asyncAllRegistries, asyncDurableName,
-			func(hctx context.Context, msg asyncbus.Message) error {
-				return s.deliverAsyncHop(hctx, client, msg)
-			},
-		); err != nil && ctx.Err() == nil {
-			s.log.Error(err, "async dispatcher stopped; async AMP hops are queuing undelivered")
+	resync := cfg.MemberResync
+	if resync <= 0 {
+		resync = defaultAsyncMemberResync
+	}
+	deliver := func(hctx context.Context, msg asyncbus.Message) error {
+		hctx, cancel := context.WithTimeout(hctx, asyncDispatchTimeout)
+		defer cancel()
+		// The backend records nothing about a nack, so every failed attempt is logged here with its
+		// reason; past the delivery budget the backend stops redelivering the message.
+		err := s.deliverAsyncHop(hctx, client, msg)
+		if err != nil {
+			s.log.Error(err, "async dispatch: delivery failed; redelivering after a backoff",
+				"messageId", msg.ID, "subject", msg.Subject)
 		}
+		return err
+	}
+	go s.consumeAsyncQueue(ctx, cfg.Subscriber, jsname.RegistrySubjects, asyncDurableName, resync, deliver)
+	if s.agentCapabilities != nil {
+		go s.syncAgentQueues(ctx, cfg.Subscriber, resync, deliver)
+	}
+}
+
+// consumeAsyncQueue runs one durable consumer until ctx is done. A backend error is logged loudly and the
+// consumer is retried: while it is down its hops accumulate in the stream (they are durable, so nothing
+// is lost) but none is delivered, and that is not a state to discover from a user report.
+func (s *Server) consumeAsyncQueue(
+	ctx context.Context, sub asyncbus.Subscriber, subject, durable string, retry time.Duration, h asyncbus.Handler,
+) {
+	for {
+		err := sub.Subscribe(ctx, subject, durable, h)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			s.log.Error(err, "async dispatcher: a consumer stopped; its hops are queuing undelivered until it "+
+				"is retried", "durable", durable, "retryIn", retry)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retry):
+		}
+	}
+}
+
+// syncAgentQueues keeps one consumer running for every registry member, re-reading the members every
+// resync: a new member's consumer starts, and the consumer of an agent that left every registry stops.
+// A failed read changes nothing, so a capability-registry outage never stops delivery.
+func (s *Server) syncAgentQueues(ctx context.Context, sub asyncbus.Subscriber, resync time.Duration, h asyncbus.Handler) {
+	running := map[string]context.CancelFunc{}
+	var wg sync.WaitGroup
+	defer func() {
+		for _, stop := range running {
+			stop()
+		}
+		wg.Wait()
 	}()
+	ticker := time.NewTicker(resync)
+	defer ticker.Stop()
+	for {
+		members, err := s.agentCapabilities.ListMembers(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			s.log.Error(err, "async dispatcher: reading the registry members failed; keeping the current consumers")
+		} else {
+			want := make(map[string]bool, len(members))
+			for _, m := range members {
+				durable := jsname.AgentDurable(m.Namespace, m.Agent)
+				want[durable] = true
+				if running[durable] != nil {
+					continue
+				}
+				qctx, stop := context.WithCancel(ctx)
+				running[durable] = stop
+				wg.Add(1)
+				go func(filter string) {
+					defer wg.Done()
+					s.consumeAsyncQueue(qctx, sub, filter, durable, resync, h)
+				}(jsname.AgentFilter(m.Namespace, m.Agent))
+			}
+			for durable, stop := range running {
+				if !want[durable] {
+					stop()
+					delete(running, durable)
+					s.log.Info("async dispatcher: an agent left its registry; hops waiting for it are kept "+
+						"until it joins one again or they expire", "durable", durable)
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // deliverAsyncHop POSTs one message to its target agent as a CloudEvent.
@@ -97,10 +200,12 @@ func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherCo
 // messageId, both set by the producer (cmd/launcher/cloudevent.go). The namespace and registry come from
 // the PLATFORM headers the publish edge stamped from the verified run, never from the producer.
 //
-// Returning an error nacks, so the message is redelivered after the backend's backoff. That is the right
-// answer for a cold-starting or briefly-unavailable callee; it is the wrong answer for a message that can
-// never be delivered, which is why the un-routable cases below are ACKED with a logged reason instead of
-// being retried forever.
+// Returning an error nacks, so the message is redelivered after the backend's backoff until its delivery
+// budget is spent. That is the answer for a cold-starting callee, and for a receiver the capability registry
+// has no row or no address for: the row may not be written yet, and a receiver that never gets one (a job
+// agent receives nothing) fails visibly rather than being acked away. Only a message that can never be
+// delivered for a settled reason (no routing context, a registry boundary, the callee's own refusal) is
+// ACKED, with that reason logged.
 func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg asyncbus.Message) error {
 	namespace := strings.TrimSpace(msg.Headers[headerAsyncNamespace])
 	registryID := strings.TrimSpace(msg.Headers[headerAsyncRegistry])
@@ -121,23 +226,37 @@ func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg a
 	if err != nil {
 		return fmt.Errorf("async dispatch: resolving %s/%s: %w", namespace, receiver, err)
 	}
-	if !ok || target.RegistryID != registryID {
+	if !ok {
+		return fmt.Errorf("async dispatch: %s/%s has no capability-registry row", namespace, receiver)
+	}
+	if target.RegistryID != registryID {
 		s.log.Info("async dispatch: refusing delivery outside the sender's registry",
 			"messageId", msg.ID, "receiver", namespace+"/"+receiver, "senderRegistry", registryID)
 		return nil // ack: this will never become deliverable
 	}
+	if target.Endpoint == "" {
+		return fmt.Errorf("async dispatch: %s/%s has no delivery address (a job agent receives no AMP deliveries)",
+			namespace, receiver)
+	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.agentEndpoint(receiver, namespace), bytes.NewReader(msg.Data))
+	attestation, deliverable, err := s.attestAsyncSender(ctx, msg, namespace, registryID, receiver)
+	if err != nil || !deliverable {
+		return err // an error nacks; undeliverable is acked, and logged there
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.Endpoint, bytes.NewReader(msg.Data))
 	if err != nil {
 		return fmt.Errorf("async dispatch: building the delivery request: %w", err)
 	}
 	for k, v := range msg.Headers {
-		switch k {
-		case headerAsyncNamespace, headerAsyncRegistry:
-			continue // platform routing context; not part of the CloudEvent the agent sees
+		switch http.CanonicalHeaderKey(k) {
+		case headerAsyncNamespace, headerAsyncRegistry, headerAsyncSender, runcap.CloudEventAttestationHeader:
+			continue // platform context; not part of the CloudEvent the agent sees
 		}
 		req.Header.Set(k, v)
+	}
+	if attestation != "" {
+		req.Header.Set(runcap.CloudEventAttestationHeader, attestation)
 	}
 
 	resp, err := client.Do(req)
@@ -160,9 +279,61 @@ func (s *Server) deliverAsyncHop(ctx context.Context, client *http.Client, msg a
 	return fmt.Errorf("async dispatch: %s/%s answered %d", namespace, receiver, resp.StatusCode)
 }
 
-// agentEndpoint is the in-cluster address of an agent's service — the same shape the launcher's delegate
-// path resolves, so an async hop lands exactly where a synchronous one would. Injectable (agentURL) so a
-// unit test can point delivery at an httptest server instead of cluster DNS.
+// attestAsyncSender mints the platform's attestation of a hop's sender for its receiver, which a registry
+// member requires before it admits a delivery (ADR 0153). The sender is the agent whose verified run
+// published the hop; its registry and role are read now, from the capability registry, so a sender that
+// left the registry the hop was published into since is not attested into it. A message published before
+// senders were recorded is delivered without one, and the receiver's posture decides.
+//
+// deliverable is false, with the reason logged, for a hop that can never be attested; the caller acks it.
+func (s *Server) attestAsyncSender(
+	ctx context.Context, msg asyncbus.Message, namespace, registryID, receiver string,
+) (attestation string, deliverable bool, err error) {
+	senderName := strings.TrimSpace(msg.Headers[headerAsyncSender])
+	if senderName == "" || s.capabilitySigner == nil {
+		return "", true, nil
+	}
+	sender, ok, err := s.agentCapabilities.Get(ctx, namespace, senderName)
+	if err != nil {
+		return "", false, fmt.Errorf("async dispatch: resolving the sender %s/%s: %w", namespace, senderName, err)
+	}
+	if !ok || sender.RegistryID != registryID {
+		s.log.Info("async dispatch: the sender is no longer in the registry it published into; not delivering",
+			"messageId", msg.ID, "sender", namespace+"/"+senderName, "registry", registryID)
+		return "", false, nil
+	}
+	attestation, err = s.capabilitySigner.MintAttestation(runcap.AttestationRequest{
+		Namespace:  namespace,
+		Agent:      senderName,
+		RegistryID: sender.RegistryID,
+		Role:       sender.Role,
+		Receiver:   receiver,
+		TTL:        asyncDeliveryAttestationTTL,
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("async dispatch: attesting the sender of %q: %w", msg.ID, err)
+	}
+	return attestation, true, nil
+}
+
+// agentAddress is where the platform calls an agent: the address its capability-registry row records for
+// its execution model (an eventing agent serves at <agent>-eventing, not at a Knative route), else its
+// Knative route. An agent with no row, or one written before addresses were recorded, has a route.
+func (s *Server) agentAddress(ctx context.Context, namespace, agent string) (string, error) {
+	if s.agentCapabilities != nil {
+		row, ok, err := s.agentCapabilities.Get(ctx, namespace, agent)
+		if err != nil {
+			return "", fmt.Errorf("resolving the address of %s/%s: %w", namespace, agent, err)
+		}
+		if ok && row.Endpoint != "" {
+			return row.Endpoint, nil
+		}
+	}
+	return s.agentEndpoint(agent, namespace), nil
+}
+
+// agentEndpoint is the in-cluster address of a serving agent's Knative route. Injectable (agentURL) for
+// tests.
 func (s *Server) agentEndpoint(agent, namespace string) string {
 	if s.agentURL != nil {
 		return s.agentURL(agent, namespace)

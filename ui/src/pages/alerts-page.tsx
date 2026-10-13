@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Bell, Filter, Plus } from "lucide-react";
 
@@ -27,7 +27,8 @@ import { Button } from "@/components/ui/button";
 import { NewAlertPolicyDialog } from "@/components/dashboard/new-alert-policy-dialog";
 import { useNamespace } from "@/lib/namespace";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
-import { api, ApiError, type AlertSummary } from "@/lib/api";
+import { api, type AlertSummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // AlertsPage — the fired-alert feed, on the editorial ACTIVITY-FEED archetype
 // (M70, ADR 0063 D2; M151 §6.1 A1 composition, §4.4 activity-feed budget:
@@ -286,49 +287,26 @@ const LEDE =
 
 export function AlertsPage() {
   const { namespace } = useNamespace();
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [view, setView] = useState<ViewId>("all");
   const [newPolicyOpen, setNewPolicyOpen] = useState(false);
   const [drawerAlert, setDrawerAlert] = useState<AlertSummary | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
+  const fetchAlerts = useCallback(
+    (signal: AbortSignal) =>
+      api.listAlerts({ limit: PAGE_LIMIT, ...(namespace ? { namespace } : {}) }, signal),
+    [namespace],
+  );
+  const { state, reload } = useLoad(fetchAlerts);
 
-    api
-      .listAlerts(
-        {
-          limit: PAGE_LIMIT,
-          ...(namespace ? { namespace } : {}),
-        },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // null = 501 (alert store not configured) — calm degrade, NOT an error.
-        if (res === null) {
-          setLoadState({ kind: "unavailable" });
-          return;
-        }
-        setLoadState({ kind: "ready", items: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const loadState = useMemo((): LoadState => {
+    if (state.kind === "loading") return state;
+    if (state.kind === "error") {
+      return { kind: "error", message: state.message, forbidden: state.forbidden };
+    }
+    // null = 501 (alert store not configured) — calm degrade, NOT an error.
+    if (state.data === null) return { kind: "unavailable" };
+    return { kind: "ready", items: state.data.items };
+  }, [state]);
 
   const items = useMemo(
     () => (loadState.kind === "ready" ? loadState.items : []),
@@ -369,7 +347,7 @@ export function AlertsPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "alerts",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => reload(),
         }
       : null;
 

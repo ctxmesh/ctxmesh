@@ -12,8 +12,9 @@ import {
   Timeline,
   type TimelineStep,
 } from "@/components/kit";
-import { api, ApiError } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { api, ApiError, type RunDetail } from "@/lib/api";
+import { useCapabilitiesIn } from "@/lib/capabilities";
+import { markRunCompleted } from "@/lib/first-run";
 import { useDevMode } from "@/lib/dev-mode";
 import { useDurableRun } from "@/lib/use-durable-run";
 import { RES_AGENTS } from "@/lib/nav";
@@ -21,7 +22,10 @@ import { extractAgentOutput } from "@/lib/agent-output";
 import { cn } from "@/lib/utils";
 import {
   isValidHttpUrl,
+  MCP_CONSENT_READY,
+  MCP_CONSENT_TICKET,
   MCP_OAUTH_MESSAGE,
+  type McpConsentTicketMessage,
   type McpOAuthPopupMessage,
   readMcpOAuthReturn,
 } from "@/lib/oauth-popup";
@@ -123,6 +127,8 @@ type ChatTurn = {
   consentRequired?: string[];
   /** The run paused on a person's DECISION (approval / plan approval), not on consent. */
   heldFor?: "approval" | "plan_approval";
+  /** The sub-agent whose run is paused, when the pause is a sub-run's rather than this run's. */
+  pausedSubRun?: { runId: string; agent?: string };
   pending?: boolean;
   error?: string;
   // a forbidden run (viewer without invoke rights) gets the ForbiddenInline treatment —
@@ -149,6 +155,25 @@ function clock(ms: number): string {
   });
 }
 
+/** ModelRouteReady reasons that mean a message would fail now (ADR 0151). */
+const ROUTE_HOLD_REASONS = new Set(["NotYetServed", "GatewayAbsent", "SecretUnresolved"]);
+
+/** Names the sub-agent a pause came from, when it was not this agent's own. */
+function SubAgentNote({ turn }: { turn: ChatTurn }) {
+  if (!turn.pausedSubRun) return null;
+  return (
+    <span className="mt-2 block text-secondary-foreground" data-testid="chat-sub-agent-pause">
+      It was asked by{" "}
+      {turn.pausedSubRun.agent ? (
+        <span className="font-mono text-xs">{turn.pausedSubRun.agent}</span>
+      ) : (
+        "a sub-agent"
+      )}
+      , which this agent handed part of the work to.
+    </span>
+  );
+}
+
 /** The reading column (§6.1 A10). Everything the transcript owns sits inside it. */
 const COLUMN = "mx-auto w-full max-w-[46rem]";
 
@@ -158,6 +183,8 @@ export function ChatPanel({
   ready,
   memoryBound,
   onTraced,
+  modelRoute,
+  onRunFinalized,
   audience = "operator",
   frame = "panel",
 }: {
@@ -166,10 +193,14 @@ export function ChatPanel({
   ready: boolean;
   memoryBound: boolean;
   onTraced: (traceId: string) => void;
+  /** The agent's ModelRouteReady condition, when it names a model route (ADR 0151). */
+  modelRoute?: { status: string; reason: string; message: string };
+  /** Each turn's finalized run, for a surface that keeps a record of the latest one (the Playground). */
+  onRunFinalized?: (detail: RunDetail) => void;
   audience?: ChatAudience;
   frame?: ChatFrame;
 }) {
-  const { can, reprobe } = useCapabilities();
+  const { can, reprobe } = useCapabilitiesIn(ns);
   const canRun = can(RES_AGENTS, "create");
   const endUser = audience === "end-user";
   const bare = frame === "bare";
@@ -200,10 +231,16 @@ export function ChatPanel({
   // are projected via the state-effect below. A forbidden run reprobes the RBAC-aware chrome.
   const run = useDurableRun({
     onForbidden: () => reprobe(),
-    onFinalized: (detail) => {
+    onFinalized: (detail, pause) => {
+      // A finished turn is a run the person watched happen, which is what Home's "Run your agent"
+      // step asks for (see first-run.ts).
+      markRunCompleted(ns);
+      onRunFinalized?.(detail);
       const turnId = activeTurnRef.current;
       if (turnId === null) return;
-      const ra = detail.requiresAction;
+      // The action is this run's own, or that of a sub-agent it delegated to: either way the
+      // reader is asked the same thing, and resuming gives the answer to the run that asked.
+      const ra = pause?.action;
       const consentRequired =
         ra?.kind === "consent_required" ? ra.servers ?? [] : undefined;
       // A run that paused on a DECISION is held, not failed and not finished. It is a
@@ -227,6 +264,7 @@ export function ChatPanel({
                 traceId: detail.traceId,
                 consentRequired: consentRequired && consentRequired.length > 0 ? consentRequired : undefined,
                 heldFor,
+                pausedSubRun: pause?.descendant ? { runId: pause.runId, agent: pause.agent } : undefined,
                 error: failed ? detail.error || "The run failed." : undefined,
                 forbidden: false,
               }
@@ -441,21 +479,45 @@ export function ChatPanel({
   // onConnect runs the INLINE per-user consent (ADR 0031): begin the OAuth grant for the
   // named server, open the provider consent in a POPUP so the chat stays on screen, then
   // RESUME the same run (ADR 0093) when it completes so the fresh credential is injected. The
-  // token never touches the SPA (server-side exchange). Popup blocked → redirect fallback.
+  // token never touches the SPA (server-side exchange).
+  //
+  // On an agent's own hostname with a console origin configured, consent must begin on the
+  // console, where the one registered callback runs and the browser-binding cookie must land
+  // (ADR 0040 amendment). So the chat mints a single-use ticket here, opens the console's
+  // /connect page, and answers that page's READY with the ticket, addressed to the console
+  // origin only. Otherwise consent begins directly, and a blocked popup falls back to a
+  // same-tab redirect.
   async function onConnect(server: string, text: string, agentTurnId: number, runId?: string) {
     setConnectError(null);
     setConnecting(server);
-    let authorizationURL: string;
+    const consoleOrigin = mcpCallbackOrigin();
+    const viaConsole = consoleOrigin !== "" && consoleOrigin !== window.location.origin;
+    let target: string;
+    let ticket: string | null = null;
     try {
-      const res = await api.beginMcpGrant({
-        server,
-        namespace: ns,
-        // Scope the grant to THIS agent's trust boundary (its registry, or itself) — the
-        // consent empowers this agent's team, not every agent the user owns (ADR 0033).
-        agent: name,
-        redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
-      });
-      authorizationURL = res.authorizationURL;
+      if (viaConsole) {
+        const minted = await api.mintMcpConsentTicket({ server, namespace: ns, agent: name });
+        if (!isValidHttpUrl(minted.connectURL) || new URL(minted.connectURL).origin !== consoleOrigin) {
+          throw new Error("The console's connect page is not at the address this chat expects.");
+        }
+        target = minted.connectURL;
+        ticket = minted.ticket;
+      } else {
+        const res = await api.beginMcpGrant({
+          server,
+          namespace: ns,
+          // Scope the grant to THIS agent's trust boundary (its registry, or itself) — the
+          // consent empowers this agent's team, not every agent the user owns (ADR 0033).
+          agent: name,
+          redirectUri: `${window.location.origin}/api/mcp/oauth/callback`,
+        });
+        // The popup, or the same-tab fallback, navigates to this; any scheme but http(s) would
+        // run in that window (DX-6).
+        if (!isValidHttpUrl(res.authorizationURL)) {
+          throw new Error("The sign-in address for this server is not valid, so it was not opened.");
+        }
+        target = res.authorizationURL;
+      }
     } catch (err) {
       setConnecting(null);
       if (err instanceof ApiError && err.isForbidden) reprobe();
@@ -464,14 +526,21 @@ export function ChatPanel({
     }
 
     const popup = window.open(
-      authorizationURL,
+      target,
       "ctxmesh-oauth-connect",
       "width=520,height=680,menubar=no,toolbar=no",
     );
     if (!popup) {
-      // Popup blocked → same-tab redirect, but validate the URL first (DX-6) so a bad
-      // authorizationURL can't hijack the tab.
-      if (isValidHttpUrl(authorizationURL)) window.location.href = authorizationURL;
+      if (ticket !== null) {
+        // The ticket reaches the console page only through the popup's link to this window.
+        setConnecting(null);
+        setConnectError(
+          "Your browser blocked the sign-in window. Allow pop-ups for this page, then press Connect again.",
+        );
+        return;
+      }
+      // Popup blocked → same-tab redirect (target was validated above).
+      window.location.href = target;
       return;
     }
 
@@ -490,12 +559,21 @@ export function ChatPanel({
       void resumeTurn(text, agentTurnId, runId); // continue the SAME run with the fresh credential
     }
     function onMessage(e: MessageEvent) {
+      const data = e.data as { type?: string } | null;
+      // The console's /connect page is ready for the ticket: answer it once, and only to the
+      // console origin — never "*", which would hand the ticket to whatever the popup now shows.
+      if (ticket !== null && popup && e.source === popup && e.origin === consoleOrigin) {
+        if (data?.type === MCP_CONSENT_READY) {
+          const message: McpConsentTicketMessage = { type: MCP_CONSENT_TICKET, ticket };
+          ticket = null;
+          popup.postMessage(message, consoleOrigin);
+          return;
+        }
+      }
       // Accept the relay from our own origin OR the canonical console origin (ADR 0040) — the popup's
       // callback runs at the console origin, which is a different origin when the chatbox is served at
       // an agent hostname. Any other origin is ignored.
-      const callbackOrigin = mcpCallbackOrigin();
-      if (e.origin !== window.location.origin && !(callbackOrigin && e.origin === callbackOrigin)) return;
-      const data = e.data as { type?: string } | null;
+      if (e.origin !== window.location.origin && !(consoleOrigin && e.origin === consoleOrigin)) return;
       if (data?.type === MCP_OAUTH_MESSAGE) finish();
     }
     window.addEventListener("message", onMessage);
@@ -533,6 +611,7 @@ export function ChatPanel({
             allowed to borrow anyone else&rsquo;s. Connect, and it carries on
             from where it stopped. Nothing has been lost while it waits.
           </span>
+          <SubAgentNote turn={t} />
           <span className="mt-2.5 flex flex-wrap gap-2">
             {(t.consentRequired ?? []).map((server) => (
               <Button
@@ -567,6 +646,8 @@ export function ChatPanel({
    */
   function holdStep(t: ChatTurn): TimelineStep {
     const plan = t.heldFor === "plan_approval";
+    // The decision belongs to the run that asked for it: a sub-agent's, when it was one.
+    const heldRun = t.pausedSubRun?.runId ?? t.runId;
     return {
       id: `hold-${t.id}`,
       tone: "hold",
@@ -583,12 +664,13 @@ export function ChatPanel({
             It is held, not failed: nothing has been done yet and the answer
             keeps its place in the queue until someone decides.
           </span>
-          {!endUser && t.runId && (
+          <SubAgentNote turn={t} />
+          {!endUser && heldRun && (
             <span className="mt-2.5 block">
               <NextStepLink
                 label="Review the hold"
-                to={`/runs/${encodeURIComponent(t.runId)}`}
-                ariaLabel={`Review the hold on run ${t.runId}`}
+                to={`/runs/${encodeURIComponent(heldRun)}`}
+                ariaLabel={`Review the hold on run ${heldRun}`}
               />
             </span>
           )}
@@ -728,6 +810,24 @@ export function ChatPanel({
 
   // ── The notes that sit above the composer ─────────────────────────────────
 
+  // A route the gateway does not serve yet fails every message with "Invalid model name", so hold
+  // Send until it does. An edited route (GatewayRolling) is still served by its previous version, and
+  // a route not found here may be served from elsewhere, so neither holds Send.
+  const routeHold = !!modelRoute && modelRoute.status === "False" && ROUTE_HOLD_REASONS.has(modelRoute.reason);
+  const routeNote = modelRoute && modelRoute.status === "False" && (
+    <div
+      className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border border-border bg-surface-2 px-4 py-3 text-sm text-secondary-foreground"
+      data-testid="chat-route-note"
+    >
+      <Badge variant={routeHold ? "progressing" : "warn"}>{routeHold ? "Model loading" : "Model route"}</Badge>
+      <span className="min-w-0">
+        {modelRoute.reason === "NotYetServed"
+          ? "The model gateway is loading this agent's model. That usually takes under a minute; Send unlocks when it is ready."
+          : modelRoute.message}
+      </span>
+    </div>
+  );
+
   const notReadyNote = !ready && turns.length === 0 && (
     // A pre-flight heads-up only: once a turn has been sent, the reply (or the
     // error turn) is the real signal. Converging is not a crossed bound, so this
@@ -763,9 +863,10 @@ export function ChatPanel({
   const composer = (
     <div className={cn("border-t border-border", bare ? "bg-card" : undefined)}>
       <div className={cn(bare ? cn(COLUMN, "px-4 py-4 sm:px-6") : "p-4")}>
-        {(notReadyNote || memoryNote) && (
+        {(notReadyNote || routeNote || memoryNote) && (
           <div className="mb-3 space-y-2">
             {notReadyNote}
+            {routeNote}
             {memoryNote}
           </div>
         )}
@@ -782,7 +883,7 @@ export function ChatPanel({
           />
           <Button
             onClick={() => void send()}
-            disabled={busy || draft.trim() === ""}
+            disabled={busy || routeHold || draft.trim() === ""}
             data-testid="chat-send"
             className="h-11 shrink-0"
           >

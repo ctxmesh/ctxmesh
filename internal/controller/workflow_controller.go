@@ -26,14 +26,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/workflow"
 )
@@ -83,18 +81,13 @@ func (r *WorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// ── 2. registryRef (the trust boundary) must exist ──────────────────────────────────────────────
-	var registry agentsv1alpha1.AgentRegistry
+	var registry agentsv1beta1.AgentRegistry
 	if err := r.Get(ctx, client.ObjectKey{Namespace: wf.Namespace, Name: wf.Spec.RegistryRef}, &registry); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, r.setStatus(ctx, &wf, metav1.ConditionFalse, reasonWorkflowRegistryMissing,
 				fmt.Sprintf("registryRef %q not found in namespace %q", wf.Spec.RegistryRef, wf.Namespace))
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching registryRef: %w", err)
-	}
-	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
-	if err != nil {
-		return ctrl.Result{}, r.setStatus(ctx, &wf, metav1.ConditionFalse, reasonWorkflowNotMember,
-			fmt.Sprintf("registry %q has an invalid memberSelector: %v", wf.Spec.RegistryRef, err))
 	}
 
 	// ── 3. every step's agentRef must be an EXISTING AgentDeployment that is a MEMBER of the registry ─
@@ -107,7 +100,7 @@ func (r *WorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	want = slices.Compact(want)
 
 	for _, name := range want {
-		var agent agentsv1alpha1.AgentDeployment
+		var agent agentsv1beta1.AgentDeployment
 		if err := r.Get(ctx, client.ObjectKey{Namespace: wf.Namespace, Name: name}, &agent); err != nil {
 			if apierrors.IsNotFound(err) {
 				return ctrl.Result{}, r.setStatus(ctx, &wf, metav1.ConditionFalse, reasonWorkflowAgentMissing,
@@ -115,9 +108,9 @@ func (r *WorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			}
 			return ctrl.Result{}, fmt.Errorf("fetching step agent %q: %w", name, err)
 		}
-		if !selector.Matches(labels.Set(agent.Labels)) {
+		if !isRegistryMember(&agent, registry.Name) {
 			return ctrl.Result{}, r.setStatus(ctx, &wf, metav1.ConditionFalse, reasonWorkflowNotMember,
-				fmt.Sprintf("agent %q is not a member of registry %q (the workflow's trust boundary)", name, wf.Spec.RegistryRef))
+				notRegistryMemberMessage(&agent, wf.Spec.RegistryRef, "the workflow"))
 		}
 	}
 
@@ -196,8 +189,8 @@ func (r *WorkflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	)
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1beta1.Workflow{}).
-		Watches(&agentsv1alpha1.AgentDeployment{}, mapToWorkflows).
-		Watches(&agentsv1alpha1.AgentRegistry{}, mapToWorkflows).
+		Watches(&agentsv1beta1.AgentDeployment{}, mapToWorkflows).
+		Watches(&agentsv1beta1.AgentRegistry{}, mapToWorkflows).
 		Named("workflow").
 		Complete(r)
 }

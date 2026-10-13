@@ -136,7 +136,7 @@ func (s *Server) handleListGuardrailPolicies(w http.ResponseWriter, r *http.Requ
 		opts = append(opts, client.InNamespace(ns))
 	}
 	var list agentsv1beta1.GuardrailPolicyList
-	if err := caller.List(r.Context(), &list, opts...); err != nil {
+	if err := s.acrossWorkspaces(caller).List(r.Context(), &list, opts...); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return

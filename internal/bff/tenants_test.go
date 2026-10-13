@@ -29,18 +29,18 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
-func mockTenant(name string, namespaces []string, model *agentsv1alpha1.TenantModelQuota, ready bool) *agentsv1alpha1.Tenant {
+func mockTenant(name string, namespaces []string, model *agentsv1beta1.TenantModelQuota, ready bool) *agentsv1beta1.Tenant {
 	status := metav1.ConditionFalse
 	if ready {
 		status = metav1.ConditionTrue
 	}
-	return &agentsv1alpha1.Tenant{
+	return &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: namespaces, Model: model},
-		Status: agentsv1alpha1.TenantStatus{
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: namespaces, Model: model},
+		Status: agentsv1beta1.TenantStatus{
 			MemberNamespaces: int32(len(namespaces)),
 			Conditions: []metav1.Condition{{
 				Type: "Ready", Status: status, Reason: "Reconciled", LastTransitionTime: metav1.Now(),
@@ -78,7 +78,7 @@ func getTenant(t *testing.T, s *Server, name string) (*TenantDetail, int) {
 
 func TestListTenants(t *testing.T) {
 	objs := []client.Object{
-		mockTenant("alpha", []string{"a1", "a2"}, &agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600}, true),
+		mockTenant("alpha", []string{"a1", "a2"}, &agentsv1beta1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600}, true),
 		mockTenant("beta", []string{"b1"}, nil, false),
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
@@ -101,7 +101,7 @@ func TestListTenants(t *testing.T) {
 func TestGetTenantDetail(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
 		mockTenant("alpha", []string{"a1", "a2"},
-			&agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600, MaxConcurrent: 20}, true),
+			&agentsv1beta1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600, MaxConcurrent: 20}, true),
 	).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 

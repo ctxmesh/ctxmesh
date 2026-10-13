@@ -240,8 +240,9 @@ type memoryConfig struct {
 	Agent     string
 	// Scope selects the key layout (ADR 0035, m33.3): "" / "session" = PRIVATE per-agent
 	// (mem:{namespace}/{agent}:{convId}); "shared" = a team scratchpad keyed
-	// mem:shared:{registry}:{convId} — readable/writable by every agent in the same registry
-	// conversation. Injected as MEMORY_SCOPE by the controller.
+	// mem:shared:{namespace}/{registry}:{convId} — readable/writable by every agent in the same
+	// registry conversation. The namespace is part of the key because a registry id is chosen by
+	// its author. Injected as MEMORY_SCOPE by the controller.
 	Scope string
 	// Registry is AGENT_REGISTRY_ID — the trust boundary (ADR 0033) the shared scope keys under.
 	// Required for the shared scope; empty ⇒ shared falls back to private (a visible misconfig).
@@ -320,7 +321,7 @@ func newMemoryServer(
 	// the shared injection on membership, so this only bites a hand-rolled misconfig).
 	prefix := fmt.Sprintf("mem:%s/%s:", cfg.Namespace, cfg.Agent)
 	if cfg.Scope == memoryScopeShared && cfg.Registry != "" {
-		prefix = fmt.Sprintf("mem:shared:%s:", cfg.Registry)
+		prefix = fmt.Sprintf("mem:shared:%s/%s:", cfg.Namespace, cfg.Registry)
 	}
 	m := &memoryServer{
 		store:     store,
@@ -334,19 +335,26 @@ func newMemoryServer(
 	// stamp X-Memory-User from a VERIFIED cap. Only needed for perUser private scope. Missing key ⇒
 	// nil verifier ⇒ the forward degrades to the agent-wide bucket + logs (a visible misconfig, never
 	// a cross-tenant leak — the users here already share one agent's trust boundary, product-grade).
-	var capVerifier *runcap.Verifier
-	if cfg.PerUser && cfg.Scope != memoryScopeShared {
-		const degrade = "launcher: memory: per-user session requested but %s — session memory stays agent-wide\n"
-		if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 == "" {
-			fmt.Fprintf(os.Stderr, degrade, "MCP_CAPABILITY_PUBLIC_KEY unset")
-		} else if pub, err := runcap.DecodePublicKey(pubB64); err != nil {
-			fmt.Fprintf(os.Stderr, degrade, fmt.Sprintf("MCP_CAPABILITY_PUBLIC_KEY is bad (%v)", err))
-		} else {
-			capVerifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
-		}
-	}
-	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared, cfg.TokenPath, capVerifier)
+	m.forward = buildStatelayerForward(cfg.ProxyURL, cfg.Scope == memoryScopeShared, cfg.TokenPath,
+		sessionCapVerifier(cfg))
 	return m
+}
+
+// sessionCapVerifier is the verifier per-user session memory needs, or nil when the agent's session
+// memory is not per-user or the pod has no usable key; the forward then stays agent-wide, and says so.
+func sessionCapVerifier(cfg memoryConfig) *runcap.Verifier {
+	if !cfg.PerUser || cfg.Scope == memoryScopeShared {
+		return nil
+	}
+	const degrade = "launcher: memory: per-user session requested but %s — session memory stays agent-wide\n"
+	v, err := capabilityVerifierFromEnv(os.Getenv)
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, degrade, err.Error())
+	case v == nil:
+		fmt.Fprintf(os.Stderr, degrade, "MCP_CAPABILITY_PUBLIC_KEY is unset")
+	}
+	return v
 }
 
 // buildStatelayerForward builds the reverse proxy to the control-plane state-layer proxy (M51, ADR

@@ -23,14 +23,17 @@ import (
 	"errors"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
@@ -134,7 +137,7 @@ func (r *AgentDeploymentReconciler) promptResolver() prompt.Resolver {
 // prompt-only-deploy invariant relies on. The image is never touched here.
 func (r *AgentDeploymentReconciler) resolvePrompt(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (resolvedPrompt, error) {
 	if deploy.Spec.PromptRef == "" {
 		return resolvedPrompt{}, nil
@@ -174,11 +177,11 @@ func (r *AgentDeploymentReconciler) resolvePrompt(
 // status error rather than reading a store the controller intentionally doesn't depend on.
 func (r *AgentDeploymentReconciler) promptPointer(
 	_ context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-) (agentsv1alpha1.GitPromptSource, string, error) {
+	deploy *agentsv1beta1.AgentDeployment,
+) (agentsv1beta1.GitPromptSource, string, error) {
 	raw := deploy.Annotations[prompt.ResolvedPromptAnnotation]
 	if raw == "" {
-		return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
+		return agentsv1beta1.GitPromptSource{}, "", &promptResolveError{
 			reason: "PromptPointerMissing",
 			msg: fmt.Sprintf("agent %q has no resolved prompt pointer (annotation %s) for promptRef %q — create or edit the agent via the API so its PromptVersion pointer is resolved (PromptVersion is no longer a CRD, ADR 0044)",
 				deploy.Name, prompt.ResolvedPromptAnnotation, deploy.Spec.PromptRef),
@@ -187,7 +190,7 @@ func (r *AgentDeploymentReconciler) promptPointer(
 	var p prompt.ResolvedPointer
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
 		// A corrupt stamp is a platform error, not user input — surface it on status.
-		return agentsv1alpha1.GitPromptSource{}, "", &promptResolveError{
+		return agentsv1beta1.GitPromptSource{}, "", &promptResolveError{
 			reason: "PromptPointerInvalid",
 			msg:    fmt.Sprintf("the %s annotation on agent %q is not valid JSON: %v", prompt.ResolvedPromptAnnotation, deploy.Name, err),
 		}
@@ -202,7 +205,7 @@ func (r *AgentDeploymentReconciler) promptPointer(
 // image — which lives in spec.Image and is never touched by the prompt path —
 // keeps an UNCHANGED digest. Returns "" for the empty inputs (no prompt),
 // symmetric with the tool/memory/registry/budget components.
-func promptDigest(src agentsv1alpha1.GitPromptSource, version string) string {
+func promptDigest(src agentsv1beta1.GitPromptSource, version string) string {
 	if version == "" {
 		return ""
 	}
@@ -222,7 +225,7 @@ func promptDigest(src agentsv1alpha1.GitPromptSource, version string) string {
 // display VERSION — both static (no valueFrom; the m5.7 Knative ksvc landmine).
 func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	rp resolvedPrompt,
 ) (vol *corev1.Volume, mount *corev1.VolumeMount, env []corev1.EnvVar, err error) {
 	if !rp.hasPrompt {
@@ -272,13 +275,12 @@ func (r *AgentDeploymentReconciler) reconcilePromptConfigMap(
 	return &v, &m, e, nil
 }
 
-// pruneOldPromptConfigMaps deletes this agent's content-addressed prompt ConfigMaps that
-// are neither the current one nor mounted by a live ksvc Revision (audit FUNC-3). Keeping
-// in-use CMs means pruning can never break a servable revision (a held candidate or a
-// rollback target). Best-effort within the reconcile: a prune failure surfaces so the
-// reconcile requeues, but the correctness (no prompt overwrite) is the content-addressing,
-// not the GC.
-func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, currentCM string) error {
+// pruneOldPromptConfigMaps deletes this agent's content-addressed prompt ConfigMaps that are neither
+// the current one nor still mounted by a workload of the agent that may start a pod (configMapsInUse),
+// so pruning never breaks a servable revision (a held candidate or a rollback target), a Job's retry
+// or a rollout. Only ConfigMaps the agent controls are pruned. A prune failure surfaces so the
+// reconcile requeues, but the correctness (no prompt overwrite) is the content-addressing, not the GC.
+func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, currentCM string) error {
 	var cms corev1.ConfigMapList
 	if err := r.List(ctx, &cms,
 		client.InNamespace(deploy.Namespace),
@@ -288,14 +290,14 @@ func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context
 	if len(cms.Items) <= 1 {
 		return nil // only the current CM (or none) — nothing to prune
 	}
-	inUse, err := r.promptConfigMapsInUse(ctx, deploy)
-	if err != nil {
+	inUse, hold, err := r.configMapsInUse(ctx, deploy, promptVolumeName)
+	if err != nil || hold {
 		return err
 	}
 	inUse[currentCM] = true
 	for i := range cms.Items {
 		cm := &cms.Items[i]
-		if inUse[cm.Name] {
+		if inUse[cm.Name] || !metav1.IsControlledBy(cm, deploy) {
 			continue
 		}
 		if err := r.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
@@ -305,22 +307,92 @@ func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context
 	return nil
 }
 
-// promptConfigMapsInUse returns the set of prompt-ConfigMap names still mounted by a live
-// Revision of the agent's ksvc, so they are never pruned.
-func (r *AgentDeploymentReconciler) promptConfigMapsInUse(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) (map[string]bool, error) {
-	inUse := map[string]bool{}
-	var revs servingv1.RevisionList
-	if err := r.List(ctx, &revs,
-		client.InNamespace(deploy.Namespace),
-		client.MatchingLabels{knativeServiceLabel: deploy.Name}); err != nil {
-		return nil, fmt.Errorf("listing Revisions for prompt GC: %w", err)
-	}
-	for i := range revs.Items {
-		for _, v := range revs.Items[i].Spec.Volumes {
-			if v.Name == promptVolumeName && v.ConfigMap != nil {
+// configMapsInUse returns the names of the ConfigMaps mounted as volumeName by anything of the agent's
+// that may still start a pod: a Revision of its Service, its unfinished Job or one its CronJob is
+// running, and its eventing Deployment's template. hold is true while that Deployment is mid-rollout:
+// an old ReplicaSet may still replace a pod from its own template, which this controller does not
+// read, so nothing should be pruned until the rollout completes and its status change reconciles the
+// agent again.
+func (r *AgentDeploymentReconciler) configMapsInUse(
+	ctx context.Context, deploy *agentsv1beta1.AgentDeployment, volumeName string,
+) (inUse map[string]bool, hold bool, err error) {
+	inUse = map[string]bool{}
+	mounts := func(spec corev1.PodSpec) {
+		for _, v := range spec.Volumes {
+			if v.Name == volumeName && v.ConfigMap != nil {
 				inUse[v.ConfigMap.Name] = true
 			}
 		}
 	}
-	return inUse, nil
+
+	var revs servingv1.RevisionList
+	if err := r.List(ctx, &revs,
+		client.InNamespace(deploy.Namespace),
+		client.MatchingLabels{knativeServiceLabel: deploy.Name}); err != nil {
+		return nil, false, fmt.Errorf("listing Revisions for %s ConfigMap GC: %w", volumeName, err)
+	}
+	for i := range revs.Items {
+		mounts(revs.Items[i].Spec.PodSpec)
+	}
+
+	key := client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}
+	var job batchv1.Job
+	if found, err := r.getOwned(ctx, key, &job, deploy); err != nil {
+		return nil, false, err
+	} else if found && !jobFinished(&job) {
+		mounts(job.Spec.Template.Spec)
+	}
+
+	var cron batchv1.CronJob
+	if found, err := r.getOwned(ctx, key, &cron, deploy); err != nil {
+		return nil, false, err
+	} else if found {
+		mounts(cron.Spec.JobTemplate.Spec.Template.Spec)
+		for _, ref := range cron.Status.Active {
+			var spawned batchv1.Job
+			err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: ref.Name}, &spawned)
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			if err != nil {
+				return nil, false, fmt.Errorf("reading Job %s for %s ConfigMap GC: %w", ref.Name, volumeName, err)
+			}
+			if !jobFinished(&spawned) {
+				mounts(spawned.Spec.Template.Spec)
+			}
+		}
+	}
+
+	var dep appsv1.Deployment
+	if found, err := r.getOwned(ctx, key, &dep, deploy); err != nil {
+		return nil, false, err
+	} else if found {
+		mounts(dep.Spec.Template.Spec)
+		hold = dep.Status.ObservedGeneration < dep.Generation || dep.Status.UpdatedReplicas != dep.Status.Replicas
+	}
+	return inUse, hold, nil
+}
+
+// getOwned reads key into obj and reports whether it exists and the agent controls it.
+func (r *AgentDeploymentReconciler) getOwned(
+	ctx context.Context, key client.ObjectKey, obj client.Object, deploy *agentsv1beta1.AgentDeployment,
+) (bool, error) {
+	err := r.Get(ctx, key, obj)
+	if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading %T %s for ConfigMap GC: %w", obj, key.Name, err)
+	}
+	return metav1.IsControlledBy(obj, deploy), nil
+}
+
+// jobFinished reports whether a Job has completed or failed, after which it starts no more pods.
+func jobFinished(job *batchv1.Job) bool {
+	for _, c := range job.Status.Conditions {
+		if (c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed) && c.Status == corev1.ConditionTrue {
+			return true
+		}
+	}
+	return false
 }

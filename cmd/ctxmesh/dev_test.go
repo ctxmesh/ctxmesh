@@ -303,11 +303,14 @@ func TestRenderCompose_FullContract(t *testing.T) {
 		t.Fatalf("rendered compose is not valid YAML: %v\n%s", uErr, compose)
 	}
 
-	// All four services present.
-	for _, svc := range []string{"agent:", "gateway:", "memory:", "discovery:"} {
+	// The three services, and no separate discovery service: the launcher in the agent serves :2999.
+	for _, svc := range []string{"agent:", "gateway:", "memory:"} {
 		if !strings.Contains(compose, svc) {
 			t.Errorf("compose missing service %q:\n%s", svc, compose)
 		}
+	}
+	if strings.Contains(compose, "discovery:") {
+		t.Errorf("compose still runs a discovery service:\n%s", compose)
 	}
 
 	// The agent image + published port.
@@ -324,10 +327,10 @@ func TestRenderCompose_FullContract(t *testing.T) {
 		`MODEL_ROUTE: "gpt4"`,
 		`MEMORY_BACKEND_ADDR: "memory:6379"`, // :2998 launcher endpoint wiring
 		`MEMORY_PORT: "2998"`,
-		`FEEDBACK_PORT: "2995"`,       // :2995 launcher endpoint wiring
-		`LANGFUSE_HOST:`,              // gates the feedback listener
-		`DISCOVERY_HOST: "discovery"`, // :2999 sidecar
-		`DISCOVERY_PORT: "2999"`,
+		`FEEDBACK_PORT: "2995"`,                          // :2995 launcher endpoint wiring
+		`LANGFUSE_HOST:`,                                 // gates the feedback listener
+		`TOOLS_JSON_PATH: "/etc/agent/tools/tools.json"`, // :2999, served by the launcher
+		`- ./tools.json:/etc/agent/tools/tools.json:ro`,
 		`AGENT_NAME: "echo"`,
 		`AGENT_PORT: "8080"`,
 	}

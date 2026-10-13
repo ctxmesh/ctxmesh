@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/discovery"
 )
 
@@ -56,7 +56,7 @@ func liveEmbedder(t *testing.T) (discovery.Embedder, string) {
 	if route == "" {
 		route = "demo-embed"
 	}
-	return credplane.NewGatewayEmbedder(gateway, os.Getenv("MODEL_GATEWAY_KEY"),
+	return embedding.NewGatewayEmbedder(gateway, os.Getenv("MODEL_GATEWAY_KEY"),
 		&http.Client{Timeout: 30 * time.Second}), route
 }
 

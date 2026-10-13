@@ -1,0 +1,121 @@
+# Stranger path: close gate (d) as a job. A cold kind cluster, the PUBLISHED chart and images,
+# installed with the documented command, to a Ready agent, a tool call and a visible run.
+#
+# One job, two callers:
+#   - nightly.yml checks what is published against the public site, every night;
+#   - release.yml checks a tag's artifacts before the Release page announces them, using the
+#     install command from the README at that tag (the same command the Release page shows).
+#     At tag time the site still pins the previous release, which is correct: docs-site-truth
+#     refuses a site that names a version nobody can install yet.
+#
+# This job never logs in to a registry. An authenticated pull succeeds against a private package,
+# which is how v0.1.0-beta.1 was declared verified while five of six packages were unreachable.
+name: Stranger path
+
+on:
+  workflow_call:
+    inputs:
+      brain_ref:
+        description: agent-brain ref whose harness runs the gate
+        type: string
+        required: true
+      version:
+        description: release under test (vX.Y.Z); empty means the newest CHANGELOG release
+        type: string
+        required: false
+        default: ""
+      install_doc:
+        description: where the install command comes from, "site" (published page) or "readme"
+        type: string
+        required: false
+        default: site
+    secrets:
+      BRAIN_CHECKOUT_TOKEN:
+        required: true
+
+permissions: {}
+
+jobs:
+  stranger:
+    name: stranger-path
+    runs-on: ubuntu-latest
+    # A passing run is kind, Knative, a 7-18 minute install, an agent, a tool-bound agent and a
+    # trace window. 60 minutes left no margin.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Reject an unknown install source
+        if: ${{ inputs.install_doc != 'site' && inputs.install_doc != 'readme' }}
+        env:
+          INSTALL_DOC: ${{ inputs.install_doc }}
+        run: |
+          echo "::error::install_doc must be site or readme, got '$INSTALL_DOC'"
+          exit 1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Check out agent-brain (harness owns e2e — ADR 0004)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctxmesh/agent-brain
+          token: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+          path: agent-brain
+          persist-credentials: false
+          ref: ${{ inputs.brain_ref }}
+      - name: Check out the public docs site (docs-site-truth reads it)
+        # Public repo, so no token. Without this the gate SKIPs, a SKIP is exit 3, and the job
+        # dies having proven nothing -- which is what happened 30 nights running.
+        if: ${{ inputs.install_doc == 'site' }}
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ctxmesh/ctxmesh.github.io
+          path: ctxmesh.github.io
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: Install kind
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/v0.32.0/kind-linux-$(go env GOARCH)"
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind version
+      - name: Install helm and kubectl explicitly
+        # The gate SKIPs if either is missing, and a SKIP is one of the four
+        # escapes close gate (d) forbids -- so do not rely on the runner image.
+        run: |
+          command -v helm >/dev/null || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          command -v kubectl >/dev/null || {
+            curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(go env GOARCH)/kubectl"
+            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          }
+          helm version --short && kubectl version --client=true 2>/dev/null | head -1
+      - name: Install nvm for the console hop's browser toolchain (harness ui-e2e/.nvmrc)
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
+            | PROFILE=/dev/null bash
+          test -s "$HOME/.nvm/nvm.sh"
+      - name: Published artifacts must match what the release claims
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+        run: ./hack/release-truth.sh
+      - name: The public site must name only installable versions
+        # A check of what the site says TODAY, so it runs only against the newest release; a run
+        # pinned to an older release would fail it for being old, not for being wrong.
+        if: ${{ inputs.install_doc == 'site' && inputs.version == '' }}
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+          DOCS_SITE: ${{ github.workspace }}/ctxmesh.github.io
+        run: make -C agent-brain/harness docs-site-truth
+      - name: Close gate (d) — a stranger's path, end to end
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+          COLD_VERSION: ${{ inputs.version }}
+          COLD_DOCS_URL: ${{ inputs.install_doc == 'readme' && format('file://{0}/README.md', github.workspace) || '' }}
+        # No COLD_IMAGES=local here on purpose: local images are the escape that
+        # let this gate report PASS for five releases against a version nobody
+        # was running.
+        run: |
+          df -h / | tail -1
+          make -C agent-brain/harness stranger

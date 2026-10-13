@@ -27,8 +27,8 @@ limitations under the License.
 //
 // Langfuse is the store (ADR 0008): the hook maps {traceId,name,value,comment}
 // to a Langfuse score create (POST <langfuse-host>/api/public/scores, HTTP
-// basic auth public_key:secret_key). No platform-owned feedback datastore in v1;
-// the full FeedbackStore CRD is phase 2.
+// basic auth public_key:secret_key). No platform-owned feedback datastore; the
+// agent's spec.feedback is enforced by the console endpoint, not this relay.
 //
 // The ScoresClient interface is the mock⇄real seam: the real impl POSTs to
 // Langfuse; unit tests inject a mock. Same swap-at-interface pattern as the m9.3
@@ -75,10 +75,8 @@ type feedbackConfig struct {
 	LangfuseHost string
 	// PublicKey / SecretKey are the Langfuse API credentials for HTTP basic
 	// auth to the scores endpoint (LANGFUSE_SCORES_PUBLIC_KEY /
-	// LANGFUSE_SCORES_SECRET_KEY). Deterministic DEV-ONLY fixed values injected
-	// by the controller as STATIC env — NEVER valueFrom (the Knative ksvc
-	// webhook landmine, M5.7). They match the dev Langfuse seeded by
-	// `make -C harness dev-up M=3`.
+	// LANGFUSE_SCORES_SECRET_KEY), referenced by the controller from the
+	// namespace's langfuse-otlp Secret.
 	PublicKey string
 	SecretKey string
 	// Port is the localhost port the listener binds (FEEDBACK_PORT, default 2995).

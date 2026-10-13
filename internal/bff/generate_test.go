@@ -37,8 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
-	"github.com/ctxmesh/ctxmesh/internal/expand"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // A valid managed agent.yaml the fake provider "generates" — it expand-validates
@@ -92,24 +91,24 @@ func fakeChatProvider(t *testing.T, reply string) (*httptest.Server, *[]byte) {
 // Secret for the given provider, with the baseURL annotation pointed at the fake
 // chat provider so the generation call reaches it. The Secret holds theTestKey.
 func connectRouteObjects(provider, model, baseURL string) []client.Object {
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        provider,
 			Namespace:   "prod",
 			Labels:      map[string]string{labelManagedBy: managedByConnect, labelProvider: provider},
 			Annotations: map[string]string{annBaseURL: baseURL, annDisplayName: provider},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: provider, Model: model, Priority: 1, SecretBindingRef: provider,
 			}},
 		},
 	}
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: provider, Namespace: "prod"},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: provider, Key: secretKeyAPIKey},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: provider, Key: secretKeyAPIKey},
 		},
 	}
 	secret := &corev1.Secret{
@@ -154,7 +153,11 @@ func generateBody(t *testing.T, req GenerateAgentRequest) []byte {
 // preview (a managed-runtime AgentDeployment) is returned for REVIEW. The key is
 // resolved caller-scoped, rides the chat call server-side, and appears NOWHERE in
 // the response or logs; the cost tag DOES ride the request.
+// testManagedImage is the managed-agent image the chart gives the BFF (MANAGED_AGENT_IMAGE).
+const testManagedImage = "ghcr.io/ctxmesh/managed-agent:v9.9.9"
+
 func TestGenerateHappyPathManagedPreview(t *testing.T) {
+	t.Setenv("MANAGED_AGENT_IMAGE", testManagedImage)
 	prov, lastBody := fakeChatProvider(t, validGeneratedYAML)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
 		WithObjects(connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)...).Build()
@@ -181,7 +184,7 @@ func TestGenerateHappyPathManagedPreview(t *testing.T) {
 	// the pinned managed image, plus the tool binding.
 	assert.Contains(t, resp.Expanded, "kind: AgentDeployment")
 	assert.Contains(t, resp.Expanded, "kind: MCPToolBinding")
-	assert.Contains(t, resp.Expanded, expand.DefaultManagedImage, "managed runtime resolves the pinned image")
+	assert.Contains(t, resp.Expanded, "image: "+testManagedImage, "managed runtime resolves the configured image")
 	assert.NotNil(t, resp.Warnings, "warnings is [] not null")
 
 	// THE CRUX: the key appears NOWHERE in the response DTO or any log line, but it
@@ -454,7 +457,7 @@ func TestGenerateNilExpandIs501(t *testing.T) {
 // seeded with the given ToolRegistry objects (for the tool auto-wiring tests). It
 // extends newGenerateServer by wiring wireTRStore so the catalog is reachable
 // from buildCallerToolPrompt.
-func newGenerateServerWithCatalog(t *testing.T, c client.Client, regs ...*agentsv1alpha1.ToolRegistry) (*Server, *fakeCallerClientFactory) {
+func newGenerateServerWithCatalog(t *testing.T, c client.Client, regs ...*agentsv1beta1.ToolRegistry) (*Server, *fakeCallerClientFactory) {
 	t.Helper()
 	s, factory, _ := newGenerateServer(t, c, nil)
 	wireTRStore(t, s, nil, regs...)
@@ -469,21 +472,21 @@ func TestGeneratePromptContainsCatalogTools(t *testing.T) {
 	objs := connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 
-	reg := &agentsv1alpha1.ToolRegistry{
+	reg := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-tools", Namespace: "prod"},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{
 				{
 					Name:           "search_docs",
 					Description:    "Search the documentation",
-					Source:         agentsv1alpha1.SourceCurated,
-					ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+					Source:         agentsv1beta1.SourceCurated,
+					ApprovalStatus: agentsv1beta1.ApprovalApproved,
 				},
 				{
 					Name:           "run_query",
 					Description:    "Execute a SQL query",
-					Source:         agentsv1alpha1.SourceCurated,
-					ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+					Source:         agentsv1beta1.SourceCurated,
+					ApprovalStatus: agentsv1beta1.ApprovalApproved,
 				},
 			},
 		},
@@ -539,21 +542,21 @@ func TestGeneratePromptExcludesPendingTools(t *testing.T) {
 	objs := connectRouteObjects("anthropic", "claude-sonnet-4-6", prov.URL)
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
 
-	reg := &agentsv1alpha1.ToolRegistry{
+	reg := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "mixed-tools", Namespace: "prod"},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{
 				{
 					Name:           "approved_tool",
 					Description:    "An approved tool",
-					Source:         agentsv1alpha1.SourceCurated,
-					ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+					Source:         agentsv1beta1.SourceCurated,
+					ApprovalStatus: agentsv1beta1.ApprovalApproved,
 				},
 				{
 					Name:           "pending_tool",
 					Description:    "A tool awaiting approval",
-					Source:         agentsv1alpha1.SourceUserAdded,
-					ApprovalStatus: agentsv1alpha1.ApprovalPending,
+					Source:         agentsv1beta1.SourceUserAdded,
+					ApprovalStatus: agentsv1beta1.ApprovalPending,
 				},
 			},
 		},
@@ -614,8 +617,8 @@ func TestBuildGenerationPromptUnit(t *testing.T) {
 
 	// non-empty catalog → base + catalog block with the tool name + description
 	tools := []ToolCatalogEntry{
-		{Name: "alpha", Description: "does alpha things", ApprovalStatus: agentsv1alpha1.ApprovalApproved},
-		{Name: "beta", Description: "", ApprovalStatus: agentsv1alpha1.ApprovalApproved},
+		{Name: "alpha", Description: "does alpha things", ApprovalStatus: agentsv1beta1.ApprovalApproved},
+		{Name: "beta", Description: "", ApprovalStatus: agentsv1beta1.ApprovalApproved},
 	}
 	got = buildGenerationPrompt(tools)
 	assert.Contains(t, got, "Available tools", "non-empty catalog must include the catalog block header")
@@ -629,7 +632,7 @@ func TestBuildGenerationPromptUnit(t *testing.T) {
 func TestBuildGenerationPromptTruncatesLongDescriptions(t *testing.T) {
 	longDesc := strings.Repeat("x", maxToolDescriptionLen+50)
 	tools := []ToolCatalogEntry{
-		{Name: "big-tool", Description: longDesc, ApprovalStatus: agentsv1alpha1.ApprovalApproved},
+		{Name: "big-tool", Description: longDesc, ApprovalStatus: agentsv1beta1.ApprovalApproved},
 	}
 	got := buildGenerationPrompt(tools)
 	assert.NotContains(t, got, longDesc, "the full long description must not appear verbatim")

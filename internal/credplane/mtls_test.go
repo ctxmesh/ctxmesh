@@ -17,7 +17,6 @@ limitations under the License.
 package credplane_test
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -117,7 +116,8 @@ func TestMTLSEnforced(t *testing.T) {
 	srvTLS, err := credplane.ServerTLSConfig(pki.serverCertPEM, pki.serverKeyPEM, pki.caPEM)
 	require.NoError(t, err)
 
-	ts := httptest.NewUnstartedServer(credplane.NewServer(&mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "OK"}}, logr.Discard()).Handler())
+	f := credplane.NewAuthFixture()
+	ts := httptest.NewUnstartedServer(credplane.NewServer(&mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "OK"}}, f.Auth, logr.Discard()).Handler())
 	ts.TLS = srvTLS
 	ts.StartTLS()
 	t.Cleanup(ts.Close)
@@ -125,8 +125,8 @@ func TestMTLSEnforced(t *testing.T) {
 	// A sidecar presenting a platform client cert is accepted.
 	cliTLS, err := credplane.ClientTLSConfig(pki.clientCertPEM, pki.clientKeyPEM, pki.caPEM, serverName)
 	require.NoError(t, err)
-	ok := credplane.NewClient(ts.URL, &http.Client{Transport: &http.Transport{TLSClientConfig: cliTLS}, Timeout: 5 * time.Second})
-	got, err := ok.Resolve(context.Background(), testNS, "", testServer, "u-a")
+	ok := callerClient(t, ts.URL, &http.Transport{TLSClientConfig: cliTLS}, f.SidecarToken(testNS, testAgent))
+	got, err := ok.Resolve(asUser(f, "u-a"), testNS, testBoundary, testServer, "u-a")
 	require.NoError(t, err, "a sidecar with a platform client cert is accepted")
 	require.Equal(t, "OK", got.Value)
 
@@ -134,18 +134,17 @@ func TestMTLSEnforced(t *testing.T) {
 	// RequireAndVerifyClientCert — the handshake fails before any request is served.
 	pool := x509.NewCertPool()
 	require.True(t, pool.AppendCertsFromPEM(pki.caPEM))
-	noCert := credplane.NewClient(ts.URL, &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: serverName, MinVersion: tls.VersionTLS13}},
-		Timeout:   5 * time.Second,
-	})
-	_, err = noCert.Resolve(context.Background(), testNS, "", testServer, "u-a")
+	noCert := callerClient(t, ts.URL,
+		&http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, ServerName: serverName, MinVersion: tls.VersionTLS13}},
+		f.SidecarToken(testNS, testAgent))
+	_, err = noCert.Resolve(asUser(f, "u-a"), testNS, testBoundary, testServer, "u-a")
 	require.Error(t, err, "a caller without a platform client cert must be rejected by mTLS")
 }
 
 // TestE1ServerAuth proves the E-1 posture (M128/Gate E, ADR 0102 §3): the token-service presents
 // its serving cert but does NOT require a client cert, and an E-1 client (no client cert) reaches
 // it over server-AUTHENTICATED TLS — the wire is confidential + the server is verified against the
-// platform CA, while client identity stays the app-layer run capability (ADR 0030).
+// platform CA, while callers authenticate with projected tokens (ADR 0154).
 func TestE1ServerAuth(t *testing.T) {
 	const serverName = "token-service"
 	pki := genPKI(t, serverName)
@@ -154,7 +153,8 @@ func TestE1ServerAuth(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, tls.NoClientCert, srvTLS.ClientAuth, "E-1 server must not require a client cert")
 
-	ts := httptest.NewUnstartedServer(credplane.NewServer(&mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "OK"}}, logr.Discard()).Handler())
+	f := credplane.NewAuthFixture()
+	ts := httptest.NewUnstartedServer(credplane.NewServer(&mockResolver{cred: credresolve.Credential{Kind: credresolve.KindBearer, Value: "OK"}}, f.Auth, logr.Discard()).Handler())
 	ts.TLS = srvTLS
 	ts.StartTLS()
 	t.Cleanup(ts.Close)
@@ -162,18 +162,17 @@ func TestE1ServerAuth(t *testing.T) {
 	// An E-1 client (no client cert) reaches the server-auth token-service.
 	cliTLS, err := credplane.ServerAuthClientTLSConfig(pki.caPEM, serverName)
 	require.NoError(t, err)
-	c := credplane.NewClient(ts.URL, &http.Client{Transport: &http.Transport{TLSClientConfig: cliTLS}, Timeout: 5 * time.Second})
-	got, err := c.Resolve(context.Background(), testNS, "", testServer, "u-a")
+	c := callerClient(t, ts.URL, &http.Transport{TLSClientConfig: cliTLS}, f.SidecarToken(testNS, testAgent))
+	got, err := c.Resolve(asUser(f, "u-a"), testNS, testBoundary, testServer, "u-a")
 	require.NoError(t, err, "E-1: a client with no client cert reaches the server-auth token-service")
 	require.Equal(t, "OK", got.Value)
 
 	// E-1 still AUTHENTICATES the server — a client that doesn't trust the platform CA is rejected
 	// (this is what closes the x509 break + the plaintext-in-transit exposure).
 	badPool := x509.NewCertPool()
-	bad := credplane.NewClient(ts.URL, &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: badPool, ServerName: serverName, MinVersion: tls.VersionTLS13}},
-		Timeout:   5 * time.Second,
-	})
-	_, err = bad.Resolve(context.Background(), testNS, "", testServer, "u-a")
+	bad := callerClient(t, ts.URL,
+		&http.Transport{TLSClientConfig: &tls.Config{RootCAs: badPool, ServerName: serverName, MinVersion: tls.VersionTLS13}},
+		f.SidecarToken(testNS, testAgent))
+	_, err = bad.Resolve(asUser(f, "u-a"), testNS, testBoundary, testServer, "u-a")
 	require.Error(t, err, "E-1 authenticates the SERVER — an untrusted CA must be rejected")
 }

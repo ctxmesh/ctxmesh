@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Coins, Download, Filter } from "lucide-react";
 
@@ -27,12 +27,13 @@ import {
 } from "@/components/kit";
 import {
   api,
-  ApiError,
   type AgentCostItem,
+  type CostBreakdownResponse,
   type CostForecastResponse,
   type CostSummary,
   type TenantSummary,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // CostPage — the money page (m16.10; re-housed on the editorial system in M151,
 // spec §6.2 "stat-band variant": stat band + budget Meter above the table, the
@@ -52,15 +53,18 @@ import {
 // the response's `total` means two DIFFERENT things depending on the scope,
 // and the page must not paper over the difference.
 //
-//   • WITH a tenant (the normal path): the BFF filters the cluster-wide
-//     breakdown down to the tenant's namespaces and RECOMPUTES `total` as the
-//     sum of the kept rows. So the totals and the rows are the same window and
-//     the rows do add up to the total — but `observations` is never computed
+//   • WITH a tenant (the normal path): the BFF keeps the tenant's namespaces
+//     BEFORE it pages, and `total` is the sum of every kept row on every page.
+//     So the totals and the rows are the same window and the rows across all
+//     pages add up to the total — but `observations` is never computed
 //     on that path and arrives as 0. That 0 is NOT "no traced calls"; it is a
 //     figure this path does not answer, so it renders as unknown, not as zero.
-//   • WITHOUT a tenant (only reachable on a cluster with genuinely zero
-//     tenants, M99 B1): `total` is the trace backend's 30-day daily-metrics
-//     rollup while the rows are the last 100 traces. Two different windows —
+//   • For the caller's WORKSPACES (no tenant, and a caller who cannot list
+//     tenants): the response names the namespaces it covers, and the total is
+//     recomputed from the rows exactly as on the tenant path.
+//   • CLUSTER-WIDE (no tenant, on a cluster with genuinely zero tenants, M99
+//     B1): `total` is the trace backend's 30-day daily-metrics rollup while the
+//     rows are the last 100 traces. Two different windows —
 //     the rows therefore do NOT sum to the total, and the QuietNote says so
 //     rather than letting a reader do arithmetic that cannot work.
 //
@@ -83,13 +87,15 @@ import {
 //   • The forecast returns null on 501 too — calm, and the card is absent.
 //
 // ── TENANT SCOPE (ADR 0077) ─────────────────────────────────────────────────
-// /api/cost and /api/cost/breakdown are tenant-scoped and 400 without ?tenant=,
-// so the page lists tenants FIRST and picks one. Consequences the page must
-// state rather than hide: with tenants present it defaults to the first (never
-// a dead end); with genuinely zero tenants the BFF serves the cluster-wide
-// breakdown (M99 B1); and when the tenant list cannot be read at all — a 403 or
-// a failed list — the page has nothing to scope by, so it says exactly that
-// instead of rendering an empty table that would read as "no spend".
+// The BFF decides who is scoped by tenant, so the page first asks for no
+// tenant. Anyone who may not read cost cluster-wide gets their workspaces, even
+// if they can list tenants: naming a tenant would be refused them. With
+// genuinely zero tenants a cluster-wide reader gets the whole cluster (M99 B1).
+// Only a cluster-wide reader with tenants to scope by is answered
+// `tenant_required`, and the page then picks the first tenant (never a dead
+// end). If it cannot list tenants, or the list FAILED, there is nothing to pick
+// and the page says exactly that instead of an empty table that would read as
+// "no spend".
 //
 // data-testid contract:
 //   cost-page             — root container
@@ -100,6 +106,7 @@ import {
 //   cost-breakdown-table  — the DataTable (aria-label="Cost breakdown")
 //   cost-row-{ns}-{name}  — each table row's entity cell
 //   cost-no-tenant        — the "nothing to scope by" state
+//   cost-workspaces-note  — the "your workspaces" scope note
 //   cost-unavailable      — the 501 calm state
 //   cost-degraded         — the transient trace-store outage state
 
@@ -429,22 +436,32 @@ function ForecastBand({
 
 type LoadState =
   | { kind: "loading" }
-  | { kind: "ready"; agents: AgentCostItem[]; total: CostSummary; nextCursor: string }
-  // ADR 0077 — the breakdown must be scoped by a tenant and we have no list to
-  // scope by (403 / failed list). NOT "no spend".
+  | {
+      kind: "ready";
+      agents: AgentCostItem[];
+      total: CostSummary;
+      nextCursor: string;
+      /** The caller's workspaces the breakdown covers; absent for a tenant or the cluster. */
+      namespaces?: string[];
+    }
+  // ADR 0077 — the BFF requires a tenant and none is picked yet (the list is
+  // loading, failed, or refused). NOT "no spend".
   | { kind: "no-tenant" }
   | { kind: "unavailable" } // 501 — no trace backend on this install
   | { kind: "degraded"; message: string } // 200 + notice — trace store transiently down
   | { kind: "error"; message: string; forbidden: boolean };
 
 // TenantsState is the PICKER's own load state, kept distinct from the
-// breakdown's. `forbidden` is a first-class outcome: a viewer who cannot list
-// tenants must not see a broken-looking picker or a blank table.
+// breakdown's. `forbidden` is a first-class outcome: there is no list to pick
+// from, which matters only to a caller the BFF asks to name a tenant.
 type TenantsState =
   | { kind: "loading" }
   | { kind: "ready"; tenants: TenantSummary[] }
   | { kind: "forbidden" }
   | { kind: "error"; message: string };
+
+/** The breakdown's answer when there is no tenant to ask about yet. */
+const NO_TENANT = Symbol("no tenant");
 
 // emptyCostSummary is the zero-value CostSummary used while loading.
 const emptyCostSummary: CostSummary = {
@@ -462,18 +479,8 @@ export function CostPage() {
   // in-page picker writes it back here so the view stays linkable/refreshable.
   const tenant = searchParams.get("tenant") ?? "";
 
-  const [tenantsState, setTenantsState] = useState<TenantsState>({ kind: "loading" });
   const [view, setView] = useState<ViewId>("all");
   const [query, setQuery] = useState("");
-  // Bumped by the tenant-list retry so the fetch below can be re-run without a
-  // page reload (a reload would be a bigger hammer than the failure deserves).
-  const [tenantsAttempt, setTenantsAttempt] = useState(0);
-
-  // Forecast: null = 501 (no ledger) or no tenant; undefined = not yet loaded.
-  const [forecast, setForecast] = useState<CostForecastResponse | null | undefined>(
-    undefined,
-  );
-
   // setTenant drives the view by writing the selection into ?tenant= (replace,
   // not push — flipping the tenant is not a distinct history step).
   const setTenant = useCallback(
@@ -493,43 +500,35 @@ export function CostPage() {
 
   // Load the tenant list once for the picker. Best-effort: a 403 (a viewer who
   // cannot list tenants) is an honest "forbidden", distinct from an empty list.
-  useEffect(() => {
-    const controller = new AbortController();
-    setTenantsState({ kind: "loading" });
-    api
-      .listTenants(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setTenantsState({ kind: "ready", tenants: res.items ?? [] });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        if (err instanceof ApiError && err.isForbidden) {
-          setTenantsState({ kind: "forbidden" });
-          return;
-        }
-        setTenantsState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load tenants",
-        });
-      });
-    return () => controller.abort();
-  }, [tenantsAttempt]);
+  const fetchTenants = useCallback(
+    (signal: AbortSignal) => api.listTenants(signal).then((res) => res.items ?? []),
+    [],
+  );
+  const { state: tenantsRead, reload: reloadTenants } = useLoad(fetchTenants);
+  const tenantsState = useMemo((): TenantsState => {
+    if (tenantsRead.kind === "ready") return { kind: "ready", tenants: tenantsRead.data };
+    if (tenantsRead.kind === "loading") return tenantsRead;
+    if (tenantsRead.forbidden) return { kind: "forbidden" };
+    return { kind: "error", message: tenantsRead.message };
+  }, [tenantsRead]);
 
-  // Default-to-first: landing with no ?tenant= while tenants exist picks the
-  // first, so the page is immediately useful instead of dead-ending.
+  // tenantRequired: the BFF answered `tenant_required` to a breakdown with no
+  // tenant, so this caller reads cost cluster-wide and spend is grouped by
+  // tenant. Until it says so the page never picks a tenant: a caller without
+  // cluster-wide cost access would be refused every tenant it listed.
+  const [tenantRequired, setTenantRequired] = useState(false);
+
+  // Default-to-first: a caller asked to name a tenant lands on the first, so the
+  // page is immediately useful instead of dead-ending.
   useEffect(() => {
-    if (tenant) return;
+    if (tenant || !tenantRequired) return;
     if (tenantsState.kind === "ready" && tenantsState.tenants.length > 0) {
       setTenant(tenantsState.tenants[0].name);
     }
-  }, [tenant, tenantsState, setTenant]);
+  }, [tenant, tenantRequired, tenantsState, setTenant]);
 
   // Cursor pagination: stack of cursors, one per page. [""] = page 0.
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
-
-  const abortRef = useRef<AbortController | null>(null);
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
   // Switching tenant resets pagination — a cursor from one tenant is
@@ -538,102 +537,69 @@ export function CostPage() {
     setPageStack([""]);
   }, [tenant]);
 
-  // zeroTenants is the ONLY thing the breakdown fetch needs from the tenant
-  // list: the M99 B1 "genuinely no tenants → fetch the cluster-wide breakdown"
-  // fallback. Depending on the whole tenantsState instead re-created `load`
-  // when the list merely finished loading, which fired a SECOND identical
-  // breakdown fetch and flashed already-rendered rows away (m52.G8). As a
-  // boolean it only changes when the answer actually changes.
-  const zeroTenants =
-    tenantsState.kind === "ready" && tenantsState.tenants.length === 0;
+  // The breakdown depends on nothing from the tenant list: it is fetched without a
+  // tenant and the BFF decides its scope. Depending on the list re-created the read
+  // when the list merely finished loading, which fired a SECOND identical breakdown
+  // fetch and flashed already-rendered rows away (m52.G8). Once told to name a tenant,
+  // it answers no-tenant without asking again until default-to-first picks one.
+  const fetchBreakdown = useCallback(
+    (signal: AbortSignal): Promise<CostBreakdownResponse | null | typeof NO_TENANT> =>
+      !tenant && tenantRequired
+        ? Promise.resolve(NO_TENANT)
+        : api.costBreakdown(tenant, { limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) }, signal),
+    [cursor, tenant, tenantRequired],
+  );
+  const { state: breakdown, reload: load } = useLoad(fetchBreakdown);
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    // ADR 0077: the breakdown REQUIRES ?tenant= when tenants exist. M99 B1: on
-    // a cluster with genuinely NO tenants there is no boundary to leak across,
-    // so the BFF serves the cluster-wide breakdown for an empty tenant and we
-    // fetch it rather than dead-ending. While the list is still loading,
-    // forbidden, or non-empty (default-to-first will select one), hold the calm
-    // no-tenant state.
-    if (!tenant) {
-      if (!zeroTenants) {
-        setLoadState({ kind: "no-tenant" });
-        return;
-      }
-    }
-
-    setLoadState({ kind: "loading" });
-
-    api
-      .costBreakdown(
-        tenant,
-        { limit: PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // null = 501 (no trace backend) — calm degrade, NOT an error.
-        if (res === null) {
-          setLoadState({ kind: "unavailable" });
-          return;
-        }
-        // A `notice` means the trace store is transiently down (200 + empty,
-        // m23.6): show a retryable outage, NOT the "no cost data yet" empty
-        // (which would claim zero activity when the source merely timed out).
-        if (res.notice) {
-          setLoadState({ kind: "degraded", message: res.notice });
-          return;
-        }
-        setLoadState({
-          kind: "ready",
-          agents: res.agents,
-          total: res.total,
-          nextCursor: res.nextCursor,
-        });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // 502 and other non-501 errors surface as a real, retryable error.
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [cursor, tenant, zeroTenants]);
-
+  // The BFF answered `tenant_required` to a breakdown with no tenant: this caller reads
+  // cost cluster-wide, grouped by tenant.
+  const askedForTenant = !tenant && breakdown.kind === "error" && breakdown.code === "tenant_required";
   useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+    if (askedForTenant) setTenantRequired(true);
+  }, [askedForTenant]);
+
+  const loadState = useMemo((): LoadState => {
+    if (breakdown.kind === "loading") return breakdown;
+    if (breakdown.kind === "error") {
+      if (askedForTenant) return { kind: "no-tenant" };
+      // 502 and other non-501 errors surface as a real, retryable error.
+      return { kind: "error", message: breakdown.message, forbidden: breakdown.forbidden };
+    }
+    const res = breakdown.data;
+    if (res === NO_TENANT) return { kind: "no-tenant" };
+    // null = 501 (no trace backend) — calm degrade, NOT an error.
+    if (res === null) return { kind: "unavailable" };
+    // A `notice` means the trace store is transiently down (200 + empty, m23.6): show
+    // a retryable outage, NOT the "no cost data yet" empty (which would claim zero
+    // activity when the source merely timed out).
+    if (res.notice) return { kind: "degraded", message: res.notice };
+    return {
+      kind: "ready",
+      agents: res.agents,
+      total: res.total,
+      nextCursor: res.nextCursor,
+      namespaces: res.namespaces,
+    };
+  }, [breakdown, askedForTenant]);
 
   // Forecast: fetched when ?tenant= is present. 501 → null (calm). Errors are
   // absorbed — the breakdown is the primary surface and the band is secondary.
-  useEffect(() => {
-    if (!tenant) {
-      setForecast(null);
-      return;
-    }
-    const ctrl = new AbortController();
-    api
-      .costForecast(tenant, ctrl.signal)
-      .then((res) => {
-        if (!ctrl.signal.aborted) setForecast(res);
-      })
-      .catch(() => {
-        if (!ctrl.signal.aborted) setForecast(null);
-      });
-    return () => ctrl.abort();
-  }, [tenant]);
+  const fetchForecast = useMemo(
+    () => (tenant ? (signal: AbortSignal) => api.costForecast(tenant, signal) : null),
+    [tenant],
+  );
+  const { state: forecastRead } = useLoad(fetchForecast);
+  const forecast = forecastRead.kind === "ready" ? forecastRead.data : null;
 
   const agents = useMemo(
     () => (loadState.kind === "ready" ? loadState.agents : []),
     [loadState],
   );
   const total = loadState.kind === "ready" ? loadState.total : emptyCostSummary;
+  // The caller's workspaces, when that is what the breakdown covers.
+  const workspaces = loadState.kind === "ready" ? loadState.namespaces : undefined;
+  // Tenant and workspace totals are their rows added up (adapters.go costBreakdownPage).
+  const totalSumsRows = Boolean(tenant) || workspaces !== undefined;
   const nextCursor = loadState.kind === "ready" ? loadState.nextCursor : "";
 
   // hasNext keys off the CURSOR (BFF), NEVER off agents.length.
@@ -705,7 +671,7 @@ export function CostPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "cost data",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => load(),
         }
       : null;
 
@@ -815,26 +781,41 @@ export function CostPage() {
 
   // The header is shared across every state so the picker is always reachable,
   // not just on the happy path.
+  // The picker is for a caller scoped by tenant: one the BFF asked to name a
+  // tenant, or one already looking at a tenant. Offering it to anyone else
+  // would offer tenants whose breakdown refuses them.
+  const showPicker = tenants.length > 0 && (tenant !== "" || tenantRequired);
   const header = (
     <PageHeader
       title="Cost"
-      meta={tenant || (zeroTenants ? "all agents" : undefined)}
+      meta={
+        tenant ||
+        (workspaces !== undefined
+          ? "your workspaces"
+          : loadState.kind === "ready"
+            ? "all agents"
+            : undefined)
+      }
       lede="What the models actually cost, per agent, over a recent window of traced calls. Every figure here is measured — where one is not, it says so."
       actionsSlot={
-        tenants.length > 0 ? (
+        showPicker ? (
           <TenantPicker tenant={tenant} tenants={tenants} onChange={setTenant} />
         ) : undefined
       }
     />
   );
 
-  // Nothing to scope by (ADR 0077). Reached when the tenant list cannot be read
-  // — a 403, or a list that failed — because the breakdown is 400 without a
-  // tenant. It is NOT "no spend", and the copy must never let it read that way.
+  // Nothing to scope by (ADR 0077). Reached when the BFF requires a tenant and
+  // the list to pick one from failed, was refused, or came back empty. It is NOT
+  // "no spend", and the copy must never let it read that way.
   if (loadState.kind === "no-tenant") {
-    // The list is still in flight: this is LOADING, not an answer. Claiming
-    // "no tenants" here would be a claim made a beat before the data arrives.
-    if (tenantsState.kind === "loading") {
+    // The list is still in flight, or holds a tenant default-to-first is about
+    // to pick: this is LOADING, not an answer. Claiming "no tenants" here would
+    // be a claim made a beat before the data arrives.
+    if (
+      tenantsState.kind === "loading" ||
+      (tenantsState.kind === "ready" && tenantsState.tenants.length > 0)
+    ) {
       return (
         <div className="min-w-0 space-y-6" data-testid="cost-page">
           {header}
@@ -855,11 +836,12 @@ export function CostPage() {
         {header}
         <div data-testid="cost-no-tenant">
           {tenantsState.kind === "forbidden" ? (
-            <QuietNote title="Cost is grouped by tenant, and you can’t read the tenant list.">
-              Spend is scoped to one tenant at a time, so without that list there
-              is nothing to scope by — this is a permission boundary, not an
-              empty ledger. Ask an operator for a role that can read tenants.
-              Nothing here is estimated and no spend is being claimed either way.
+            <QuietNote title="Cost is grouped by tenant, and you can’t list tenants.">
+              You may read cost across the cluster, so spend is shown one tenant
+              at a time, but your access does not include listing tenants. Open
+              this page with a tenant’s name (<span className="font-mono">?tenant=</span>),
+              or ask whoever administers tenants for access to list them. This
+              is not a report of zero spend.
             </QuietNote>
           ) : tenantsState.kind === "error" ? (
             <QuietNote title="Cost is grouped by tenant, and the tenant list didn’t load.">
@@ -870,7 +852,7 @@ export function CostPage() {
                 variant="outline"
                 size="sm"
                 className="mt-3"
-                onClick={() => setTenantsAttempt((n) => n + 1)}
+                onClick={() => reloadTenants()}
                 data-testid="cost-retry-tenants"
               >
                 Try again
@@ -924,7 +906,7 @@ export function CostPage() {
           <ErrorState
             title="The trace store didn’t answer"
             description={loadState.message}
-            onRetry={load}
+            onRetry={() => load()}
           />
         </div>
       </div>
@@ -936,7 +918,21 @@ export function CostPage() {
   // back out instead of teaching a reader with 12 rows how to get their first.
   const viewEmptied =
     agents.length > 0 && visible.length === 0 && view !== "all" && q === "";
-  const empty: EmptyStateProps = viewEmptied
+  // An empty page with another page before or after it is not an empty window:
+  // "No cost data yet" there would be a false zero.
+  const pageEmptied = agents.length === 0 && (hasNext || hasPrev);
+  const empty: EmptyStateProps = pageEmptied
+    ? {
+        icon: Coins,
+        title: "Nothing on this page",
+        description: hasNext
+          ? "More rows follow on the next page. An empty page is not a report of zero spend."
+          : "The rows are on the pages before this one. An empty page is not a report of zero spend.",
+        action: hasNext
+          ? { label: "Load the next page", onClick: onNext }
+          : { label: "Back to the previous page", variant: "outline", onClick: onPrev },
+      }
+    : viewEmptied
     ? {
         intent: "filtered",
         icon: Filter,
@@ -958,9 +954,9 @@ export function CostPage() {
       };
 
   const ready = loadState.kind === "ready";
-  // The tenant-scoped total is recomputed from the rows and never carries a call
-  // count (handlers.go) — so on that path the figure is unknown, not zero.
-  const observations: Quantity = tenant
+  // A total recomputed from the rows never carries a call count (handlers.go) —
+  // so on those paths the figure is unknown, not zero.
+  const observations: Quantity = totalSumsRows
     ? UNKNOWN
     : (total.observations ?? UNKNOWN);
   const closing = ready ? closingLine(sorted, listComplete) : null;
@@ -969,9 +965,20 @@ export function CostPage() {
     <div className="min-w-0 space-y-6" data-testid="cost-page">
       {header}
 
+      {/* A caller who cannot list tenants reads their own workspaces. */}
+      {ready && !tenant && workspaces !== undefined && (
+        <div data-testid="cost-workspaces-note">
+          <QuietNote title="This is spend in your workspaces.">
+            The breakdown covers the namespaces where you may read cost:{" "}
+            <span className="font-mono">{workspaces.join(", ")}</span>. Tenant
+            budgets are set by whoever administers tenants, so none is shown here.
+          </QuietNote>
+        </div>
+      )}
+
       {/* M99 B1: with no tenants the cluster-wide per-agent breakdown is what
           is on screen. Say so, and offer the tenant that would scope it. */}
-      {ready && !tenant && (
+      {ready && !tenant && workspaces === undefined && (
         <div data-testid="cost-all-agents-note">
           <QuietNote title="No tenants yet — this is every agent in the cluster.">
             Spend is normally scoped to one tenant, which is also where a budget
@@ -1002,12 +1009,19 @@ export function CostPage() {
       {ready && agents.length > 0 && (
         <div data-testid="cost-window-note">
           <QuietNote title="These figures cover a recent window — not all time.">
-            {tenant ? (
+            {totalSumsRows ? (
               <>
                 The rows are the last {TRACE_WINDOW} traces the trace backend
-                recorded for <span className="font-mono">{tenant}</span>’s
-                namespaces, and the totals above are those same rows added up, so
-                they agree by construction. Spend from before that window is not
+                recorded, kept to{" "}
+                {tenant ? (
+                  <>
+                    <span className="font-mono">{tenant}</span>’s namespaces
+                  </>
+                ) : (
+                  "your workspaces"
+                )}
+                , and the totals above are those same rows added up, so they
+                agree by construction. Spend from before that window is not
                 counted here — and is not estimated either.
               </>
             ) : (

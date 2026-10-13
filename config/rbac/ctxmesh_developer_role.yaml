@@ -21,6 +21,10 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments
+  # agentversions is no longer a CRD (version history is in Postgres, ADR 0042) but stays in this
+  # persona RBAC: the BFF authorizes the agent's version list and diff with a caller-scoped
+  # SelfSubjectAccessReview on this resource, so this grant IS the version-history policy.
+  # Do NOT remove — without it the persona sees no versions and every diff is 403.
   - agentversions
   - modelroutes
   - secretbindings
@@ -36,6 +40,10 @@ rules:
   # promptversions IS the authz policy. Omitting it fail-closes every PromptVersion
   # API call — the same contract as toolregistries above.
   - promptversions
+  # skills is store-backed the same way (ADR 0137): /api/skills authorizes each read and write
+  # with a caller-scoped SelfSubjectAccessReview on this resource, so this grant IS the skills
+  # policy. Do NOT remove — without it /api/skills is 403 for the persona.
+  - skills
   - agentregistries
   - agentteams
   - workflows
@@ -71,7 +79,6 @@ rules:
   - agents.ctxmesh.ai
   resources:
   - agentdeployments/status
-  - agentversions/status
   - modelroutes/status
   - secretbindings/status
   - mcptoolbindings/status
@@ -101,3 +108,19 @@ rules:
   - get
   - list
   - delete
+# The live output tail on an agent's page (GET /api/agents/{ns}/{name}/logs) runs as the
+# caller: it lists the agent's pods, then reads one pod's log. Kubernetes' own view and edit
+# roles grant the same. The viewer persona deliberately does not get these.
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get

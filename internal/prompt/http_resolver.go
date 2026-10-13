@@ -18,14 +18,16 @@ package prompt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // maxPromptBytes bounds a resolved prompt so a hostile/huge path cannot OOM the BFF.
@@ -44,7 +46,13 @@ const maxPromptBytes = 1 << 20
 type HTTPResolver struct {
 	client *http.Client
 	token  string
+	// maxBytes, when set, refuses content longer than it with ErrTooLarge instead of truncating it.
+	maxBytes int64
 }
+
+// ErrTooLarge is returned by a resolver built with HTTPResolverOptions.MaxBytes for content longer
+// than that.
+var ErrTooLarge = errors.New("prompt: the file is larger than the resolver accepts")
 
 // NewHTTPResolver builds an HTTPResolver. token is optional (empty ⇒ public-repo only).
 func NewHTTPResolver(token string) *HTTPResolver {
@@ -54,10 +62,41 @@ func NewHTTPResolver(token string) *HTTPResolver {
 	}
 }
 
+// HTTPResolverOptions tunes an HTTPResolver for a caller that fetches inside a reconcile.
+type HTTPResolverOptions struct {
+	// MaxBytes refuses content longer than this with ErrTooLarge. Zero truncates at 1 MiB, as
+	// NewHTTPResolver does.
+	MaxBytes int64
+	// DialTimeout bounds connecting, and the TLS handshake and the wait for response headers each, so
+	// an unreachable host fails in seconds. Zero leaves the transport's defaults.
+	DialTimeout time.Duration
+	// Timeout bounds the whole request. Zero is 15 seconds.
+	Timeout time.Duration
+}
+
+// NewHTTPResolverWithOptions builds an HTTPResolver for public repositories only: it sends no token.
+// The transport honours HTTPS_PROXY and NO_PROXY like http.DefaultTransport.
+func NewHTTPResolverWithOptions(opts HTTPResolverOptions) *HTTPResolver {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if opts.DialTimeout > 0 {
+		transport.DialContext = (&net.Dialer{Timeout: opts.DialTimeout, KeepAlive: 30 * time.Second}).DialContext
+		transport.TLSHandshakeTimeout = opts.DialTimeout
+		transport.ResponseHeaderTimeout = opts.DialTimeout
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	return &HTTPResolver{
+		client:   &http.Client{Timeout: timeout, Transport: transport},
+		maxBytes: opts.MaxBytes,
+	}
+}
+
 // Resolve fetches the prompt content for the git pointer. A 404 (bad ref / missing
 // path) maps to ErrNotFound (a user error, not a requeue); any other non-200 or a
 // transport error is a transient/infra failure. Never fabricates content.
-func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1alpha1.GitPromptSource) (Resolved, error) {
+func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1beta1.GitPromptSource) (Resolved, error) {
 	rawURL, err := rawContentURL(src)
 	if err != nil {
 		// An unsupported host is a user-fixable pointer error, not transient.
@@ -87,9 +126,16 @@ func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1alpha1.GitPrompt
 		return Resolved{}, fmt.Errorf("prompt: fetch %s: unexpected status %d", rawURL, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPromptBytes))
+	limit := int64(maxPromptBytes)
+	if h.maxBytes > 0 {
+		limit = h.maxBytes + 1 // one byte more tells a file at the limit from a longer one
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return Resolved{}, fmt.Errorf("prompt: read %s: %w", rawURL, err)
+	}
+	if h.maxBytes > 0 && int64(len(body)) > h.maxBytes {
+		return Resolved{}, fmt.Errorf("%w: %s is over %d bytes", ErrTooLarge, rawURL, h.maxBytes)
 	}
 	content := string(body)
 	return Resolved{Content: content, Version: Version(src, content)}, nil
@@ -99,7 +145,7 @@ func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1alpha1.GitPrompt
 // raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}. Other hosts are unsupported in
 // v1 (a go-git resolver would generalise) — reported as a pointer error the caller maps
 // to a user-facing 404.
-func rawContentURL(src agentsv1alpha1.GitPromptSource) (string, error) {
+func rawContentURL(src agentsv1beta1.GitPromptSource) (string, error) {
 	repo := strings.TrimSpace(src.Repo)
 	ref := strings.TrimSpace(src.Ref)
 	path := strings.TrimPrefix(strings.TrimSpace(src.Path), "/")

@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // mrNS is the namespace used in ModelRoute tests.
@@ -47,11 +47,11 @@ const mrNS = "team-a"
 
 // mockModelRoute builds a ModelRoute with a single mock provider (no
 // secretBindingRef required). Safe for direct create in the fake store.
-func mockModelRoute(name, ns string) *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func mockModelRoute(name, ns string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
 		},
@@ -61,11 +61,11 @@ func mockModelRoute(name, ns string) *agentsv1alpha1.ModelRoute {
 // apiBaseModelRoute builds a ModelRoute with a non-mock provider that uses
 // apiBase instead of secretBindingRef (the m14.12b golden-path field — no key
 // required when apiBase is set).
-func apiBaseModelRoute(name, ns string) *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func apiBaseModelRoute(name, ns string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider: "openai",
 					Model:    "gpt-4o",
@@ -79,11 +79,11 @@ func apiBaseModelRoute(name, ns string) *agentsv1alpha1.ModelRoute {
 
 // secretBindingModelRoute builds a ModelRoute with a non-mock provider that has
 // a secretBindingRef (the typical production path).
-func secretBindingModelRoute(name, ns, secretBindingRef string) *agentsv1alpha1.ModelRoute {
-	return &agentsv1alpha1.ModelRoute{
+func secretBindingModelRoute(name, ns, secretBindingRef string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider:         "anthropic",
 					Model:            "claude-sonnet-4-6",
@@ -96,7 +96,7 @@ func secretBindingModelRoute(name, ns, secretBindingRef string) *agentsv1alpha1.
 }
 
 // readyMR sets the Ready condition on a ModelRoute (simulates a reconciled object).
-func readyMR(mr *agentsv1alpha1.ModelRoute) *agentsv1alpha1.ModelRoute {
+func readyMR(mr *agentsv1beta1.ModelRoute) *agentsv1beta1.ModelRoute {
 	mr.Status.Conditions = []metav1.Condition{
 		{
 			Type:               "Ready",
@@ -239,7 +239,7 @@ func TestListModelRoutesReturnsItems(t *testing.T) {
 func TestListModelRoutesLimitAndCursor(t *testing.T) {
 	// Build a paging interceptor for ModelRouteList (mirrors pagingListInterceptor
 	// but for ModelRoute), standing in for the K8s API server pagination.
-	all := []*agentsv1alpha1.ModelRoute{
+	all := []*agentsv1beta1.ModelRoute{
 		mockModelRoute("route-000", mrNS),
 		mockModelRoute("route-001", mrNS),
 		mockModelRoute("route-002", mrNS),
@@ -263,7 +263,7 @@ func TestListModelRoutesLimitAndCursor(t *testing.T) {
 			if lo.Limit > 0 && start+int(lo.Limit) < end {
 				end = start + int(lo.Limit)
 			}
-			mrList, ok := list.(*agentsv1alpha1.ModelRouteList)
+			mrList, ok := list.(*agentsv1beta1.ModelRouteList)
 			if !ok {
 				return fmt.Errorf("unexpected list type %T", list)
 			}
@@ -470,7 +470,7 @@ func TestCreateModelRouteMock(t *testing.T) {
 	assert.Equal(t, "mock", detail.Providers[0].Provider)
 
 	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.ModelRoute
+	var got agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: mrNS, Name: "mock-route"}, &got))
 	assert.Equal(t, "mock", got.Spec.Providers[0].Provider)
 }
@@ -684,7 +684,7 @@ func TestUpdateModelRouteEditsField(t *testing.T) {
 	assert.Equal(t, "mock-v2", detail.Providers[0].Model)
 
 	// Confirm the change landed.
-	var got agentsv1alpha1.ModelRoute
+	var got agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: mrNS, Name: "my-route"}, &got))
 	assert.Equal(t, "mock-v2", got.Spec.Providers[0].Model)
 }
@@ -813,7 +813,7 @@ func TestDeleteModelRouteRemovesObject(t *testing.T) {
 	rec := deleteModelRoute(t, s, "my-route")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.ModelRoute
+	var got agentsv1beta1.ModelRoute
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: mrNS, Name: "my-route"}, &got)
 	require.True(t, apierrors.IsNotFound(err), "ModelRoute must be gone after a successful DELETE")
 }

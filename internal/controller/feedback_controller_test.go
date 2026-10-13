@@ -23,81 +23,74 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	corev1 "k8s.io/api/core/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
-// TestReconcile_FeedbackEnvInjected verifies that FEEDBACK_PORT +
-// LANGFUSE_HOST + LANGFUSE_SCORES_PUBLIC_KEY + LANGFUSE_SCORES_SECRET_KEY are
-// all injected as STATIC env (ValueFrom == nil) on every agent's user container.
-// This is the tier1 no-valueFrom guard for the M9 feedback path (spec §3;
-// mirrors TestReconcile_BudgetEnvInjected for the M8 budget path).
+// TestReconcile_FeedbackEnvInjected: an agent whose namespace holds the langfuse-otlp Secret gets
+// the feedback hook — FEEDBACK_PORT and LANGFUSE_HOST as plain values, the scores keys as
+// references to that Secret, never as literals.
 func TestReconcile_FeedbackEnvInjected(t *testing.T) {
 	const (
 		name      = "feedback-agent"
-		namespace = "default"
+		namespace = "feedback-with-secret"
 	)
+	createTraceExportNamespace(t, namespace)
+	createLangfuseSecret(t, namespace)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image: "ghcr.io/ctxmesh/example-agent:latest",
-		},
-	}
-	require.NoError(t, k8sClient.Create(testCtx, deploy))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
-	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-
-	reconcileNN(t, newReconciler(), name, namespace)
-
-	var ksvc servingv1.Service
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: name, Namespace: namespace}, &ksvc))
+	ksvc, _ := reconcileTraceExportAgent(t, name, namespace)
 	userContainer := ksvc.Spec.Template.Spec.Containers[0]
 
-	// Build env lookup map (plain-value env only; ValueFrom entries are flagged
-	// separately below).
-	envMap := make(map[string]string, len(userContainer.Env))
+	byName := make(map[string]corev1.EnvVar, len(userContainer.Env))
 	for _, e := range userContainer.Env {
-		if e.ValueFrom == nil {
-			envMap[e.Name] = e.Value
-		}
+		byName[e.Name] = e
 	}
 
-	// ── FEEDBACK_PORT must be present and set to 2995 ────────────────────────
-	require.Contains(t, envMap, "FEEDBACK_PORT",
-		"FEEDBACK_PORT must be injected into every agent's user container")
-	assert.Equal(t, "2995", envMap["FEEDBACK_PORT"],
-		"FEEDBACK_PORT must be the reserved :2995 port")
+	require.Contains(t, byName, "FEEDBACK_PORT", "the feedback hook must be enabled")
+	assert.Equal(t, "2995", byName["FEEDBACK_PORT"].Value, "FEEDBACK_PORT must be the reserved :2995 port")
+	require.Contains(t, byName, "LANGFUSE_HOST", "LANGFUSE_HOST must be injected for the feedback relay")
+	assert.Equal(t, "http://langfuse-web.langfuse.svc:3000", byName["LANGFUSE_HOST"].Value)
 
-	// ── LANGFUSE_HOST must be the in-cluster dev Langfuse URL ─────────────────
-	require.Contains(t, envMap, "LANGFUSE_HOST",
-		"LANGFUSE_HOST must be injected for the feedback relay")
-	assert.Equal(t, "http://langfuse-web.langfuse.svc:3000", envMap["LANGFUSE_HOST"],
-		"LANGFUSE_HOST must be the dev Langfuse in-cluster URL")
+	for name, key := range map[string]string{
+		"LANGFUSE_SCORES_PUBLIC_KEY": "public-key",
+		"LANGFUSE_SCORES_SECRET_KEY": "secret-key",
+	} {
+		e, ok := byName[name]
+		require.True(t, ok, "%s must be injected", name)
+		assert.Empty(t, e.Value, "%s must not be a literal", name)
+		require.NotNil(t, e.ValueFrom, "%s must come from the Secret", name)
+		require.NotNil(t, e.ValueFrom.SecretKeyRef, "%s must be a secretKeyRef", name)
+		assert.Equal(t, telemetry.LangfuseSecretName, e.ValueFrom.SecretKeyRef.Name)
+		assert.Equal(t, key, e.ValueFrom.SecretKeyRef.Key)
+	}
+	assertNoInlineCredential(t, ksvc)
 
-	// ── LANGFUSE_SCORES_PUBLIC_KEY / _SECRET_KEY must be the dev keys ─────────
-	require.Contains(t, envMap, "LANGFUSE_SCORES_PUBLIC_KEY",
-		"LANGFUSE_SCORES_PUBLIC_KEY must be injected")
-	assert.Equal(t, "pk-lf-dev-00000000000000000000000000000000",
-		envMap["LANGFUSE_SCORES_PUBLIC_KEY"],
-		"LANGFUSE_SCORES_PUBLIC_KEY must be the deterministic dev key")
-
-	require.Contains(t, envMap, "LANGFUSE_SCORES_SECRET_KEY",
-		"LANGFUSE_SCORES_SECRET_KEY must be injected")
-	assert.Equal(t, "sk-lf-dev-00000000000000000000000000000000",
-		envMap["LANGFUSE_SCORES_SECRET_KEY"],
-		"LANGFUSE_SCORES_SECRET_KEY must be the deterministic dev key")
-
-	// ── Knative no-valueFrom guard (M5.7): ALL user-container env must be static
-	// Values — not valueFrom. Covers all four feedback vars + every other injected
-	// var in this reconcile (AGENT_PORT, MODEL_GATEWAY_URL, etc.).
+	// Knative's ksvc webhook rejects the downward API (fieldRef / resourceFieldRef) and accepts
+	// secretKeyRef (server dry-run, 2026-10-05). This guard used to forbid every valueFrom, which
+	// is what kept the scores keys as literals; it now forbids exactly the kinds the webhook
+	// rejects, which is the landmine it exists for.
 	for _, e := range userContainer.Env {
-		assert.Nil(t, e.ValueFrom,
-			"ksvc env %q must be a static value (no valueFrom — Knative webhook landmine M5.7)", e.Name)
+		if e.ValueFrom == nil {
+			continue
+		}
+		assert.Nil(t, e.ValueFrom.FieldRef, "ksvc env %q: Knative rejects fieldRef", e.Name)
+		assert.Nil(t, e.ValueFrom.ResourceFieldRef, "ksvc env %q: Knative rejects resourceFieldRef", e.Name)
+	}
+}
+
+// Without the Secret the hook is off: a secretKeyRef to a missing Secret would stop the pod from
+// starting, so the keys are not referenced at all.
+func TestReconcile_FeedbackEnvAbsentWithoutSecret(t *testing.T) {
+	const (
+		name      = "feedback-agent-nosecret"
+		namespace = "feedback-without-secret"
+	)
+	createTraceExportNamespace(t, namespace)
+
+	ksvc, _ := reconcileTraceExportAgent(t, name, namespace)
+	for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
+		assert.NotContains(t, []string{"FEEDBACK_PORT", "LANGFUSE_HOST", "LANGFUSE_SCORES_PUBLIC_KEY", "LANGFUSE_SCORES_SECRET_KEY"},
+			e.Name, "no langfuse-otlp Secret in the namespace, so no feedback hook")
 	}
 }

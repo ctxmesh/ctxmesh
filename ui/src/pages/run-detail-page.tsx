@@ -20,7 +20,8 @@ import {
   type KeyValueItem,
   type TimelineStep,
 } from "@/components/kit";
-import { api, ApiError, type RunDetail, type RunTree, type RunTreeNode } from "@/lib/api";
+import { api, type RunDetail, type RunTree, type RunTreeNode } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { formatDateTime, formatLatency, formatRelativeTime } from "@/lib/format";
 
 // RunDetailPage — the run reader (V5/M112; M151 §6.1 archetype A5). Route: /runs/:id
@@ -367,46 +368,20 @@ type PageState =
 
 export function RunDetailPage() {
   const { id = "" } = useParams();
-  const [state, setState] = React.useState<PageState>({ kind: "loading" });
   const [approval, setApproval] = React.useState<ApprovalState>({ kind: "idle" });
   // Optional free-text reason a reviewer can attach when DENYING (V16, m115.4) — stored on the run so the
   // denial is explainable. Ignored on approve.
   const [denyReason, setDenyReason] = React.useState("");
 
   // fetch (or re-fetch) the run
-  const load = React.useCallback(
-    (signal?: AbortSignal) => {
-      if (!id) return;
-      setState({ kind: "loading" });
-      api
-        .getRun(id, signal)
-        .then((detail) => {
-          if (signal?.aborted) return;
-          setState({ kind: "ready", detail });
-        })
-        .catch((err: unknown) => {
-          if (signal?.aborted) return;
-          if (err instanceof ApiError && err.status === 404) {
-            setState({ kind: "not-found" });
-            return;
-          }
-          const forbidden = err instanceof ApiError && err.isForbidden;
-          setState({
-            kind: "error",
-            message:
-              err instanceof Error ? err.message : "couldn't load the run",
-            forbidden,
-          });
-        });
-    },
-    [id],
-  );
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
+  const fetchRun = React.useCallback((signal: AbortSignal) => api.getRun(id, signal), [id]);
+  const { state: read, reload: load } = useLoad(fetchRun);
+  const state = React.useMemo((): PageState => {
+    if (read.kind === "ready") return { kind: "ready", detail: read.data };
+    if (read.kind === "loading") return read;
+    if (read.status === 404) return { kind: "not-found" };
+    return { kind: "error", message: read.message, forbidden: read.forbidden };
+  }, [read]);
 
   // Approve / Deny — mirror playground-page.tsx onApprove/onDeny. The resume
   // endpoint accepts { decision: "approve" | "deny" }; the key is an internal

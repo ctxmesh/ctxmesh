@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
 )
 
@@ -56,11 +56,11 @@ func putAgent(t *testing.T, s *Server, name, editedYAML string) *httptest.Respon
 // consoleAgent builds an AgentDeployment carrying the source-spec annotation for
 // the given simplified spec — a console-managed agent (m15.2 stamp), the Mode-A
 // population. The stored annotation is canonical JSON of srcYAML.
-func consoleAgent(t *testing.T, name, srcYAML string, spec agentsv1alpha1.AgentDeploymentSpec) *agentsv1alpha1.AgentDeployment {
+func consoleAgent(t *testing.T, name, srcYAML string, spec agentsv1beta1.AgentDeploymentSpec) *agentsv1beta1.AgentDeployment {
 	t.Helper()
 	canonical, cErr := canonicalizeSourceSpec([]byte(srcYAML))
 	require.Nil(t, cErr)
-	return &agentsv1alpha1.AgentDeployment{
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   detailNS,
@@ -79,7 +79,7 @@ func TestEditRoundTripAppliesAndReStamps(t *testing.T) {
 	const original = "name: echo\nimage: img:1\n"
 	const edited = "name: echo\nimage: img:2\nscaling:\n  min: 2\n  max: 4\n"
 
-	ad := consoleAgent(t, "echo", original, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", original, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
@@ -91,7 +91,7 @@ func TestEditRoundTripAppliesAndReStamps(t *testing.T) {
 	assert.Equal(t, editModeRoundTrip, resp.Mode)
 
 	// The changed field landed on the live object via SSA.
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
 	assert.Equal(t, "img:2", got.Spec.Image, "edited image must land")
 	require.NotNil(t, got.Spec.Scaling)
@@ -117,7 +117,7 @@ func TestEditConcurrentEditGuard(t *testing.T) {
 	const original = "name: echo\nimage: img:1\n"
 	const edited = "name: echo\nimage: img:2\n"
 
-	ad := consoleAgent(t, "echo", original, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", original, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
@@ -134,7 +134,7 @@ func TestEditConcurrentEditGuard(t *testing.T) {
 	// A stale resourceVersion → 409; the live object is NOT clobbered.
 	rec := putRV("stale-does-not-match")
 	require.Equal(t, http.StatusConflict, rec.Code, "a stale resourceVersion must 409; body: %s", rec.Body.String())
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
 	assert.Equal(t, "img:1", got.Spec.Image, "a 409 must not clobber the live object")
 
@@ -152,7 +152,7 @@ func TestEditRoundTripInlineSecretRejected(t *testing.T) {
 	const original = "name: echo\nimage: img:1\n"
 	const leaky = "name: echo\nimage: img:1\napiKey: sk-leak\n"
 
-	ad := consoleAgent(t, "echo", original, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", original, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
@@ -160,7 +160,7 @@ func TestEditRoundTripInlineSecretRejected(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "inline secrets are not allowed")
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: detailNS}, &got))
 	assert.Equal(t, "img:1", got.Spec.Image, "the live object must be untouched on a rejected edit")
 }
@@ -171,7 +171,7 @@ func TestEditRoundTripRenameRejected(t *testing.T) {
 	const original = "name: echo\nimage: img:1\n"
 	const renamed = "name: renamed\nimage: img:2\n"
 
-	ad := consoleAgent(t, "echo", original, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", original, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
@@ -186,9 +186,9 @@ func TestEditRoundTripRenameRejected(t *testing.T) {
 // agent) patches ONLY a safe field (image) via SSA and leaves the hand-set
 // non-safe env var intact (Mode B never re-expands, never drops hand-set state).
 func TestEditDegradedPatchesSafeFieldOnly(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "kubectl-agent", Namespace: detailNS},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "img:1",
 			// A hand-set env var the console doesn't model — must survive the patch.
 			Env: []corev1.EnvVar{
@@ -209,7 +209,7 @@ func TestEditDegradedPatchesSafeFieldOnly(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, editModeDegraded, resp.Mode)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kubectl-agent", Namespace: detailNS}, &got))
 	assert.Equal(t, "img:2", got.Spec.Image, "safe image edit must land")
 
@@ -225,9 +225,9 @@ func TestEditDegradedPatchesSafeFieldOnly(t *testing.T) {
 // NON-safe field (executionModel) → a teaching 400 and the live object is
 // untouched.
 func TestEditDegradedNonSafeChangeRejected(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "kubectl-agent", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1", ExecutionModel: "serving"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1", ExecutionModel: "serving"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -239,7 +239,7 @@ func TestEditDegradedNonSafeChangeRejected(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "managed outside the UI")
 	assert.Contains(t, rec.Body.String(), "executionModel")
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kubectl-agent", Namespace: detailNS}, &got))
 	assert.Equal(t, "img:1", got.Spec.Image, "a rejected degraded edit must not partially apply")
 }
@@ -249,9 +249,9 @@ func TestEditDegradedNonSafeChangeRejected(t *testing.T) {
 // change trips it. executionModel echoed at the live value is fine even while a
 // safe field (image) changes.
 func TestEditDegradedEchoedNonSafeFieldTolerated(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "kubectl-agent", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1", ExecutionModel: "eventing"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1", ExecutionModel: "eventing"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -261,7 +261,7 @@ func TestEditDegradedEchoedNonSafeFieldTolerated(t *testing.T) {
 	rec := putAgent(t, s, "kubectl-agent", edited)
 	require.Equal(t, http.StatusOK, rec.Code, "an echoed-unchanged non-safe field must be tolerated; body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "kubectl-agent", Namespace: detailNS}, &got))
 	assert.Equal(t, "img:2", got.Spec.Image)
 }
@@ -272,9 +272,9 @@ func TestEditDegradedEchoedNonSafeFieldTolerated(t *testing.T) {
 // managedOutsideUI=true for a kubectl-created (annotation-less) agent and false
 // for a console-created one.
 func TestDetailManagedOutsideUITrueForAnnotationLess(t *testing.T) {
-	kubectlAD := &agentsv1alpha1.AgentDeployment{
+	kubectlAD := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "kubectl-agent", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(kubectlAD).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -289,7 +289,7 @@ func TestDetailManagedOutsideUITrueForAnnotationLess(t *testing.T) {
 
 func TestDetailManagedOutsideUIFalseForConsoleAgent(t *testing.T) {
 	const src = "name: console-echo\nimage: img:1\n"
-	ad := consoleAgent(t, "console-echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "console-echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
@@ -307,7 +307,7 @@ func TestDetailManagedOutsideUIFalseForConsoleAgent(t *testing.T) {
 func TestDetailDriftTrueWhenLiveMutated(t *testing.T) {
 	const src = "name: echo\nimage: img:1\n"
 	// Stored source-spec says img:1, but the live object was mutated to img:hacked.
-	ad := consoleAgent(t, "echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:hacked"})
+	ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:hacked"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
@@ -325,7 +325,7 @@ func TestDetailDriftTrueWhenLiveMutated(t *testing.T) {
 // is what the factory is asked to scope the PUT by.
 func TestEditRoutesCallerTokenToClient(t *testing.T) {
 	const src = "name: echo\nimage: img:1\n"
-	ad := consoleAgent(t, "echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	factory := &fakeCallerClientFactory{client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()}
 	s := newCallerServer(t, factory)
 
@@ -345,7 +345,7 @@ func TestEditRoutesCallerTokenToClient(t *testing.T) {
 // honest 403 — the BFF never pre-empts the decision or falls back to its SA.
 func TestEditForbiddenApplyIs403(t *testing.T) {
 	const src = "name: echo\nimage: img:1\n"
-	ad := consoleAgent(t, "echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
@@ -399,7 +399,7 @@ func TestEditWithoutTokenIs401(t *testing.T) {
 // teaching 400.
 func TestEditMissingBodyIs400(t *testing.T) {
 	const src = "name: echo\nimage: img:1\n"
-	ad := consoleAgent(t, "echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
 
@@ -436,9 +436,10 @@ func TestMergeEditOntoSourceSpecPreservesTools(t *testing.T) {
 // and applies — the "agentYAML is required" bug is closed.
 func TestEditFieldOnlySucceeds(t *testing.T) {
 	src := "name: echo\nruntime: managed\nimage: img:1\ntools:\n  - search\n"
-	ad := consoleAgent(t, "echo", src, agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"})
+	ad := consoleAgent(t, "echo", src, agentsv1beta1.AgentDeploymentSpec{Image: "img:1"})
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	s.toolRegistryStore = toolStoreWith(t, detailNS, "search")
 
 	img := "img:2"
 	body, err := json.Marshal(UpdateAgentRequest{Image: &img})

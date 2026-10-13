@@ -41,14 +41,17 @@ import (
 // user's already-hashed identity as the store subject, so one user's memories never reach another's context.
 type longTermProxy struct {
 	tokenServiceURL string
-	namespace       string
-	agent           string
-	scope           string // agentmemory.ScopeAgent | ScopeAgentUser
-	embeddingModel  string
-	verifier        *runcap.Verifier // nil ⇒ per-user memory is refused (no way to trust the user id)
-	client          *http.Client
-	tracer          trace.Tracer
-	logf            func(string, ...any)
+	// tokenPath is this pod's projected token for the token service (TOKEN_SERVICE_TOKEN_PATH), which
+	// authenticates every call and takes the namespace and agent from it (ADR 0154).
+	tokenPath      string
+	namespace      string
+	agent          string
+	scope          string // agentmemory.ScopeAgent | ScopeAgentUser
+	embeddingModel string
+	verifier       *runcap.Verifier // nil ⇒ per-user memory is refused (no way to trust the user id)
+	client         *http.Client
+	tracer         trace.Tracer
+	logf           func(string, ...any)
 }
 
 const (
@@ -77,6 +80,7 @@ func newLongTermProxy(logf func(string, ...any), tracer trace.Tracer) *longTermP
 	}
 	p := &longTermProxy{
 		tokenServiceURL: strings.TrimRight(tsURL, "/"),
+		tokenPath:       tokenServiceTokenPath(logf),
 		namespace:       ns,
 		agent:           strings.TrimSpace(os.Getenv("AGENT_NAME")),
 		scope:           scope,
@@ -87,13 +91,11 @@ func newLongTermProxy(logf func(string, ...any), tracer trace.Tracer) *longTermP
 	}
 	// A verifier is needed only for per-user scope (to trust the invoking user's id). Reuse the OBO
 	// capability public key + audience the platform already provisions.
-	if pubB64 := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_PUBLIC_KEY")); pubB64 != "" {
-		if pub, err := runcap.DecodePublicKey(pubB64); err == nil {
-			p.verifier = runcap.NewVerifier(pub, strings.TrimSpace(os.Getenv("MCP_CAPABILITY_AUDIENCE")), nil)
-		} else {
-			logf("launcher: long-term memory: bad MCP_CAPABILITY_PUBLIC_KEY (%v) — per-user memory refused", err)
-		}
+	v, err := capabilityVerifierFromEnv(os.Getenv)
+	if err != nil {
+		logf("launcher: long-term memory: %v — per-user memory refused", err)
 	}
+	p.verifier = v
 	return p
 }
 
@@ -105,7 +107,8 @@ func (p *longTermProxy) register(mux *http.ServeMux) {
 
 // subjectFor resolves the store subject: "" for agent-wide, or the invoking user's hashed id (from the
 // verified run capability) for per-user. Returns an error the handler maps to a 4xx when per-user can't be
-// satisfied — fail-closed, never fall back to agent-wide (that would cross-contaminate users).
+// satisfied — fail-closed, never fall back to agent-wide (that would cross-contaminate users). The token
+// service checks the subject against the same capability, so the caller forwards it (capabilityFor).
 func (p *longTermProxy) subjectFor(r *http.Request) (string, error) {
 	if p.scope != scopeAgentUser {
 		return "", nil
@@ -164,10 +167,11 @@ func (p *longTermProxy) handleRemember(w http.ResponseWriter, r *http.Request) {
 		"content": body.Content, "tags": tags, "embeddingModel": p.embeddingModel,
 	}
 	// Fire-and-forget with a detached context so returning 202 does not cancel the embed+store.
+	capability := p.capabilityFor(r, subject)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := p.post(ctx, "/v1/memory/remember", payload, nil); err != nil {
+		if err := p.post(ctx, "/v1/memory/remember", capability, payload, nil); err != nil {
 			p.logf("launcher: long-term remember forward failed (best-effort): %v", err)
 		}
 	}()
@@ -229,7 +233,7 @@ func (p *longTermProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 		wireKeyEmbeddingModel: p.embeddingModel,
 	}
 	var out json.RawMessage
-	if err := p.post(ctx, "/v1/memory/search", payload, &out); err != nil {
+	if err := p.post(ctx, "/v1/memory/search", p.capabilityFor(r, subject), payload, &out); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		p.logf("launcher: long-term search forward failed: %v", err)
 		http.Error(w, "long-term memory search failed", http.StatusBadGateway)
@@ -249,27 +253,67 @@ func (p *longTermProxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(out)
 }
 
-// post sends payload to the token-service path, optionally decoding the response body into out.
-func (p *longTermProxy) post(ctx context.Context, path string, payload any, out *json.RawMessage) error {
-	return postToTokenService(ctx, p.client, p.tokenServiceURL, path, payload, out)
+// capabilityFor is the run capability to forward for subject: the request's own when the memory is per-user,
+// none otherwise.
+func (p *longTermProxy) capabilityFor(r *http.Request, subject string) string {
+	if subject == "" {
+		return ""
+	}
+	return r.Header.Get(runcap.HeaderName)
 }
 
-// postToTokenService POSTs a JSON payload to baseURL+path over client and, on a 200, optionally copies the
+// post sends payload to the token-service path, optionally decoding the response body into out.
+func (p *longTermProxy) post(ctx context.Context, path, capability string, payload any, out *json.RawMessage) error {
+	return postToTokenService(ctx, p.client, tokenServiceCall{
+		baseURL: p.tokenServiceURL, path: path, tokenPath: p.tokenPath, capability: capability,
+	}, payload, out)
+}
+
+// tokenServiceCall is where a launcher proxy sends a request and with what credentials: this pod's projected
+// token always, and the run capability when the request acts for a user.
+type tokenServiceCall struct {
+	baseURL, path string
+	tokenPath     string
+	capability    string
+}
+
+// tokenServiceTokenPath reads TOKEN_SERVICE_TOKEN_PATH, which the controller sets beside TOKEN_SERVICE_URL.
+func tokenServiceTokenPath(logf func(string, ...any)) string {
+	path := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_TOKEN_PATH"))
+	if path == "" {
+		logf("launcher: TOKEN_SERVICE_TOKEN_PATH unset — the token service refuses every call without this " +
+			"pod's token; redeploy the agent so the controller mounts it (ADR 0154)")
+	}
+	return path
+}
+
+// postToTokenService POSTs a JSON payload to the call's URL over client and, on a 200, optionally copies the
 // (bounded) response body into out. It is the ONE forwarding contract the launcher's token-service read proxies
 // share (long-term memory + managed-RAG knowledge), so both surfaces marshal, header, bound, and error identically
-// — a non-200 is a returned error (never swallowed), and out is untouched on failure.
+// — a non-200 is a returned error naming the service's refusal (never swallowed), and out is untouched on failure.
 func postToTokenService(
-	ctx context.Context, client *http.Client, baseURL, path string, payload any, out *json.RawMessage,
+	ctx context.Context, client *http.Client, call tokenServiceCall, payload any, out *json.RawMessage,
 ) error {
+	if call.tokenPath == "" {
+		return fmt.Errorf("no token-service credential (TOKEN_SERVICE_TOKEN_PATH unset)")
+	}
+	token, err := readPodToken(call.tokenPath)
+	if err != nil {
+		return err
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+path, bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, call.baseURL+call.path, bytes.NewReader(b))
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	if call.capability != "" {
+		req.Header.Set(runcap.HeaderName, call.capability)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("call token-service: %w", err)
@@ -277,7 +321,14 @@ func postToTokenService(
 	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("token-service %s status %d", path, resp.StatusCode)
+		var refusal struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(raw, &refusal) == nil && refusal.Error != "" {
+			return fmt.Errorf("token-service %s status %d (%s: %s)", call.path, resp.StatusCode, refusal.Error, refusal.Message)
+		}
+		return fmt.Errorf("token-service %s status %d", call.path, resp.StatusCode)
 	}
 	if out != nil {
 		*out = raw

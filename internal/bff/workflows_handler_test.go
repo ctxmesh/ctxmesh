@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -75,10 +74,10 @@ func newWorkflowHandlerServer(t *testing.T, cl client.Client) *Server {
 // readyWorkflowAgent builds a ready AgentDeployment (a resolvable status.URL) for a workflow node, so the
 // create-time caller-scoped node-endpoint resolution (m67.13) finds an endpoint to pin. The URL mirrors the
 // in-cluster service form; extraLabels carry the registry's member selector when needed.
-func readyWorkflowAgent(name, namespace string, extraLabels map[string]string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func readyWorkflowAgent(name, namespace string, extraLabels map[string]string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: extraLabels},
-		Status:     agentsv1alpha1.AgentDeploymentStatus{URL: "http://" + name + "." + namespace + ".svc"},
+		Status:     agentsv1beta1.AgentDeploymentStatus{URL: "http://" + name + "." + namespace + ".svc"},
 	}
 }
 
@@ -299,7 +298,8 @@ func TestCreateWorkflowRun_IsAcceptedOnTheSingleRunPath(t *testing.T) {
 // ── POST /api/workflows/runs — inline-spec run (planning mode, m67.7, ADR 0060 §6) ───────────────────────
 
 // registryWithMembers builds an AgentRegistry + member AgentDeployments so the inline-run membership
-// resolver (resolveWorkflowMembership) passes. Each agent carries the registry's selector label.
+// resolver (resolveWorkflowMembership) passes. Each agent carries the registry's selector label and the
+// status.registryRef the controller records for a member.
 func registryWithMembers(t *testing.T, agentNames ...string) []client.Object {
 	t.Helper()
 	const (
@@ -308,9 +308,9 @@ func registryWithMembers(t *testing.T, agentNames ...string) []client.Object {
 	)
 	label := map[string]string{"registry": registryName}
 	objs := make([]client.Object, 0, 1+len(agentNames))
-	objs = append(objs, &agentsv1alpha1.AgentRegistry{
+	objs = append(objs, &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: registryName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryName,
 			MemberSelector: metav1.LabelSelector{MatchLabels: label},
 		},
@@ -318,7 +318,9 @@ func registryWithMembers(t *testing.T, agentNames ...string) []client.Object {
 	for _, name := range agentNames {
 		// Members are READY (a resolvable status.URL) so create-time node-endpoint resolution (m67.13) pins
 		// each endpoint. Carry the registry's selector label so membership resolution also passes.
-		objs = append(objs, readyWorkflowAgent(name, namespace, label))
+		agent := readyWorkflowAgent(name, namespace, label)
+		agent.Status.RegistryRef = registryName
+		objs = append(objs, agent)
 	}
 	return objs
 }
@@ -449,7 +451,7 @@ func TestCreateInlineWorkflowRun_InvalidSpec_ReferencedWithoutOutputSchema(t *te
 func TestCreateInlineWorkflowRun_NonMemberAgent(t *testing.T) {
 	// Registry "reg" has member agent-a; a non-member "rogue" also exists but carries no member label.
 	objs := registryWithMembers(t, "agent-a")
-	objs = append(objs, &agentsv1alpha1.AgentDeployment{
+	objs = append(objs, &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "rogue", Namespace: "prod"}, // no registry label → not a member
 	})
 	cl := newAgentFakeClient(t, objs...)
@@ -468,11 +470,39 @@ func TestCreateInlineWorkflowRun_NonMemberAgent(t *testing.T) {
 	assert.Zero(t, countStoreRuns(s), "no run is created when the trust boundary fails")
 }
 
+// TestCreateInlineWorkflowRun_AgentSelectedByTwoRegistries: membership is the registry the controller
+// recorded, not every registry whose selector matches the agent's labels, so an agent two registries
+// select is a member of only the one in status.registryRef.
+func TestCreateInlineWorkflowRun_AgentSelectedByTwoRegistries(t *testing.T) {
+	objs := registryWithMembers(t, "agent-a")
+	objs = append(objs, &agentsv1beta1.AgentRegistry{
+		ObjectMeta: metav1.ObjectMeta{Name: "reg-b", Namespace: "prod"},
+		Spec: agentsv1beta1.AgentRegistrySpec{
+			RegistryId:     "reg-b",
+			MemberSelector: metav1.LabelSelector{MatchLabels: map[string]string{"registry": "reg"}},
+		},
+	})
+	s := newWorkflowHandlerServer(t, newAgentFakeClient(t, objs...))
+	start := func(registry string) *httptest.ResponseRecorder {
+		return postInlineWorkflowRun(t, s, InlineWorkflowRunRequest{Namespace: "prod", Spec: agentsv1beta1.WorkflowSpec{
+			RegistryRef: registry,
+			Steps:       []agentsv1beta1.WorkflowStep{{Name: "one", AgentRef: "agent-a"}},
+		}})
+	}
+
+	rec := start("reg-b")
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "reg-b's selector matches, but the agent is reg's")
+	assert.Contains(t, rec.Body.String(), `is a member of registry \"reg\", not \"reg-b\"`)
+	assert.Zero(t, countStoreRuns(s))
+
+	assert.Equal(t, http.StatusAccepted, start("reg").Code)
+}
+
 // TestCreateInlineWorkflowRun_MissingRegistry: an inline spec whose registryRef does not resolve → 422.
 func TestCreateInlineWorkflowRun_MissingRegistry(t *testing.T) {
 	// agent-a exists but there is NO registry "reg".
 	cl := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
-		&agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent-a", Namespace: "prod"}},
+		&agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "agent-a", Namespace: "prod"}},
 	).Build()
 	s := newWorkflowHandlerServer(t, cl)
 
@@ -761,15 +791,18 @@ func TestCreateInlineWorkflowRun_MissingNodeAgent_FailsAtCreate(t *testing.T) {
 // NO endpoint yet (status.URL empty ⇒ not Ready) fails create with 4xx and stores no run.
 func TestCreateInlineWorkflowRun_NotReadyNodeAgent_FailsAtCreate(t *testing.T) {
 	label := map[string]string{"registry": "reg"}
-	registry := &agentsv1alpha1.AgentRegistry{
+	registry := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "reg", Namespace: "prod"},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     "reg",
 			MemberSelector: metav1.LabelSelector{MatchLabels: label},
 		},
 	}
-	// A member with the selector label but NO status.URL → passes membership, fails endpoint resolution.
-	notReady := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "not-ready-agent", Namespace: "prod", Labels: label}}
+	// A member with NO status.URL → passes membership, fails endpoint resolution.
+	notReady := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "not-ready-agent", Namespace: "prod", Labels: label},
+		Status:     agentsv1beta1.AgentDeploymentStatus{RegistryRef: "reg"},
+	}
 	cl := newAgentFakeClient(t, registry, notReady)
 	s := newWorkflowHandlerServer(t, cl)
 

@@ -17,12 +17,14 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestHandleInvoke_Echo verifies the M1 echo path (no MODEL_ROUTE set):
@@ -199,5 +201,28 @@ func TestHandleHealth(t *testing.T) {
 	handleHealth(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+// holdSeconds keeps the run open, and a caller that goes away ends it early.
+func TestHandleInvoke_HoldSeconds(t *testing.T) {
+	t.Setenv("MODEL_ROUTE", "")
+	start := time.Now()
+	rec := httptest.NewRecorder()
+	handleInvoke(rec, httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{"input":"x","holdSeconds":1}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("HTTP %d", rec.Code)
+	}
+	if time.Since(start) < time.Second {
+		t.Errorf("returned after %v; holdSeconds=1 must hold the run for a second", time.Since(start))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	start = time.Now()
+	req := httptest.NewRequest(http.MethodPost, "/invoke", strings.NewReader(`{"holdSeconds":60}`)).WithContext(ctx)
+	handleInvoke(httptest.NewRecorder(), req)
+	if time.Since(start) > 2*time.Second {
+		t.Errorf("a caller that went away kept the run open for %v", time.Since(start))
 	}
 }

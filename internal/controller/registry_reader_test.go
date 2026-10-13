@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -35,23 +35,23 @@ import (
 // stubRegistryReader returns a fixed result — used to drive resolveAgentBindings'
 // not-found-vs-error contract (ADR 0043) deterministically.
 type stubRegistryReader struct {
-	reg *agentsv1alpha1.ToolRegistry
+	reg *agentsv1beta1.ToolRegistry
 	err error
 }
 
-func (s stubRegistryReader) GetRegistry(context.Context, string, string) (*agentsv1alpha1.ToolRegistry, error) {
+func (s stubRegistryReader) GetRegistry(context.Context, string, string) (*agentsv1beta1.ToolRegistry, error) {
 	return s.reg, s.err
 }
 
 func bindingResolveScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	require.NoError(t, agentsv1beta1.AddToScheme(scheme))
 	return scheme
 }
 
-func mkResolveBinding(name, agentRef, registryRef, toolName string) *agentsv1alpha1.MCPToolBinding {
-	b := &agentsv1alpha1.MCPToolBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
+func mkResolveBinding(name, agentRef, registryRef, toolName string) *agentsv1beta1.MCPToolBinding {
+	b := &agentsv1beta1.MCPToolBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"}}
 	b.Spec.AgentRef = agentRef
 	b.Spec.RegistryRef = registryRef
 	b.Spec.ToolName = toolName

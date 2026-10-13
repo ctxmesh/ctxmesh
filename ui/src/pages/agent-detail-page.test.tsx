@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { AgentDetailPage, lifecycleStage } from "@/pages/agent-detail-page";
+import { LOG_WAIT_GIVE_UP_MS, logWaitDelay } from "@/lib/log-tail";
 import { CapabilitiesProvider } from "@/lib/capabilities";
 import { NamespaceProvider } from "@/lib/namespace";
 import { ToastProvider } from "@/components/kit";
@@ -24,6 +25,8 @@ interface DetailOpts {
   detail?: unknown;
   detailStatus?: number;
   logFrames?: string[]; // SSE chunks the /logs stream yields.
+  // Successive /logs requests answer these in turn (the last repeats); overrides logFrames.
+  logSequence?: string[][];
   logStatus?: number; // pre-stream status for /logs (403 → forbidden).
   caps?: Record<string, Record<string, boolean>>;
   invoke?: { ok: boolean; status?: number; body: unknown };
@@ -66,7 +69,7 @@ const DEFAULT_DETAIL = {
     { type: "RouteReady", status: "True", reason: "RouteReady", message: "", lastTransitionTime: "" },
   ],
   bindings: [{ kind: "tool", name: "get-invoice-binding", detail: "get_invoice", ready: true }],
-  versions: ["billing-v1", "billing-v2"],
+  versions: ["billing-v2", "billing-v1"],
   managedOutsideUI: false,
   drift: false,
 };
@@ -112,9 +115,12 @@ function installFetch(opts: DetailOpts = {}) {
       if (url.includes("/logs")) {
         const status = opts.logStatus ?? 200;
         const ok = status < 400;
+        const seq = opts.logSequence;
+        const asked = calls.filter((c) => c.url.includes("/logs")).length - 1;
+        const frames = seq ? seq[Math.min(asked, seq.length - 1)] : opts.logFrames;
         return Promise.resolve({
           ok, status,
-          body: ok ? sseBody(opts.logFrames ?? ["event: end\ndata: done\n\n"]) : null,
+          body: ok ? sseBody(frames ?? ["event: end\ndata: done\n\n"]) : null,
           json: async () => ({ error: "forbidden: not allowed to read pods" }),
           text: async () => JSON.stringify({ error: "forbidden: not allowed to read pods" }),
         } as unknown as Response);
@@ -320,6 +326,186 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// "Watch it come alive": the BFF answers "waiting" and closes while the agent has no started
+// container, so the tab asks again on a backoff and follows the tail once a container runs.
+describe("AgentDetailPage — the log tail waits for the agent to start (m184.37c)", () => {
+  const WAITING = ["event: waiting\ndata: agent is starting; no running pod yet\n\n"];
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const logAsks = (calls: { url: string }[]) => calls.filter((c) => c.url.includes("/logs")).length;
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("asks again while the agent is starting, then tails it, with no error on the way", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const calls = installFetch({
+      logSequence: [WAITING, WAITING, ["event: log\ndata: agent listening on :8080\n\n"]],
+    });
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    expect(logAsks(calls)).toBe(1);
+    await advance(logWaitDelay(0));
+    await waitFor(() => expect(logAsks(calls)).toBe(2));
+    expect(screen.getByTestId("logs-waiting")).toBeInTheDocument();
+    await advance(logWaitDelay(1));
+    await waitFor(() =>
+      expect(screen.getAllByTestId("log-line").map((n) => n.textContent)).toEqual([
+        "agent listening on :8080",
+      ]),
+    );
+    expect(logAsks(calls)).toBe(3);
+    expect(screen.queryByTestId("logs-error")).toBeNull();
+    expect(screen.queryByTestId("logs-waiting")).toBeNull();
+  });
+
+  it("asks at once when the agent turns ready, not at the next backoff", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let up = false;
+    const calls = installFetch({
+      detail: { ...DEFAULT_DETAIL, ready: false, phase: "Pending" },
+      logSequence: [WAITING],
+    });
+    const base = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (up && url === "/api/agents/prod/billing" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => DEFAULT_DETAIL,
+            text: async () => JSON.stringify(DEFAULT_DETAIL),
+          } as Response);
+        }
+        return base(input, init);
+      }),
+    );
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    // Walk the backoff to its ceiling.
+    for (let i = 0; i < 4; i++) await advance(logWaitDelay(i));
+    const before = logAsks(calls);
+    expect(logWaitDelay(4)).toBeGreaterThan(5_000);
+
+    up = true;
+    await advance(5_000); // one settle poll reads the agent as ready
+    await waitFor(() => expect(logAsks(calls)).toBe(before + 1));
+  });
+
+  it("an error that is not the agent starting still shows", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetch({
+      logSequence: [WAITING, ["event: error\ndata: failed to open log stream\n\n"]],
+    });
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    await advance(logWaitDelay(0));
+    await waitFor(() =>
+      expect(screen.getByTestId("logs-error")).toHaveTextContent("failed to open log stream"),
+    );
+  });
+
+  // A tail can be replaced while a frame of the old one is still in flight: the agent turned
+  // ready and the tab re-asked. That late "waiting" frame must not schedule an ask of its own,
+  // or every replaced tail would start a second retry chain beside the live one.
+  it("a frame from a replaced tail schedules nothing", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let up = false;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const calls = installFetch({
+      detail: { ...DEFAULT_DETAIL, ready: false, phase: "Pending" },
+      logSequence: [WAITING, WAITING, ["event: log\ndata: agent listening on :8080\n\n"]],
+    });
+    const base = globalThis.fetch;
+    let logAsk = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (up && url === "/api/agents/prod/billing" && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => DEFAULT_DETAIL,
+            text: async () => JSON.stringify(DEFAULT_DETAIL),
+          } as Response);
+        }
+        const res = base(input, init);
+        if (!url.includes("/logs") || ++logAsk !== 2) return res;
+        // The second ask is still open when the agent turns ready; its frame lands later.
+        let sent = false;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          body: {
+            getReader: () => ({
+              read: async () => {
+                if (sent) return { value: undefined, done: true };
+                await held;
+                sent = true;
+                return { value: new TextEncoder().encode(WAITING[0]), done: false };
+              },
+              releaseLock() {},
+            }),
+          },
+        } as unknown as Response);
+      }),
+    );
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+    await advance(logWaitDelay(0));
+    await waitFor(() => expect(logAsks(calls)).toBe(2));
+
+    up = true;
+    await advance(5_000); // one settle poll reads the agent as ready, and the tab asks again
+    await waitFor(() =>
+      expect(screen.getAllByTestId("log-line").map((n) => n.textContent)).toEqual([
+        "agent listening on :8080",
+      ]),
+    );
+    expect(logAsks(calls)).toBe(3);
+
+    release();
+    await advance(30_000);
+    expect(logAsks(calls)).toBe(3);
+    expect(screen.getAllByTestId("log-line")).toHaveLength(1);
+    expect(screen.queryByTestId("logs-waiting")).toBeNull();
+  });
+
+  it("stops asking after the bound, says so without an alert, and asks again on request", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const calls = installFetch({ logSequence: [WAITING] });
+    renderAt();
+    fireEvent.click(await screen.findByRole("tab", { name: "Runs" }));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+
+    await advance(LOG_WAIT_GIVE_UP_MS + 30_000);
+    expect(await screen.findByTestId("logs-stalled")).toHaveTextContent(/No container has started/);
+    expect(screen.queryByRole("alert")).toBeNull();
+    const atBound = logAsks(calls);
+    // Bounded: the backoff reaches its 15s ceiling, so ten minutes is a few dozen asks.
+    expect(atBound).toBeLessThanOrEqual(LOG_WAIT_GIVE_UP_MS / 15_000 + 6);
+    await advance(LOG_WAIT_GIVE_UP_MS);
+    expect(logAsks(calls)).toBe(atBound);
+
+    fireEvent.click(screen.getByTestId("logs-ask-again"));
+    await waitFor(() => expect(logAsks(calls)).toBe(atBound + 1));
+    expect(await screen.findByTestId("logs-waiting")).toBeInTheDocument();
+  });
+});
+
 // ── m14.11 original tests ────────────────────────────────────────────────────
 describe("AgentDetailPage (landing page)", () => {
   it("renders the header, the record, the condition story, what it reaches and its versions", async () => {
@@ -353,6 +539,31 @@ describe("AgentDetailPage (landing page)", () => {
     // Versions have their own tab now.
     fireEvent.click(screen.getByRole("tab", { name: "Versions" }));
     expect(screen.getByTestId("versions-list")).toHaveTextContent("billing-v2");
+  });
+
+  it("tells an author whose platform variables were replaced, as governance and not as a passed check", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        conditions: [
+          ...(DEFAULT_DETAIL.conditions ?? []),
+          {
+            type: "PlatformEnvIgnored",
+            status: "True",
+            reason: "PlatformEnvSet",
+            message: "spec.env sets POD_NAMESPACE, MODEL_GATEWAY_URL, which the platform sets for this agent",
+            lastTransitionTime: "",
+          },
+        ],
+      },
+    });
+    renderAt();
+    const timeline = await screen.findByTestId("status-timeline");
+    const step = within(timeline).getByTestId("condition-PlatformEnvIgnored");
+    expect(step).toHaveTextContent("Its environment names variables only the platform sets");
+    expect(timeline).toHaveTextContent(/MODEL_GATEWAY_URL/);
+    expect(within(timeline).getByText(/Governance step:/)).toBeInTheDocument();
+    expect(timeline).not.toHaveTextContent(/platform env ignored check passed/i);
   });
 
   it("groups tool bindings by MCP server, collapsed by default, with a ready rollup", async () => {
@@ -2331,10 +2542,14 @@ describe("AgentDetailPage — live output RBAC gate (M100 UI99-logs)", () => {
 
 // ── V3: read-only version-snapshot diff ──────────────────────────────────────
 describe("AgentDetailPage — version diff (V3)", () => {
-  function installVersionDiffFetch(diff: {
-    diff: string;
-    identical: boolean;
-  }) {
+  function installVersionDiffFetch(
+    diff: {
+      diff: string;
+      identical: boolean;
+    },
+    versions: string[] = ["echo-v2", "echo-v1"],
+    diffURLs: string[] = [],
+  ) {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: string | URL, init?: RequestInit) => {
@@ -2345,8 +2560,10 @@ describe("AgentDetailPage — version diff (V3)", () => {
         if (url.startsWith("/api/namespaces")) return j({ namespaces: [] });
         if (url.startsWith("/api/capabilities"))
           return j({ namespace: "", allowed: {} });
-        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/versions\/diff/) && method === "GET")
+        if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/versions\/diff/) && method === "GET") {
+          diffURLs.push(url);
           return j({ resolveMode: "textual", fromName: "echo-v1", toName: "echo-v2", ...diff });
+        }
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/runs/)) return j({ runs: [] });
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/longtermmemory/)) return j({ enabled: false, perUser: false });
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/memory/)) return j({ items: [] });
@@ -2354,7 +2571,7 @@ describe("AgentDetailPage — version diff (V3)", () => {
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+\/online-score/)) return j({ windows: [] }, false, 501);
         if (url.match(/\/tracepolicy$/) && method === "GET") return j({ customDetectors: [] });
         if (url.match(/\/api\/agents\/[^/]+\/[^/]+$/))
-          return j({ ...DEFAULT_DETAIL, versions: ["echo-v2", "echo-v1"], latestVersion: "echo-v2" }, true, 200);
+          return j({ ...DEFAULT_DETAIL, versions, latestVersion: versions[0] }, true, 200);
         return j({}, false, 404);
       }),
     );
@@ -2376,6 +2593,22 @@ describe("AgentDetailPage — version diff (V3)", () => {
     const out = await screen.findByTestId("version-diff-output");
     expect(out).toHaveTextContent("-tag: v1");
     expect(out).toHaveTextContent("+tag: v2");
+  });
+
+  // The BFF lists versions newest first, so the default compare is the previous version → the latest.
+  it("compares the previous version with the latest by default", async () => {
+    const diffURLs: string[] = [];
+    installVersionDiffFetch({ diff: "-tag: v2\n+tag: v3", identical: false }, ["echo-v3", "echo-v2", "echo-v1"], diffURLs);
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    fireEvent.click(await screen.findByRole("tab", { name: "Versions" }));
+
+    fireEvent.click(screen.getByTestId("version-diff-compare"));
+    await screen.findByTestId("version-diff-output");
+    expect(diffURLs).toHaveLength(1);
+    const q = new URL(diffURLs[0], "http://console.test").searchParams;
+    expect(q.get("from")).toBe("echo-v2");
+    expect(q.get("to")).toBe("echo-v3");
   });
 
   it("shows a calm 'no changes' state for identical versions (V3)", async () => {
@@ -2621,5 +2854,104 @@ describe("AgentDetailPage — lifecycle stage (M151 §5.20)", () => {
     expect(lit).toHaveLength(1);
     expect(lit[0]).toHaveTextContent("Ship");
     expect(lit[0]).toHaveTextContent("serving billing-v2");
+  });
+});
+
+// ── m184.16: the Bindings panel on Overview ─────────────────────────────────
+describe("AgentDetailPage — the Bindings panel (m184.16)", () => {
+  it("lists what the agent references on Overview, missing ones included", async () => {
+    installFetch({
+      detail: {
+        ...DEFAULT_DETAIL,
+        modelRoute: "chat",
+        guardrailPolicyRef: "pii",
+        dependencies: [
+          { kind: "modelRoute", name: "chat", namespace: "prod", state: "notReady", reason: "NotYetServed", message: "not served yet" },
+          {
+            kind: "guardrailPolicy",
+            name: "pii",
+            namespace: "prod",
+            state: "missing",
+            reason: "GuardrailPolicyNotFound",
+            message: 'There is no GuardrailPolicy named "pii" in prod.',
+          },
+        ],
+      },
+    });
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    const panel = await screen.findByTestId("agent-bindings-panel");
+    expect(within(panel).getByTestId("dep-state-guardrailPolicy-pii")).toHaveTextContent("missing");
+    expect(within(panel).getByTestId("dep-state-modelRoute-chat")).toHaveTextContent("model loading");
+  });
+});
+
+// An agent that has not settled is re-read every four seconds. The re-reads used to stack when the
+// BFF was slow, and never stopped for an agent that never settled.
+describe("AgentDetailPage — watching an unsettled agent (m184.16)", () => {
+  const starting = { ...DEFAULT_DETAIL, ready: false, phase: "Pending" };
+  const advance = (ms: number) =>
+    act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  const isDetailRead = (url: string, init?: RequestInit) =>
+    url === "/api/agents/prod/billing" && (init?.method ?? "GET") === "GET";
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Wraps installFetch so the agent's detail reads can be counted and held.
+  function countDetailReads(hold: (n: number) => boolean) {
+    const base = globalThis.fetch;
+    let n = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (isDetailRead(url, init)) {
+          n += 1;
+          if (hold(n)) return new Promise<Response>(() => {});
+        }
+        return base(input, init);
+      }),
+    );
+    return () => n;
+  }
+
+  it("never starts a re-read while one is still out", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetch({ detail: starting });
+    const reads = countDetailReads((n) => n === 2);
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+    expect(reads()).toBe(1);
+
+    await advance(4_000);
+    expect(reads()).toBe(2);
+    // The second read never answers; three more ticks must not stack reads behind it.
+    await advance(12_000);
+    expect(reads()).toBe(2);
+  });
+
+  it("stops after ten minutes without settling, and Check again starts over", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    installFetch({ detail: starting });
+    const reads = countDetailReads(() => false);
+    renderAt();
+    await screen.findByTestId("agent-detail-page");
+
+    await advance(10 * 60_000 + 4_000);
+    await waitFor(() => expect(screen.getByTestId("agent-settle-stopped")).toBeInTheDocument());
+    const stoppedAt = reads();
+    expect(stoppedAt).toBe(151);
+    await advance(60_000);
+    expect(reads()).toBe(stoppedAt);
+
+    fireEvent.click(within(screen.getByTestId("agent-settle-stopped")).getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(reads()).toBe(stoppedAt + 1));
+    expect(screen.queryByTestId("agent-settle-stopped")).toBeNull();
+    await advance(4_000);
+    await waitFor(() => expect(reads()).toBe(stoppedAt + 2));
   });
 });

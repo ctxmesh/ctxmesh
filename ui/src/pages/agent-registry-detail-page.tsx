@@ -1,19 +1,20 @@
 import * as React from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Pencil, Plus, Trash2, Users, X } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Plus, X } from "lucide-react";
 
+import { ResourceDetailPage, type ResourceDetailKind } from "@/components/resource-detail";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, PanelHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
-  ConfirmDialog,
-  DetailDrawer,
-  EmptyState,
   ForbiddenInline,
   KeyValueList,
   PageHeader,
+  QuantityValue,
   ResourceLink,
   SectionHeader,
+  StatusBadge,
   Wizard,
   type KeyValueItem,
   type WizardStep,
@@ -27,285 +28,157 @@ import {
   type LabelSelectorDTO,
   type RegistryGuardsDTO,
 } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { RES_REGISTRIES } from "@/lib/nav";
 
-// AgentRegistryDetailPage — detail + edit wizard + typed-name delete.
+// AgentRegistryDetailPage — the registry reader + its edit form, on the shared
+// ResourceDetailPage (M151 §6.1 archetype A2). Route: /registries/:ns/:name
 //
 // KEY CONSTRAINTS:
 //   1. NO egress/allowlist field anywhere — the egress NetworkPolicy is
 //      controller-managed; the console cannot alter the egress posture.
 //   2. registryId is immutable after creation — shown READ-ONLY on edit.
+//
+// data-testid contract:
+//   registry-detail-page / -loading / -error, registry-not-found — the page states
+//   registry-detail-panel, registry-id-display — the configuration panel
+//   registry-members-panel, member-link-<name> — the resolved members
+//   edit-registry-button / delete-registry-button — the header actions
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: AgentRegistryDetail }
-  | { kind: "error"; message: string; status?: number; forbidden: boolean };
+function RegistryPanels({ detail }: { detail: AgentRegistryDetail }) {
+  const labels = Object.entries(detail.memberSelector.matchLabels ?? {});
+  const config: KeyValueItem[] = [
+    {
+      key: "Registry ID",
+      // Immutable, so it is always shown read-only.
+      value: (
+        <span className="block truncate" data-testid="registry-id-display" title={detail.registryId}>
+          {detail.registryId}
+        </span>
+      ),
+    },
+    {
+      key: "Roles",
+      value:
+        detail.roles.length > 0 ? (
+          <span className="flex flex-wrap justify-end gap-1">
+            {detail.roles.map((r) => (
+              <Badge key={r} variant="muted">
+                {r}
+              </Badge>
+            ))}
+          </span>
+        ) : undefined,
+      absent: "none declared",
+      mono: false,
+    },
+    ...(detail.guards
+      ? [
+          { key: "Max depth", value: detail.guards.maxDepth, absent: "not set" },
+          { key: "Hop budget", value: detail.guards.hopBudget, absent: "not set" },
+        ]
+      : []),
+  ];
+
+  return (
+    <>
+      {/* Configuration — registryId read-only; NO egress field. */}
+      <Card className="min-w-0" data-testid="registry-detail-panel">
+        <PanelHeader title="Configuration" />
+        <CardContent>
+          <KeyValueList items={config} />
+          {labels.length > 0 && (
+            <div className="mt-4">
+              <p className="mb-2 font-mono text-2xs uppercase tracking-wide text-faint">
+                Member selector
+              </p>
+              <div className="flex flex-wrap gap-1">
+                {labels.map(([k, v]) => (
+                  <Badge key={`${k}=${v}`} variant="muted" className="font-mono">
+                    {k}={v}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* The resolved members. */}
+      <Card className="min-w-0" data-testid="registry-members-panel">
+        <PanelHeader
+          title="Members"
+          meta={detail.status.members.length > 0 ? `${detail.status.members.length}` : undefined}
+        />
+        <CardContent>
+          {detail.status.members.length === 0 ? (
+            <p className="text-sm text-faint">No members resolved yet.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {detail.status.members.map((m) => (
+                <li key={m} className="flex items-center gap-2 text-sm">
+                  {/* A member is an AgentDeployment in this registry's namespace. */}
+                  <ResourceLink
+                    kind="agent"
+                    namespace={detail.namespace}
+                    name={m}
+                    className="font-mono text-xs"
+                    testId={`member-link-${m}`}
+                  />
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+
+const AGENT_REGISTRY: ResourceDetailKind<AgentRegistryDetail> = {
+  noun: "Agent registry",
+  short: "registry",
+  plural: "agent registries",
+  crdKind: "AgentRegistry",
+  list: { to: "/registries", label: "Registries", back: "Back to registries" },
+  resource: RES_REGISTRIES,
+  testids: {
+    page: "registry-detail-page",
+    loading: "registry-detail-loading",
+    error: "registry-detail-error",
+    notFound: "registry-not-found",
+    edit: "edit-registry-button",
+    delete: "delete-registry-button",
+  },
+  read: (ns, name, signal) => api.agentRegistryDetail(ns, name, signal),
+  status: (d) => (
+    <StatusBadge ready={d.status.ready} phase={d.status.phase || (d.status.ready ? "Ready" : "Pending")} />
+  ),
+  meta: (d) =>
+    `${d.namespace} · ${d.status.members.length} member${d.status.members.length === 1 ? "" : "s"}`,
+  Main: RegistryPanels,
+  facts: (d) => [
+    { key: "Registry", value: d.name, title: d.name },
+    { key: "Workspace", value: d.namespace, absent: "not recorded" },
+    { key: "Members", value: <QuantityValue value={d.status.members.length} />, mono: false },
+  ],
+  edit: {
+    subtitle: (d) => `Registry ID: ${d.registryId} (read-only — immutable)`,
+    Wizard: RegistryEditWizard,
+  },
+  remove: {
+    call: (ns, name) => api.removeAgentRegistry(ns, name),
+    description: (d) =>
+      `This will permanently delete the AgentRegistry "${d.name}". Member agents are not deleted but lose their registry membership.`,
+    confirmLabel: "Delete registry",
+    toastTitle: "Registry deleted",
+  },
+};
 
 export function AgentRegistryDetailPage() {
-  const { ns = "", name = "" } = useParams();
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [state, setState] = React.useState<Load>({ kind: "loading" });
-
-  const editOpen = searchParams.get("edit") === "1";
-  const deleteOpen = searchParams.get("delete") === "1";
-
-  function openEdit() {
-    setSearchParams((p) => { p.set("edit", "1"); return p; });
-  }
-  function closeEdit() {
-    setSearchParams((p) => { p.delete("edit"); return p; });
-  }
-  function openDelete() {
-    setSearchParams((p) => { p.set("delete", "1"); return p; });
-  }
-  function closeDelete() {
-    setSearchParams((p) => { p.delete("delete"); return p; });
-  }
-
-  const load = React.useCallback(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    api
-      .agentRegistryDetail(ns, name, controller.signal)
-      .then((detail) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", detail });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const apiErr = err instanceof ApiError ? err : null;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load the registry",
-          status: apiErr?.status,
-          forbidden: apiErr?.isForbidden ?? false,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
-
-  React.useEffect(() => load(), [load]);
-
-  if (state.kind === "loading") {
-    return (
-      <div className="mx-auto max-w-5xl">
-        <p className="text-sm text-muted-foreground" data-testid="registry-detail-loading">
-          Loading {name}…
-        </p>
-      </div>
-    );
-  }
-
-  if (state.kind === "error") {
-    if (state.forbidden) {
-      return (
-        <div className="mx-auto max-w-5xl">
-          <ForbiddenInline
-            title={`Not allowed to view ${name}`}
-            description="Your account can't read this agent registry."
-            detail={state.message}
-          />
-        </div>
-      );
-    }
-    if (state.status === 404) {
-      return (
-        <div className="mx-auto max-w-5xl" data-testid="registry-not-found">
-          <EmptyState
-            icon={Users}
-            title="Agent registry not found"
-            description={`No AgentRegistry "${name}" in ${ns || "this namespace"}.`}
-            action={{ label: "Back to registries", onClick: () => navigate("/registries") }}
-          />
-        </div>
-      );
-    }
-    return (
-      <div className="mx-auto max-w-5xl">
-        <div
-          className="rounded-lg border bg-card p-6 text-sm text-destructive shadow-card"
-          role="alert"
-          data-testid="registry-detail-error"
-        >
-          Couldn't load the registry: {state.message}
-        </div>
-      </div>
-    );
-  }
-
-  const detail = state.detail;
-  return (
-    <RegistryDetailContent
-      detail={detail}
-      editOpen={editOpen}
-      deleteOpen={deleteOpen}
-      onOpenEdit={openEdit}
-      onCloseEdit={closeEdit}
-      onOpenDelete={openDelete}
-      onCloseDelete={closeDelete}
-      onDeleted={() => navigate("/registries")}
-      onSaved={() => { closeEdit(); load(); }}
-    />
-  );
+  return <ResourceDetailPage kind={AGENT_REGISTRY} />;
 }
 
-function RegistryDetailContent({
-  detail,
-  editOpen,
-  deleteOpen,
-  onOpenEdit,
-  onCloseEdit,
-  onOpenDelete,
-  onCloseDelete,
-  onDeleted,
-  onSaved,
-}: {
-  detail: AgentRegistryDetail;
-  editOpen: boolean;
-  deleteOpen: boolean;
-  onOpenEdit: () => void;
-  onCloseEdit: () => void;
-  onOpenDelete: () => void;
-  onCloseDelete: () => void;
-  onDeleted: () => void;
-  onSaved: () => void;
-}) {
-  const { can } = useCapabilities();
-  const canEdit = can(RES_REGISTRIES, "update");
-  const canDelete = can(RES_REGISTRIES, "delete");
-
-  return (
-    <div className="mx-auto max-w-5xl space-y-6" data-testid="registry-detail-page">
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <h2 className="text-2xl font-semibold tracking-tight">{detail.name}</h2>
-          <Badge variant={detail.status.ready ? "success" : "warning"}>
-            {detail.status.phase || (detail.status.ready ? "Ready" : "Pending")}
-          </Badge>
-          <span className="text-sm text-muted-foreground">{detail.namespace}</span>
-          <div className="ml-auto flex items-center gap-2">
-            {canEdit && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onOpenEdit}
-                data-testid="edit-registry-button"
-              >
-                <Pencil className="h-4 w-4" />
-                Edit
-              </Button>
-            )}
-            {canDelete && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={onOpenDelete}
-                className="text-destructive hover:text-destructive"
-                data-testid="delete-registry-button"
-              >
-                <Trash2 className="h-4 w-4" />
-                Delete
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Spec panel — registryId shown read-only; NO egress field */}
-      <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="registry-detail-panel">
-        <p className="mb-3 text-sm font-medium">Configuration</p>
-        <dl className="grid grid-cols-[10rem_1fr] gap-y-2 text-sm">
-          <dt className="text-muted-foreground">Registry ID</dt>
-          {/* registryId is immutable — always shown read-only */}
-          <dd className="font-mono text-xs" data-testid="registry-id-display">{detail.registryId}</dd>
-          <dt className="text-muted-foreground">Roles</dt>
-          <dd>
-            {detail.roles.length > 0
-              ? detail.roles.map((r) => (
-                  <Badge key={r} variant="secondary" className="mr-1 text-[10px]">
-                    {r}
-                  </Badge>
-                ))
-              : <span className="text-muted-foreground">—</span>}
-          </dd>
-          {detail.guards && (
-            <>
-              <dt className="text-muted-foreground">Max depth</dt>
-              <dd>{detail.guards.maxDepth ?? "—"}</dd>
-              <dt className="text-muted-foreground">Hop budget</dt>
-              <dd>{detail.guards.hopBudget ?? "—"}</dd>
-            </>
-          )}
-        </dl>
-
-        {Object.keys(detail.memberSelector.matchLabels ?? {}).length > 0 && (
-          <div className="mt-4">
-            <p className="mb-2 text-xs font-medium text-muted-foreground">Member selector</p>
-            <div className="flex flex-wrap gap-1">
-              {Object.entries(detail.memberSelector.matchLabels ?? {}).map(([k, v]) => (
-                <Badge key={`${k}=${v}`} variant="outline" className="font-mono text-[10px]">
-                  {k}={v}
-                </Badge>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Status panel — resolved members */}
-      <div className="rounded-lg border bg-card p-5 shadow-card" data-testid="registry-members-panel">
-        <p className="mb-3 text-sm font-medium">Members</p>
-        {detail.status.members.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No members resolved yet.</p>
-        ) : (
-          <ul className="space-y-1.5">
-            {detail.status.members.map((m) => (
-              <li key={m} className="flex items-center gap-2 text-sm">
-                {/* U4/Theme 1: a member is an AgentDeployment in this registry's
-                    namespace — link to its detail, never dead-end text. */}
-                <ResourceLink
-                  kind="agent"
-                  namespace={detail.namespace}
-                  name={m}
-                  className="font-mono text-xs"
-                  testId={`member-link-${m}`}
-                />
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {/* Edit wizard */}
-      <DetailDrawer
-        open={editOpen}
-        onClose={onCloseEdit}
-        title={`Edit ${detail.name}`}
-        subtitle={`Registry ID: ${detail.registryId} (read-only — immutable)`}
-        size="lg"
-      >
-        {editOpen && (
-          <RegistryEditWizard
-            detail={detail}
-            onClose={onCloseEdit}
-            onSaved={onSaved}
-          />
-        )}
-      </DetailDrawer>
-
-      {/* Delete dialog */}
-      {deleteOpen && (
-        <RegistryDeleteDialog
-          detail={detail}
-          onClose={onCloseDelete}
-          onDeleted={onDeleted}
-        />
-      )}
-    </div>
-  );
-}
 
 // ── Edit Wizard ───────────────────────────────────────────────────────────────
 // registryId shown as read-only (immutable). NO egress/allowlist field.
@@ -402,7 +275,7 @@ function RegistryEditWizard({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
 
   const [matchLabels, setMatchLabels] = React.useState<Record<string, string>>(
     detail.memberSelector.matchLabels ?? {},
@@ -585,53 +458,6 @@ function RegistryEditWizard({
       onFinish={() => { void doSave(); }}
       finishLabel="Save changes"
       onCancel={onClose}
-    />
-  );
-}
-
-// ── Delete Dialog ─────────────────────────────────────────────────────────────
-
-function RegistryDeleteDialog({
-  detail,
-  onClose,
-  onDeleted,
-}: {
-  detail: AgentRegistryDetail;
-  onClose: () => void;
-  onDeleted: () => void;
-}) {
-  const { toast } = useToast();
-  const { reprobe } = useCapabilities();
-  const [deleting, setDeleting] = React.useState(false);
-
-  async function onConfirm() {
-    setDeleting(true);
-    try {
-      await api.removeAgentRegistry(detail.namespace, detail.name);
-      toast({ variant: "success", title: "Registry deleted", description: `${detail.name} removed.` });
-      onDeleted();
-    } catch (err) {
-      if (err instanceof ApiError && err.isForbidden) reprobe();
-      toast({
-        variant: "error",
-        title: "Delete failed",
-        description: err instanceof Error ? err.message : "delete failed",
-      });
-      setDeleting(false);
-      onClose();
-    }
-  }
-
-  return (
-    <ConfirmDialog
-      open={true}
-      onCancel={onClose}
-      onConfirm={onConfirm}
-      title={`Delete ${detail.name}?`}
-      description={`This will permanently delete the AgentRegistry "${detail.name}". Member agents are not deleted but lose their registry membership.`}
-      confirmText={detail.name}
-      confirmLabel="Delete registry"
-      busy={deleting}
     />
   );
 }

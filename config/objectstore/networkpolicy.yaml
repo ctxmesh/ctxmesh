@@ -1,4 +1,4 @@
-# Object-store (MinIO) ingress restriction — M149 re-audit finding A2.
+# Object-store ingress restriction — M149 re-audit finding A2.
 #
 # WHY THIS WAS MISSED, AND WHY IT MATTERS MORE THAN IT LOOKS. m149.2 gave the bundled
 # Postgres and NATS a "retained second layer" and stated the threat as *"a pod running
@@ -6,7 +6,7 @@
 # That threat was closed for the CHUNKS — which live in Postgres — and left wide open for
 # the SOURCE DOCUMENTS, which live here. The re-audit listed every tenant's knowledge
 # documents from a foreign namespace using `ctxmesh-dev` / `ctxmesh-dev-secret` exactly as
-# committed to git, and `mc admin info` succeeded: that is MinIO ROOT.
+# committed to git, and `mc admin info` succeeded: that is object-store ROOT.
 #
 # The blast radius is larger than a per-tenant store would be. `knowledgeBaseBucket` is a
 # SINGLE bucket ("ctxmesh-knowledge") partitioned by key prefix only, and the controller

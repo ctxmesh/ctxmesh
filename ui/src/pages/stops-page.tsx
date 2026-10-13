@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
 import {
@@ -36,6 +36,7 @@ import {
   type StopLevel,
   type StopScopeRequest,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
 
 // StopsPage — the Stops surface (M151 §6.2 gap 2, ADR 0126 "The scoped kill switch").
@@ -262,9 +263,6 @@ function killEvents(events: AuditEvent[], action: string): AuditEvent[] {
 }
 
 export function StopsPage() {
-  const [stopsState, setStopsState] = useState<StopsState>({ kind: "loading" });
-  const [trailState, setTrailState] = useState<TrailState>({ kind: "loading" });
-  const [refreshing, setRefreshing] = useState(false);
   /** Set only when the backend says so (501 on a lift) — never guessed from an empty list. */
   const [noKillStore, setNoKillStore] = useState(false);
   const [reviewing, setReviewing] = useState<StopRow | null>(null);
@@ -272,67 +270,44 @@ export function StopsPage() {
   const [liftBusy, setLiftBusy] = useState(false);
   const [liftError, setLiftError] = useState<string | null>(null);
   const [liftNoop, setLiftNoop] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback((silent = false) => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    if (!silent) {
-      setStopsState({ kind: "loading" });
-      setTrailState({ kind: "loading" });
+  const fetchStops = useCallback((signal: AbortSignal) => api.listStops(signal), []);
+  const stops = useLoad(fetchStops);
+  const stopsState = useMemo((): StopsState => {
+    if (stops.state.kind === "ready") return { kind: "ready", stops: stops.state.data };
+    if (stops.state.kind === "loading") return stops.state;
+    return { kind: "error", message: stops.state.message, forbidden: stops.state.forbidden };
+  }, [stops.state]);
+
+  // The trail is a SEPARATE backend with its own permissions, so it is fetched and degraded
+  // independently: a caller who cannot read the audit log still gets the live stop list.
+  const fetchTrail = useCallback(
+    (signal: AbortSignal) => api.listAudit({ kind: "KillScope", limit: 100 }, signal),
+    [],
+  );
+  const trail = useLoad(fetchTrail);
+  const trailState = useMemo((): TrailState => {
+    const t = trail.state;
+    if (t.kind === "loading") return t;
+    if (t.kind === "ready") {
+      return t.data === null ? { kind: "unavailable" } : { kind: "ready", events: t.data.items ?? [] };
     }
+    if (t.forbidden) return { kind: "forbidden" };
+    return { kind: "error", message: t.message };
+  }, [trail.state]);
 
-    api
-      .listStops(controller.signal)
-      .then((stops) => {
-        if (controller.signal.aborted) return;
-        setStopsState({ kind: "ready", stops });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setStopsState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      })
-      .finally(() => {
-        if (silent) setRefreshing(false);
-      });
-
-    // The trail is a SEPARATE backend with its own permissions, so it is fetched and degraded
-    // independently: a caller who cannot read the audit log still gets the live stop list.
-    api
-      .listAudit({ kind: "KillScope", limit: 100 }, controller.signal)
-      .then((resp) => {
-        if (controller.signal.aborted) return;
-        if (resp === null) {
-          setTrailState({ kind: "unavailable" });
-          return;
-        }
-        setTrailState({ kind: "ready", events: resp.items ?? [] });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        if (err instanceof ApiError && err.isForbidden) {
-          setTrailState({ kind: "forbidden" });
-          return;
-        }
-        setTrailState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-        });
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const { reload: reloadStops } = stops;
+  const { reload: reloadTrail } = trail;
+  const load = useCallback(
+    (silent = false) => {
+      reloadStops({ silent });
+      reloadTrail({ silent });
+    },
+    [reloadStops, reloadTrail],
+  );
+  const refreshing = stops.refreshing || trail.refreshing;
 
   function refresh() {
-    setRefreshing(true);
     load(true);
   }
 

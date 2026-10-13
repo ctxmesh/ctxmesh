@@ -68,7 +68,7 @@ type Query struct {
 }
 
 // Embedder embeds text via the offline embedder behind the model gateway (ADR 0116). The interface matches
-// credplane.Embedder exactly, so a caller passes its existing embedder straight in.
+// embedding.Embedder exactly, so a caller passes its existing embedder straight in.
 type Embedder interface {
 	Embed(ctx context.Context, model, text string) (vec []float32, dim int, err error)
 	EmbedBatch(ctx context.Context, model string, texts []string) (vecs [][]float32, dim int, err error)
@@ -81,7 +81,7 @@ type RerankHit struct {
 }
 
 // Reranker re-scores (query, docs) with the cross-encoder (ADR 0117). Optional — nil ⇒ cosine only. A
-// function type rather than an interface so the caller adapts credplane's Reranker without this package
+// function type rather than an interface so the caller adapts retrieval.Reranker without this package
 // taking a dependency on it.
 type Reranker func(ctx context.Context, query string, docs []string) ([]RerankHit, error)
 

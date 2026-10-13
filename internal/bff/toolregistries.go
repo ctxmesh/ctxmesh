@@ -25,7 +25,7 @@ import (
 
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -36,7 +36,7 @@ import (
 // carried verbatim (RawExtension.Raw), the annotations (OAuth-client config) and
 // labels (scope/owner) as-is. Used by both the best-effort mirror and the
 // retired write paths (register/approve/org/oauth) that write the store directly.
-func crdToolRegistryToStore(tr *agentsv1alpha1.ToolRegistry) toolregistry.ToolRegistry {
+func crdToolRegistryToStore(tr *agentsv1beta1.ToolRegistry) toolregistry.ToolRegistry {
 	tools := make([]toolregistry.ToolEntry, len(tr.Spec.Tools))
 	for i := range tr.Spec.Tools {
 		e := tr.Spec.Tools[i]
@@ -290,13 +290,11 @@ func (s *Server) handleListToolRegistries(w http.ResponseWriter, r *http.Request
 	// ToolRegistry is Postgres-authoritative (ADR 0044). The API server is not in
 	// the path, so authorize the list with a caller-scoped SSAR (exact RBAC parity
 	// with the retired CRD read) and push namespace/search/paging down to the store.
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceToolRegistries, namespace, ""); err != nil {
-		s.writeAuthzError(w, err, "list tool registries")
+	opts := controlplane.ListOptions{Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor}
+	if !s.authorizeStoreList(w, r, caller, resourceToolRegistries, &opts, "list tool registries") {
 		return
 	}
-	page, err := s.toolRegistryStore.List(r.Context(), controlplane.ListOptions{
-		Namespace: namespace, Search: q, PageSize: limit, PageToken: cursor,
-	})
+	page, err := s.toolRegistryStore.List(r.Context(), opts)
 	if err != nil {
 		s.log.Error(err, "list ToolRegistries from store failed")
 		writeError(w, http.StatusInternalServerError, "failed to list tool registries")

@@ -62,6 +62,7 @@ import {
 } from "@/components/kit";
 import { FormField } from "@/components/config/form-field";
 import { ChatPanel } from "@/components/agent-chat";
+import { AgentBindingsPanel } from "@/components/agent-bindings-panel";
 import { RunInspector } from "@/components/dashboard/run-inspector";
 import { UseAgentPanel } from "@/components/dashboard/use-agent-panel";
 import {
@@ -84,14 +85,16 @@ import {
   type OnlineScoreWindow,
   type PublishTemplateResponse,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // Fork provenance labels (ADR 0068 §6) — forwarded from the AgentDeployment CR.
 // Used for lineage display (U12, m76.3) and banner repair links (U5).
 const LABEL_FORK_ORIGIN_NS = "agents.ctxmesh.ai/fork-origin-namespace";
 const LABEL_FORK_ORIGIN_NAME = "agents.ctxmesh.ai/fork-origin-name";
 const LABEL_FORK_ORIGIN_VERSION = "agents.ctxmesh.ai/fork-origin-version";
-import { useCapabilities } from "@/lib/capabilities";
+import { useCapabilitiesIn } from "@/lib/capabilities";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
+import { LOG_WAIT_GIVE_UP_MS, logWaitDelay } from "@/lib/log-tail";
 import { navRoute, RES_AGENTS, RES_LOGS, RES_SCALING } from "@/lib/nav";
 
 // AgentDetailPage — the landing page for ONE agent, and the second-most-read
@@ -173,6 +176,10 @@ function resolveTab(raw: string | null): Tab {
  *  feels live, slow enough that a page left open costs nothing worth counting. */
 const AGENT_SETTLE_POLL_MS = 4_000;
 
+/** How many re-checks (ten minutes' worth) before the page stops and offers "Check again". An
+ *  agent that has not settled by then is waiting on something a re-read will not change. */
+const AGENT_SETTLE_MAX_CHECKS = (10 * 60_000) / AGENT_SETTLE_POLL_MS;
+
 type Load =
   | { kind: "loading" }
   | { kind: "ready"; detail: AgentDetailResponse }
@@ -191,7 +198,7 @@ export function AgentDetailPage() {
   // `?tab=Logs`: a denied persona must land on Overview rather than on a Runs
   // tab whose log panel silently isn't there. The flag clears the moment the
   // reader picks a tab themselves, so it can never strand them.
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const { toast } = useToast();
   const canLogs = can(RES_LOGS, "get");
   const [viaLogsLink, setViaLogsLink] = React.useState(
@@ -236,12 +243,16 @@ export function AgentDetailPage() {
     setSearchParams((p) => { p.delete("delete"); return p; });
   }
 
+  // Reads still out. A settle tick that finds one is skipped, so a slow BFF never has a second read
+  // stacked on the first.
+  const readsInFlight = React.useRef(0);
   // `silent` re-fetches WITHOUT dropping back to the skeleton — the difference between
   // a refresh and a reload. The settle poll below uses it, because flashing the whole
   // page every few seconds while an agent starts is worse than the staleness it fixes.
   const load = React.useCallback((silent = false) => {
     const controller = new AbortController();
     if (!silent) setState({ kind: "loading" });
+    readsInFlight.current += 1;
     api
       .agentDetail(ns, name, controller.signal)
       .then((detail) => {
@@ -264,6 +275,9 @@ export function AgentDetailPage() {
           status: apiErr?.status,
           forbidden: apiErr?.isForbidden ?? false,
         });
+      })
+      .finally(() => {
+        readsInFlight.current -= 1;
       });
     return () => controller.abort();
   }, [ns, name]);
@@ -280,16 +294,34 @@ export function AgentDetailPage() {
   // one surface joining them was a snapshot. So poll while the agent is UNSETTLED and
   // stop the moment it settles — no timer on a steady-state page, no websocket to keep
   // alive, and nothing to clean up but an interval.
-  const settled = state.kind === "ready" && state.detail.ready;
+  // Settled also waits for the agent's model route: a new route takes the gateway a minute to serve,
+  // and the chat panel holds Send until it does, so the page must notice when it is served.
+  const settled =
+    state.kind === "ready" &&
+    state.detail.ready &&
+    !(state.detail.conditions ?? []).some(
+      (c) => c.type === "ModelRouteReady" && c.status === "False" && c.reason === "NotYetServed",
+    );
+  // The watch stops after AGENT_SETTLE_MAX_CHECKS and says so; "Check again" starts a new one.
+  const [settleWatch, setSettleWatch] = React.useState(0);
+  const [settleStopped, setSettleStopped] = React.useState(false);
   React.useEffect(() => {
     if (state.kind !== "ready" || settled) return;
+    setSettleStopped(false);
+    let checks = 0;
     const id = window.setInterval(() => {
+      checks += 1;
+      if (checks > AGENT_SETTLE_MAX_CHECKS) {
+        window.clearInterval(id);
+        setSettleStopped(true);
+        return;
+      }
       // Skip while the tab is hidden: a backgrounded page polling a cluster is pure
       // cost, and it re-syncs on the next visible tick anyway.
-      if (document.visibilityState === "visible") load(true);
+      if (document.visibilityState === "visible" && readsInFlight.current === 0) load(true);
     }, AGENT_SETTLE_POLL_MS);
     return () => window.clearInterval(id);
-  }, [state.kind, settled, load]);
+  }, [state.kind, settled, load, settleWatch]);
 
   // ── Loading (§7 A2: header band + a panel skeleton + rail kv bars) ─────────
   if (state.kind === "loading") {
@@ -423,6 +455,25 @@ export function AgentDetailPage() {
 
       <AgentLifecycle detail={detail} />
 
+      {settleStopped && !settled && (
+        <div className="space-y-3" data-testid="agent-settle-stopped">
+          <QuietNote title="This page has stopped checking on the agent.">
+            It has not settled in ten minutes, so the page no longer re-reads it on its own. What it
+            shows is the last read.
+          </QuietNote>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setSettleWatch((n) => n + 1);
+              load(true);
+            }}
+          >
+            Check again
+          </Button>
+        </div>
+      )}
+
       {/* §4.7 hub grid: the tab's panels on the left, the register that governs
           the agent on the right. The rail persists across tabs (§6.1 A2) and
           stacks under the main column below `lg`. */}
@@ -550,7 +601,7 @@ function AgentBand({
   publishedState: { version: string; visibility: string } | null;
   onUnpublish: () => void;
 }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(detail.namespace);
   const canEdit = can(RES_AGENTS, "update");
   const canDelete = can(RES_AGENTS, "delete");
   // Publish-as-template is gated on agent update rights (the publisher must own
@@ -1280,7 +1331,7 @@ function EditWizard({
   onSaved: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const isManaged = !detail.managedOutsideUI;
   const hasDrift = detail.drift ?? false;
 
@@ -1577,31 +1628,24 @@ function DeleteDialog({
   onDeleted: () => void;
 }) {
   const { toast } = useToast();
-  const { reprobe } = useCapabilities();
-  const [refs, setRefs] = React.useState<RefsLoad>({ kind: "loading" });
+  const { reprobe } = useCapabilitiesIn(detail.namespace);
   const [deleting, setDeleting] = React.useState(false);
   // U4: when this agent is published, offer to ALSO unpublish its template — pre-checked (the common
   // intent), but visible + uncheckable to preserve ADR 0068's publish-then-delete-the-dev-agent flow.
   const isPublished = detail.published != null;
   const [alsoUnpublish, setAlsoUnpublish] = React.useState(true);
 
-  React.useEffect(() => {
-    const controller = new AbortController();
-    api
-      .agentReferences(detail.namespace, detail.name, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setRefs({ kind: "ready", references: res.references });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setRefs({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load delete impact",
-        });
-      });
-    return () => controller.abort();
-  }, [detail.namespace, detail.name]);
+  const fetchRefs = React.useCallback(
+    (signal: AbortSignal) =>
+      api.agentReferences(detail.namespace, detail.name, signal).then((res) => res.references),
+    [detail.namespace, detail.name],
+  );
+  const { state: refsRead } = useLoad(fetchRefs);
+  const refs = React.useMemo((): RefsLoad => {
+    if (refsRead.kind === "ready") return { kind: "ready", references: refsRead.data };
+    if (refsRead.kind === "loading") return refsRead;
+    return { kind: "error", message: refsRead.message };
+  }, [refsRead]);
 
   async function onConfirm() {
     setDeleting(true);
@@ -1719,8 +1763,9 @@ function DeleteDialog({
 
 // ── Overview: what it reaches, how it came up, and a way to try it ──────────
 // The reach panel leads because it is the question the page exists to answer.
-// The condition story follows (why it is or is not serving), then the two ways
-// to actually exercise it — from here, or from code.
+// The Bindings panel follows with everything else it depends on, then the
+// condition story (why it is or is not serving), then the two ways to actually
+// exercise it — from here, or from code.
 function OverviewTab({
   detail,
   onTraced,
@@ -1734,6 +1779,8 @@ function OverviewTab({
     <>
       <ReachPanel detail={detail} onSeeAll={onGoEquipment} />
 
+      <AgentBindingsPanel detail={detail} />
+
       <ConditionsPanel
         conditions={detail.conditions}
         ready={detail.ready}
@@ -1746,6 +1793,7 @@ function OverviewTab({
         ready={detail.ready}
         memoryBound={detail.bindings.some((b) => b.kind === "memory")}
         onTraced={onTraced}
+        modelRoute={(detail.conditions ?? []).find((c) => c.type === "ModelRouteReady")}
       />
 
       <UseAgentPanel
@@ -2127,6 +2175,13 @@ function conditionSentence(c: AgentCondition): string {
       ? "A regression was detected against the baseline"
       : "No regression has been detected";
   }
+  // PlatformEnvIgnored inverts too: True means spec.env named variables the
+  // platform sets, and the controller used its own values instead.
+  if (c.type === "PlatformEnvIgnored") {
+    return c.status === "True"
+      ? "Its environment names variables only the platform sets"
+      : "Its environment leaves the platform's variables to the platform";
+  }
   const pair = CONDITION_SENTENCE[c.type];
   if (pair) return c.status === "True" ? pair[0] : pair[1];
   return c.status === "True"
@@ -2136,6 +2191,8 @@ function conditionSentence(c: AgentCondition): string {
 
 function conditionTone(c: AgentCondition): TimelineTone {
   if (c.type === "RegressionDetected") return c.status === "True" ? "failed" : "step";
+  // The platform overrode the author: a governance step, not a failure (it serves on).
+  if (c.type === "PlatformEnvIgnored") return c.status === "True" ? "governance" : "step";
   if (c.status === "True") return "done";
   // "Unknown" is the controller saying it has not decided. That is not a
   // failure and it is not a hold — it is a plain moment in the story.
@@ -2351,20 +2408,41 @@ function VersionDiffPanel({
 
 // ── Logs tab (live SSE tail, bearer-attached fetch-stream) ───────────────────
 type LogLine = { seq: number; text: string };
-type LogPhase = "connecting" | "waiting" | "streaming" | "ended" | "error" | "forbidden";
+// "stalled" is a wait that outlasted LOG_WAIT_GIVE_UP_MS: the tab stops asking and says so.
+type LogPhase =
+  | "connecting"
+  | "waiting"
+  | "stalled"
+  | "streaming"
+  | "ended"
+  | "error"
+  | "forbidden";
 
 function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean }) {
   const [lines, setLines] = React.useState<LogLine[]>([]);
   const [phase, setPhase] = React.useState<LogPhase>("connecting");
   const [errorMsg, setErrorMsg] = React.useState<string>("");
   const seqRef = React.useRef(0);
+  // Each change re-opens the tail; it is bumped by a wait's backoff, by the agent turning
+  // ready, and by Try again.
+  const [attempt, setAttempt] = React.useState(0);
+  // The wait in progress, if any: when it began and how many asks it has made.
+  const waitRef = React.useRef<{ since: number; retries: number } | null>(null);
 
+  // A different agent starts a fresh tail.
   React.useEffect(() => {
     setLines([]);
     setPhase("connecting");
     setErrorMsg("");
     seqRef.current = 0;
+    waitRef.current = null;
+  }, [ns, name]);
 
+  React.useEffect(() => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    // Aborting does not stop frames already read from being parsed, so after cleanup this tail's
+    // callbacks must do nothing: a late "waiting" would start a retry that nothing clears.
+    let cancelled = false;
     // The SSE tail over fetch-stream: the Bearer rides the request (EventSource
     // can't set headers). We follow the stream and render every frame honestly.
     const cancel = openLogStream(
@@ -2372,11 +2450,21 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
       name,
       {
         onEvent: (type: LogEventType, data: string) => {
+          if (cancelled) return;
           if (type === "log") {
+            waitRef.current = null;
             setPhase("streaming");
             setLines((prev) => [...prev, { seq: seqRef.current++, text: data }]);
           } else if (type === "waiting") {
+            // No started container yet, and the BFF has closed: ask again after a backoff.
+            const wait = (waitRef.current ??= { since: Date.now(), retries: 0 });
+            if (Date.now() - wait.since >= LOG_WAIT_GIVE_UP_MS) {
+              setPhase("stalled");
+              return;
+            }
             setPhase((p) => (p === "streaming" ? p : "waiting"));
+            if (retry !== undefined) clearTimeout(retry);
+            retry = setTimeout(() => setAttempt((n) => n + 1), logWaitDelay(wait.retries++));
           } else if (type === "error") {
             // An IN-STREAM error frame (mid-stream break / pods-log denied after
             // the stream opened) — surfaced honestly, distinct from a pre-stream
@@ -2390,10 +2478,12 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
         // A PRE-STREAM 403 (RBAC denied pods list) — an HTTP status before any
         // frame. Rendered as a forbidden state, NOT an in-stream error.
         onForbidden: (message: string) => {
+          if (cancelled) return;
           setPhase("forbidden");
           setErrorMsg(message);
         },
         onError: (message: string) => {
+          if (cancelled) return;
           setPhase("error");
           setErrorMsg(message);
         },
@@ -2401,9 +2491,30 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
       { follow: true, tailLines: 200 },
     );
 
-    // Cancel the stream on unmount / tab-switch — no leak.
-    return cancel;
-  }, [ns, name]);
+    // Cancel the stream and any pending ask on unmount / tab-switch — no leak.
+    return () => {
+      cancelled = true;
+      cancel();
+      if (retry !== undefined) clearTimeout(retry);
+    };
+  }, [ns, name, attempt]);
+
+  // The agent turning ready is the moment a pod appears: ask now, not at the next backoff.
+  const wasReady = React.useRef(ready);
+  React.useEffect(() => {
+    const becameReady = ready && !wasReady.current;
+    wasReady.current = ready;
+    if (becameReady && waitRef.current) {
+      waitRef.current = { since: Date.now(), retries: 0 };
+      setAttempt((n) => n + 1);
+    }
+  }, [ready]);
+
+  const askAgain = () => {
+    waitRef.current = { since: Date.now(), retries: 0 };
+    setPhase("waiting");
+    setAttempt((n) => n + 1);
+  };
 
   if (phase === "forbidden") {
     return (
@@ -2435,13 +2546,30 @@ function LogsTab({ ns, name, ready }: { ns: string; name: string; ready: boolean
           )}
           {phase === "connecting" && "connecting…"}
           {phase === "waiting" && "waiting for the agent to start"}
+          {phase === "stalled" && "not started"}
           {phase === "streaming" && `${lines.length} lines`}
           {phase === "ended" && "stream ended"}
           {phase === "error" && "stream error"}
         </span>
       </div>
 
-      {phase === "waiting" && lines.length === 0 ? (
+      {phase === "stalled" ? (
+        <div className="px-5 py-8 text-sm text-secondary-foreground" data-testid="logs-stalled">
+          <p>
+            No container has started in {Math.round(LOG_WAIT_GIVE_UP_MS / 60_000)} minutes, so
+            there is no output to show. The agent&rsquo;s status says why it has not started.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={askAgain}
+            data-testid="logs-ask-again"
+          >
+            Try again
+          </Button>
+        </div>
+      ) : phase === "waiting" && lines.length === 0 ? (
         <p
           className="px-5 py-8 text-sm text-secondary-foreground"
           data-testid="logs-waiting"
@@ -2484,37 +2612,24 @@ function AgentRunsTab({
   name: string;
   onInspect: (traceId: string) => void;
 }) {
-  const [state, setState] = React.useState<
+  const navigate = useNavigate();
+  const fetchRuns = React.useCallback(
+    (signal: AbortSignal) => api.agentRuns(ns, name, 50, signal),
+    [ns, name],
+  );
+  const { state: runsRead } = useLoad(fetchRuns);
+  const state = React.useMemo(():
     | { kind: "loading" }
     | { kind: "ready"; runs: AgentRunSummary[] }
     | { kind: "unavailable" } // 501 — no trace backend configured
-    | { kind: "error"; message: string; forbidden: boolean }
-  >({ kind: "loading" });
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    api
-      .agentRuns(ns, name, 50, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        // null = 501 (no trace backend wired) — degrade calmly.
-        if (res === null) {
-          setState({ kind: "unavailable" });
-          return;
-        }
-        setState({ kind: "ready", runs: res.runs });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load runs",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
+    | { kind: "error"; message: string; forbidden: boolean } => {
+    if (runsRead.kind === "loading") return runsRead;
+    if (runsRead.kind === "error") {
+      return { kind: "error", message: runsRead.message, forbidden: runsRead.forbidden };
+    }
+    // null = 501 (no trace backend wired) — degrade calmly.
+    return runsRead.data === null ? { kind: "unavailable" } : { kind: "ready", runs: runsRead.data.runs };
+  }, [runsRead]);
 
   // §4.4 activity-feed budget: identity and the next step never drop; the
   // numerics go at 1024 and the timestamp at 768.
@@ -2524,8 +2639,8 @@ function AgentRunsTab({
       header: "Run",
       priority: 1,
       cell: (r) => (
-        <span className="font-mono text-xs" title={r.traceId}>
-          {truncateId(r.traceId)}
+        <span className="font-mono text-xs" title={r.runId ?? r.traceId}>
+          {truncateId(r.runId ?? r.traceId)}
         </span>
       ),
     },
@@ -2549,8 +2664,8 @@ function AgentRunsTab({
       // share a glyph (§7.1), so a 0 renders the dash with its reason.
       cell: (r) => (
         <QuantityValue
-          value={r.tokens > 0 ? r.tokens : UNKNOWN}
-          title="Per-trace token usage isn’t carried by the runs list — unknown, not zero."
+          value={r.tokens !== undefined && r.tokens > 0 ? r.tokens : UNKNOWN}
+          title="Token usage comes from a trace backend and isn’t carried here — unknown, not zero."
         />
       ),
     },
@@ -2568,7 +2683,7 @@ function AgentRunsTab({
       numeric: true,
       cell: (r) => (
         <QuantityValue
-          value={r.latencyMs > 0 ? r.latencyMs : UNKNOWN}
+          value={r.latencyMs !== undefined && r.latencyMs > 0 ? r.latencyMs : UNKNOWN}
           format={formatLatency}
         />
       ),
@@ -2581,8 +2696,11 @@ function AgentRunsTab({
       cell: (r) => (
         <NextStepLink
           label="Read the run"
-          onClick={() => onInspect(r.traceId)}
-          ariaLabel={`Read run ${r.traceId}`}
+          // A run-store row (no trace backend, ADR 0150) opens the run itself; a trace row the inspector.
+          onClick={() =>
+            r.runId ? navigate(`/runs/${encodeURIComponent(r.runId)}`) : onInspect(r.traceId)
+          }
+          ariaLabel={`Read run ${r.runId ?? r.traceId}`}
         />
       ),
     },
@@ -2616,7 +2734,7 @@ function AgentRunsTab({
       <DataTable<AgentRunSummary>
         columns={cols}
         rows={state.kind === "ready" ? state.runs : []}
-        rowKey={(r) => r.traceId}
+        rowKey={(r) => r.runId ?? r.traceId}
         loading={state.kind === "loading"}
         error={
           state.kind === "error"
@@ -2795,7 +2913,7 @@ type LongTermLoad =
 // states the three caveats: it isolates memory per end-user, is PRODUCT-grade (not security-grade), and it
 // BREAKS conversation handoff + share-links for the agent.
 function SessionMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const canUpdate = can(RES_AGENTS, "update");
   const [config, setConfig] = React.useState<SessionMemoryConfig | null>(null);
   const [perUser, setPerUser] = React.useState(false);
@@ -2906,7 +3024,7 @@ function SessionMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: st
 // CAPABILITY ON (the m49.1 capability pocket). Patches spec.longTermMemory via the BFF (the tracepolicy
 // pattern). Read-only for viewers (the form is gated on the agent-update capability); hides if unreadable.
 function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const canUpdate = can(RES_AGENTS, "update");
   const [config, setConfig] = React.useState<LongTermMemoryConfig | null>(null);
   const [route, setRoute] = React.useState("");
@@ -3035,27 +3153,18 @@ function LongTermMemoryConfigPanel({ ns, agentName }: { ns: string; agentName: s
 }
 
 function LongTermMemoryPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const [load, setLoad] = React.useState<LongTermLoad>({ kind: "loading" });
-
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setLoad({ kind: "loading" });
-    api
-      .agentMemory(ns, agentName, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setLoad(res === null ? { kind: "unavailable" } : { kind: "ready", items: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoad({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load long-term memory",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, agentName]);
+  const fetchMemory = React.useCallback(
+    (signal: AbortSignal) => api.agentMemory(ns, agentName, signal),
+    [ns, agentName],
+  );
+  const { state: memoryRead } = useLoad(fetchMemory);
+  const load = React.useMemo((): LongTermLoad => {
+    if (memoryRead.kind === "loading") return memoryRead;
+    if (memoryRead.kind === "error") {
+      return { kind: "error", message: memoryRead.message, forbidden: memoryRead.forbidden };
+    }
+    return memoryRead.data === null ? { kind: "unavailable" } : { kind: "ready", items: memoryRead.data.items };
+  }, [memoryRead]);
 
   // Unavailable (no store wired) — hide the section entirely, like other degraded surfaces.
   if (load.kind === "unavailable") return null;
@@ -3161,44 +3270,31 @@ type ScalingPanelLoad =
   | { kind: "error"; message: string; forbidden: boolean };
 
 function ScalingPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can, reprobe } = useCapabilities();
+  const { can, reprobe } = useCapabilitiesIn(ns);
   const { toast } = useToast();
   const canCreate = can(RES_SCALING, "create");
   const canUpdate = can(RES_SCALING, "update");
   const canDelete = can(RES_SCALING, "delete");
 
-  const [load, setLoad] = React.useState<ScalingPanelLoad>({ kind: "loading" });
   const [action, setAction] = React.useState<ScalingActionState>({ kind: "idle" });
   const [form, setForm] = React.useState<ScalingForm>({ minReplicas: "0", maxReplicas: "3", mode: "static", schedule: "" });
   // Keep-warm (m32.5): a one-switch view over the agent's min-replicas floor — "warm" iff any
   // attached policy holds ≥1 replica, so a latency-sensitive agent avoids Knative cold-starts.
   const [keepWarmBusy, setKeepWarmBusy] = React.useState(false);
 
-  const fetchPolicies = React.useCallback(() => {
-    const controller = new AbortController();
-    setLoad({ kind: "loading" });
-    api
-      .listAgentScalingPolicies({ namespace: ns }, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        const mine = res.items.filter((p) => p.agentRef === agentName);
-        setLoad({ kind: "ready", policies: mine });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoad({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load scaling policies",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-    return () => controller.abort();
-  }, [ns, agentName]);
-
-  React.useEffect(() => {
-    const cancel = fetchPolicies();
-    return cancel;
-  }, [fetchPolicies]);
+  const fetchScaling = React.useCallback(
+    (signal: AbortSignal) =>
+      api
+        .listAgentScalingPolicies({ namespace: ns }, signal)
+        .then((res) => res.items.filter((p) => p.agentRef === agentName)),
+    [ns, agentName],
+  );
+  const { state: scalingRead, reload: fetchPolicies } = useLoad(fetchScaling);
+  const load = React.useMemo((): ScalingPanelLoad => {
+    if (scalingRead.kind === "ready") return { kind: "ready", policies: scalingRead.data };
+    if (scalingRead.kind === "loading") return scalingRead;
+    return { kind: "error", message: scalingRead.message, forbidden: scalingRead.forbidden };
+  }, [scalingRead]);
 
   function openAttach() {
     setForm({ minReplicas: "0", maxReplicas: "3", mode: "static", schedule: "" });
@@ -3555,7 +3651,7 @@ type RedactionLoad =
   | { kind: "error"; message: string; forbidden: boolean };
 
 function RedactionPanel({ ns, agentName }: { ns: string; agentName: string }) {
-  const { can } = useCapabilities();
+  const { can } = useCapabilitiesIn(ns);
   const canEdit = can(RES_AGENTS, "update");
   const { toast } = useToast();
   const [load, setLoad] = React.useState<RedactionLoad>({ kind: "loading" });
@@ -3737,33 +3833,20 @@ function ImprovementLoopSection({
   versions: string[];
 }) {
   const { toast } = useToast();
-  const [scoreLoad, setScoreLoad] = React.useState<OnlineScoreLoad>({ kind: "loading" });
   const [rollbackTarget, setRollbackTarget] = React.useState<string>("");
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [rolling, setRolling] = React.useState(false);
 
-  React.useEffect(() => {
-    const controller = new AbortController();
-    setScoreLoad({ kind: "loading" });
-    api
-      .agentOnlineScore(ns, name, controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        if (res === null) {
-          setScoreLoad({ kind: "unavailable" });
-          return;
-        }
-        setScoreLoad({ kind: "ready", data: res });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setScoreLoad({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load online score",
-        });
-      });
-    return () => controller.abort();
-  }, [ns, name]);
+  const fetchScore = React.useCallback(
+    (signal: AbortSignal) => api.agentOnlineScore(ns, name, signal),
+    [ns, name],
+  );
+  const { state: scoreRead } = useLoad(fetchScore);
+  const scoreLoad = React.useMemo((): OnlineScoreLoad => {
+    if (scoreRead.kind === "loading") return scoreRead;
+    if (scoreRead.kind === "error") return { kind: "error", message: scoreRead.message };
+    return scoreRead.data === null ? { kind: "unavailable" } : { kind: "ready", data: scoreRead.data };
+  }, [scoreRead]);
 
   // RegressionDetected condition from status.conditions.
   const regressionCond = conditions.find((c) => c.type === "RegressionDetected");

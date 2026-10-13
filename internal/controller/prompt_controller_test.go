@@ -32,7 +32,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
@@ -41,8 +41,8 @@ import (
 // therefore stamp the annotation on the AgentDeployment rather than creating a PromptVersion object.
 
 // echoGit is the fixed prompt git pointer; ref is the swappable pin.
-func echoGit(ref string) agentsv1alpha1.GitPromptSource {
-	return agentsv1alpha1.GitPromptSource{
+func echoGit(ref string) agentsv1beta1.GitPromptSource {
+	return agentsv1beta1.GitPromptSource{
 		Repo: "https://github.com/example/prompts.git",
 		Ref:  ref,
 		Path: "agents/echo/system.txt",
@@ -50,7 +50,7 @@ func echoGit(ref string) agentsv1alpha1.GitPromptSource {
 }
 
 // stampPrompt sets the resolved-prompt annotation (the denormalized pointer) on the agent.
-func stampPrompt(t *testing.T, deploy *agentsv1alpha1.AgentDeployment, promptName string, git agentsv1alpha1.GitPromptSource) {
+func stampPrompt(t *testing.T, deploy *agentsv1beta1.AgentDeployment, promptName string, git agentsv1beta1.GitPromptSource) {
 	t.Helper()
 	raw, err := json.Marshal(prompt.ResolvedPointer{Name: promptName, Repo: git.Repo, Ref: git.Ref, Path: git.Path})
 	require.NoError(t, err)
@@ -93,9 +93,9 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 	)
 
 	git := echoGit("v1")
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:     image,
 			PromptRef: "echo-prompt-v1",
 		},
@@ -163,9 +163,9 @@ func TestReconcile_PromptMaterialisedAndRevisionRolls(t *testing.T) {
 	}
 
 	// ── Baseline: an identical agent WITHOUT a prompt has the bare name ─────────
-	bare := &agentsv1alpha1.AgentDeployment{
+	bare := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "bare-agent", Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: image},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: image},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, bare))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, bare) })
@@ -195,9 +195,9 @@ func TestReconcile_PromptOnlyDeploy_RefSwapKeepsImage(t *testing.T) {
 		image     = "ghcr.io/ctxmesh/example-agent@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:     image,
 			PromptRef: "swap-prompt",
 		},
@@ -268,9 +268,9 @@ func TestReconcile_PromptRefMissing(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:     "ghcr.io/ctxmesh/example-agent:latest",
 			PromptRef: "does-not-exist",
 		},
@@ -282,7 +282,7 @@ func TestReconcile_PromptRefMissing(t *testing.T) {
 
 	reconcileNN(t, newReconciler(), name, namespace)
 
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady)
@@ -315,9 +315,9 @@ func TestReconcile_PromptUnresolvable(t *testing.T) {
 		Registry:       NewPostgresRegistryReader(testRegStore),
 	}
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:     "ghcr.io/ctxmesh/example-agent:latest",
 			PromptRef: "unresolvable-prompt",
 		},
@@ -329,7 +329,7 @@ func TestReconcile_PromptUnresolvable(t *testing.T) {
 
 	reconcileNN(t, r, name, namespace)
 
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady)
@@ -356,9 +356,9 @@ func TestReconcile_PromptOnlyDeploy_PromptRefSwapRollsRevision(t *testing.T) {
 		image     = "ghcr.io/ctxmesh/example-agent@sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:     image,
 			PromptRef: "prompt-v1",
 		},
@@ -401,11 +401,9 @@ func TestReconcile_PromptOnlyDeploy_PromptRefSwapRollsRevision(t *testing.T) {
 	// specHash MUST move: promptRef is part of the spec it marshals.
 	assert.NotEqual(t, hash1, hash2, "specHash must change when spec.PromptRef changes")
 
-	// The AgentVersion for the NEW spec must exist — it is what status.latestVersion tracks.
-	var av agentsv1alpha1.AgentVersion
-	assert.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: name + "-" + hash2, Namespace: namespace}, &av),
-		"a promptRef swap must produce a new AgentVersion %s-%s", name, hash2)
+	// The version of the NEW spec must be recorded — it is what status.latestVersion tracks.
+	_, recorded := storedVersion(t, testVersionStore, name, namespace, name+"-"+hash2)
+	assert.True(t, recorded, "a promptRef swap must record a new version %s-%s", name, hash2)
 
 	// The pod template must actually roll, and must mount the NEW prompt ConfigMap.
 	assert.NotEqual(t, cm1.Name, cm2.Name, "a promptRef swap must create a new content-addressed CM")

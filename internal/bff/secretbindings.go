@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // secretBindingKind is the CRD kind name for a SecretBinding (used in error
@@ -140,33 +140,40 @@ type SecretBindingUpdateRequest struct {
 // Caller-scoped (ADR 0011): the Get runs as the caller, so it reflects only what
 // the caller may see. SECURITY: it tests `Data[key]` for PRESENCE and discards it —
 // the value is never read into a variable, logged, or projected.
-func (s *Server) secretBindingReadiness(ctx context.Context, caller client.Client, sb *agentsv1alpha1.SecretBinding) (bool, string) {
+func (s *Server) secretBindingReadiness(ctx context.Context, caller client.Client, sb *agentsv1beta1.SecretBinding) (bool, string) {
+	ready, phase, _ := s.secretBindingProbe(ctx, caller, sb)
+	return ready, phase
+}
+
+// secretBindingProbe is secretBindingReadiness that also returns the failed read behind a Pending
+// phase. The error is nil for a Pending binding with nothing to read (another backend, no Secret).
+func (s *Server) secretBindingProbe(ctx context.Context, caller client.Client, sb *agentsv1beta1.SecretBinding) (bool, string, error) {
 	backend := sb.Spec.Backend
 	if backend == "" {
 		backend = secretBackendKubernetes
 	}
 	// Only the kubernetes backend stores its material in a Secret we can probe.
 	if backend != secretBackendKubernetes || sb.Spec.SecretRef.Name == "" {
-		return false, phasePending
+		return false, phasePending, nil
 	}
 	var secret corev1.Secret
 	if err := caller.Get(ctx, client.ObjectKey{Namespace: sb.Namespace, Name: sb.Spec.SecretRef.Name}, &secret); err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, phaseNotReady
+			return false, phaseNotReady, nil
 		}
-		return false, phasePending
+		return false, phasePending, err
 	}
 	if _, ok := secret.Data[sb.Spec.SecretRef.Key]; !ok {
-		return false, phaseNotReady
+		return false, phaseNotReady, nil
 	}
-	return true, phaseReady
+	return true, phaseReady, nil
 }
 
 // --- adapter helpers ---------------------------------------------------------
 
 // listSecretBindings lists SecretBindings via the reader (caller-scoped).
-func listSecretBindings(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1alpha1.SecretBindingList, error) {
-	var out agentsv1alpha1.SecretBindingList
+func listSecretBindings(ctx context.Context, r AgentReader, opts ...client.ListOption) (*agentsv1beta1.SecretBindingList, error) {
+	var out agentsv1beta1.SecretBindingList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -182,7 +189,7 @@ func listSecretBindings(ctx context.Context, r AgentReader, opts ...client.ListO
 // newSecretBindingSummary projects a SecretBinding onto the compact list DTO.
 // Only the ref metadata and the caller-derived readiness are included — never
 // secret data. The (ready, phase) pair is computed by secretBindingReadiness.
-func newSecretBindingSummary(sb *agentsv1alpha1.SecretBinding, ready bool, phase string) SecretBindingSummary {
+func newSecretBindingSummary(sb *agentsv1beta1.SecretBinding, ready bool, phase string) SecretBindingSummary {
 	backend := sb.Spec.Backend
 	if backend == "" {
 		backend = secretBackendKubernetes
@@ -203,7 +210,7 @@ func newSecretBindingSummary(sb *agentsv1alpha1.SecretBinding, ready bool, phase
 // newSecretBindingDetail projects a SecretBinding onto the full detail DTO.
 // Only the ref metadata and the caller-derived readiness are included — never
 // secret data. The (ready, phase) pair is computed by secretBindingReadiness.
-func newSecretBindingDetail(sb *agentsv1alpha1.SecretBinding, ready bool, phase string) SecretBindingDetail {
+func newSecretBindingDetail(sb *agentsv1beta1.SecretBinding, ready bool, phase string) SecretBindingDetail {
 	backend := sb.Spec.Backend
 	if backend == "" {
 		backend = secretBackendKubernetes
@@ -275,7 +282,7 @@ func (s *Server) handleListSecretBindings(w http.ResponseWriter, r *http.Request
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listSecretBindings(r.Context(), caller, opts...)
+	list, err := listSecretBindings(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -327,7 +334,7 @@ func (s *Server) handleGetSecretBinding(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var sb agentsv1alpha1.SecretBinding
+	var sb agentsv1beta1.SecretBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
 		s.writeGetError(w, err, "secret binding")
 		return
@@ -392,14 +399,14 @@ func (s *Server) handleCreateSecretBinding(w http.ResponseWriter, r *http.Reques
 		backend = secretBackendKubernetes
 	}
 
-	sb := &agentsv1alpha1.SecretBinding{
+	sb := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      strings.TrimSpace(req.Name),
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: backend,
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: strings.TrimSpace(req.SecretRef.Name),
 				Key:  strings.TrimSpace(req.SecretRef.Key),
 			},
@@ -489,14 +496,14 @@ func (s *Server) handleUpdateSecretBinding(w http.ResponseWriter, r *http.Reques
 	// Build a minimal apply object carrying only the identity + the desired spec.
 	// SSA co-ownership means the console owns exactly the fields it sends; the
 	// controller retains ownership of status / derived fields it manages.
-	apply := &agentsv1alpha1.SecretBinding{
+	apply := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: backend,
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: strings.TrimSpace(req.SecretRef.Name),
 				Key:  strings.TrimSpace(req.SecretRef.Key),
 			},
@@ -523,7 +530,7 @@ func (s *Server) handleUpdateSecretBinding(w http.ResponseWriter, r *http.Reques
 
 	// Re-read the live object so the response reflects what the API server
 	// persisted (SSA may normalise or reject fields).
-	var live agentsv1alpha1.SecretBinding
+	var live agentsv1beta1.SecretBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		s.log.Error(err, "re-read SecretBinding after apply failed", "name", name, "namespace", ns)
 		writeError(w, http.StatusInternalServerError, "secret binding updated but could not be re-read")
@@ -558,7 +565,7 @@ func (s *Server) handleDeleteSecretBinding(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	sb := &agentsv1alpha1.SecretBinding{
+	sb := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), sb); err != nil {

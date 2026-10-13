@@ -32,7 +32,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // This file holds the per-agent default-token hardening tests (m79.4), the
@@ -194,10 +194,10 @@ func TestMountServiceAccountToken_ToggleRollsRevision(t *testing.T) {
 func TestAgentDeployment_NameLengthCELGuard(t *testing.T) {
 	const namespace = "default"
 
-	mk := func(name string) *agentsv1alpha1.AgentDeployment {
-		return &agentsv1alpha1.AgentDeployment{
+	mk := func(name string) *agentsv1beta1.AgentDeployment {
+		return &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-			Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Spec: agentsv1beta1.AgentDeploymentSpec{
 				Image:          "ghcr.io/ctxmesh/example-agent:latest",
 				ExecutionModel: "serving",
 				Port:           8080,

@@ -1,6 +1,5 @@
 import {
   Bell,
-  BookOpen,
   Boxes,
   Building2,
   CheckSquare,
@@ -19,8 +18,6 @@ import {
   ScrollText,
   Share2,
   Shield,
-  ShieldCheck,
-  SlidersHorizontal,
   Tags,
   TestTube2,
   Users,
@@ -30,44 +27,14 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 // nav.ts — the ONE source of truth for the console's information architecture
-// (ui-foundation §6 re-housing). Both the REAL app shell (components/app-shell)
-// and the DESIGN wireframes (design/console-chrome re-exports NAV_SECTIONS from
-// here) read this list, so the approved IA and the shipped shell can never drift
-// — approve the IA at the design gate and the shell follows by construction.
+// (ui-foundation §6 re-housing). The shell's sidebar, its drawer, the command
+// palette, the breadcrumbs and Home's first-run checklist all read it.
 //
-// This module is gallery-free (no design-only imports) so the production shell
-// can consume it without pulling the review-only wireframes into the main chunk.
-//
-// Milestone tags mark which arc milestone SHIPS each surface. Only surfaces that
-// exist TODAY carry a `route`; the rest render a PlaceholderPage ("arrives in
-// M<n>") so the full IA is walkable without pulling later features forward.
-
-// Milestone is duplicated from design/scaffold to keep this module independent of
-// the design gallery (the wireframes' own tag type). It is display-only.
-export type Milestone =
-  | "M13"
-  | "M14"
-  | "M15"
-  | "M16"
-  | "M17"
-  | "M18"
-  | "M47"
-  | "M63"
-  | "M64"
-  | "M66"
-  | "M67"
-  | "M68"
-  | "M69"
-  | "M70"
-  | "M73"
-  | "M74"
-  | "M76"
-  | "M112"
-  | "M151";
-
-// The golden CRD resources the console probes capabilities for — the plural
-// names the BFF's SelfSubjectAccessReview uses (internal/bff/identity.go). A nav
-// item or action gates on `capabilities.allowed[resource][verb]`.
+// The resources GET /api/capabilities answers for — the plural names the BFF's
+// SelfSubjectAccessReview uses (internal/bff/identity.go). A nav item or action
+// gates on `capabilities.allowed[resource][verb]`. A cell the BFF does not probe
+// reads as allowed, so a gate on it hides nothing: nav-gates.test.ts fails on one,
+// against the census the BFF's own test writes (ui/src/test/contract/capabilities.json).
 export const RES_AGENTS = "agentdeployments";
 export const RES_ROUTES = "modelroutes";
 export const RES_SECRETS = "secretbindings";
@@ -83,11 +50,12 @@ export const RES_TENANTS = "tenants";
 // resource: only the operator persona's ClusterRole grants `list auditlogs`, so the
 // nav item hides for developer/viewer chrome (display-only; the API still enforces).
 export const RES_AUDITLOGS = "auditlogs";
-// RES_GUARDRAIL is the plural resource name for GuardrailPolicies (m66.10, ADR 0059).
-export const RES_GUARDRAIL = "guardrailpolicies";
-// RES_ALERTPOLICIES gates the Alerts feed (M70, ADR 0063 D2). The caller-scoped SSAR
-// authorizes against `list alertpolicies` — the same resource the CRD path enforced.
+// RES_ALERTPOLICIES gates the Alerts feed (M70, ADR 0063 D2): GET /api/alerts
+// authorizes against `list alertpolicies`, and the BFF probes list alone.
 export const RES_ALERTPOLICIES = "alertpolicies";
+// RES_WORKFLOWS gates the Approvals queue and its count: GET /api/approvals
+// authorizes against `list workflows`, and the BFF probes list alone.
+export const RES_WORKFLOWS = "workflows";
 // RES_KNOWLEDGEBASES gates the Knowledge Bases nav item (M99 C2): a persona that can't
 // `list knowledgebases` (e.g. developer) must not see a nav item that then 403s. The BFF
 // probes it in the golden set; display-only, the API still enforces.
@@ -126,13 +94,8 @@ export interface NavItem {
   id: string;
   label: string;
   icon: LucideIcon;
-  milestone: Milestone;
-  /**
-   * The router path this nav item routes to. Present only for surfaces that
-   * exist in the current build; absent items render a PlaceholderPage keyed on
-   * the milestone. `/` for the index (Home).
-   */
-  route?: string;
+  /** The router path this item routes to; `/` for the index (Home). */
+  route: string;
   /**
    * When set, this destination is capability-gated — hidden from any chrome whose
    * caller isn't `allowed[requiresCapability.resource][requiresCapability.verb]`
@@ -191,7 +154,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "home",
         label: "Home",
         icon: House,
-        milestone: "M13",
         route: "/",
       },
     ],
@@ -203,7 +165,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "agents",
         label: "Agents",
         icon: Boxes,
-        milestone: "M13",
         route: "/agents",
       },
       {
@@ -212,7 +173,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "teams",
         label: "Teams",
         icon: Waypoints,
-        milestone: "M64",
         route: "/teams",
       },
       {
@@ -222,7 +182,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "playground",
         label: "Playground",
         icon: FlaskConical,
-        milestone: "M13",
         route: "/playground",
         requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
@@ -243,26 +202,16 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "gallery",
         label: "Gallery",
         icon: Library,
-        milestone: "M74",
         route: "/gallery",
       },
       {
-        // MCP Servers LIST page (m25 S10) — every registered BYO MCP server, with
-        // "Add MCP server" as an in-page CTA rather than a second nav item.
+        // MCP Servers (m25 S10) — every registered BYO MCP server, with "Add MCP
+        // server" as an in-page CTA rather than a second nav item, and the tool
+        // catalog those servers feed as its Tools tab.
         id: "mcp-servers",
         label: "MCP servers",
         icon: Wrench,
-        milestone: "M14",
         route: "/tools/mcp-servers",
-      },
-      {
-        // Tool catalog (m17.10) — the merged curated + user-added + pending
-        // catalog; the bind-time picker, not the discovery surface (m76.1).
-        id: "tool-catalog",
-        label: "Tool catalog",
-        icon: BookOpen,
-        milestone: "M17",
-        route: "/tools/catalog",
       },
       {
         // KnowledgeBases (m68.13, ADR 0061) — managed RAG corpora. GATED on
@@ -271,7 +220,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "knowledgebases",
         label: "Knowledge bases",
         icon: Database,
-        milestone: "M68",
         route: "/knowledgebases",
         requiresCapability: { resource: RES_KNOWLEDGEBASES, verb: "list" },
       },
@@ -280,7 +228,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "prompts",
         label: "Prompts",
         icon: GitBranch,
-        milestone: "M17",
         route: "/prompts",
       },
       {
@@ -289,20 +236,7 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "workflows",
         label: "Workflows",
         icon: GitFork,
-        milestone: "M67",
         route: "/workflows",
-      },
-      {
-        // The config-builder — the raw agent.yaml → CRD-apply surface. It is a
-        // hand-authoring path, so it sits with the other material rather than in
-        // the agent-creation flow ("New agent" is the ONE primary create entry,
-        // m23.7 / audit B3). A WRITE surface, hidden from a viewer's nav.
-        id: "config",
-        label: "Config builder",
-        icon: SlidersHorizontal,
-        milestone: "M13",
-        route: "/config",
-        requiresCapability: { resource: RES_AGENTS, verb: "create" },
       },
     ],
   },
@@ -314,37 +248,25 @@ export const NAV_SECTIONS: NavSection[] = [
     items: [
       {
         // Approvals (V5/V15) — the namespace-scoped queue of runs paused on
-        // plan_approval OR a mid-run approval step. Gated on `list workflows`.
-        // Its count is the console's "someone is waiting on you" signal.
+        // plan_approval OR a mid-run approval step, with MCP servers awaiting an
+        // operator as its second tab. Gated on `list workflows`, and so is its
+        // count (runs only), the console's "someone is waiting on you" signal.
         id: "approvals",
         label: "Approvals",
         icon: CheckSquare,
-        milestone: "M112",
         route: "/approvals",
-        requiresCapability: { resource: "workflows", verb: "list" },
+        requiresCapability: { resource: RES_WORKFLOWS, verb: "list" },
         count: { source: "approvals", tone: "waiting" },
-      },
-      {
-        // MCP approval queue (m17.9). Operator-only: gated on update agentregistries.
-        id: "mcp-approvals",
-        label: "MCP approvals",
-        icon: ShieldCheck,
-        milestone: "M17",
-        route: "/tools/approvals",
-        requiresCapability: { resource: RES_REGISTRIES, verb: "update" },
       },
       {
         // Stops (ADR 0126, spec §5.23/§6.2) — the scoped kill switch's landing
         // surface: what is stopped, why, by whom, and how to lift it. The frame's
-        // StopControl creates them; this is where they are read. The PAGE shipped
-        // in m151.7 (spec §6.2 gap 2), so the item now walks to the real surface
-        // instead of /soon/stops — and the COUNT is live from GET /api/kills,
-        // because "a scope is halted right now" is the one fact the frame must
-        // not sit on.
+        // StopControl creates them; this is where they are read. The COUNT is
+        // live from GET /api/kills, because "a scope is halted right now" is the
+        // one fact the frame must not sit on.
         id: "stops",
         label: "Stops",
         icon: OctagonX,
-        milestone: "M151",
         route: "/stops",
         count: { source: "stops", tone: "stopped" },
       },
@@ -354,7 +276,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "guardrails",
         label: "Guardrails",
         icon: Shield,
-        milestone: "M66",
         route: "/guardrails",
       },
       {
@@ -362,7 +283,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "evals",
         label: "Evals",
         icon: TestTube2,
-        milestone: "M17",
         route: "/evals",
       },
       {
@@ -371,7 +291,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "datasets",
         label: "Datasets",
         icon: Tags,
-        milestone: "M69",
         route: "/datasets",
       },
       {
@@ -381,7 +300,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "registries",
         label: "Registries",
         icon: Users,
-        milestone: "M15",
         route: "/registries",
       },
       {
@@ -390,7 +308,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "audit",
         label: "Audit",
         icon: ScrollText,
-        milestone: "M63",
         route: "/audit",
         requiresCapability: { resource: RES_AUDITLOGS, verb: "list" },
       },
@@ -406,17 +323,14 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "runs",
         label: "Runs",
         icon: MessagesSquare,
-        milestone: "M16",
         route: "/runs",
       },
       {
-        // Alerts (M70, ADR 0063 D2) — fired AlertPolicy conditions. Gated on
-        // `list alertpolicies` so a caller without that RBAC sees an honest 403
-        // rather than an empty list.
+        // Alerts (M70, ADR 0063 D2) — fired AlertPolicy conditions. Hidden from a
+        // caller who cannot list alertpolicies, whom the feed would refuse.
         id: "alerts",
         label: "Alerts",
         icon: Bell,
-        milestone: "M70",
         route: "/alerts",
         requiresCapability: { resource: RES_ALERTPOLICIES, verb: "list" },
       },
@@ -424,7 +338,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "cost",
         label: "Cost",
         icon: Coins,
-        milestone: "M16",
         route: "/cost",
       },
       {
@@ -433,7 +346,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "my-shares",
         label: "My shares",
         icon: Share2,
-        milestone: "M112",
         route: "/my-shares",
       },
       {
@@ -442,7 +354,6 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "topology",
         label: "Topology",
         icon: Network,
-        milestone: "M15",
         route: "/topology",
       },
     ],
@@ -459,32 +370,30 @@ export const NAV_SECTIONS: NavSection[] = [
         id: "providers",
         label: "Providers",
         icon: PlugZap,
-        milestone: "M14",
         route: "/providers",
       },
       {
         id: "routes",
         label: "Model routes",
         icon: GitBranch,
-        milestone: "M15",
         route: "/routes",
       },
       {
         id: "secrets",
         label: "Secret bindings",
         icon: KeyRound,
-        milestone: "M15",
         route: "/secrets",
       },
       {
         // Tenants (M47) — cluster-scoped namespace groupings with compute + model
-        // quotas. Read-only for everyone; operators manage them (RBAC enforced at
-        // the API server, ADR 0011).
+        // quotas; operators manage them (RBAC enforced at the API server, ADR
+        // 0011). Hidden from a caller who cannot list them, which is anyone bound
+        // to a namespace: a RoleBinding never grants a cluster-scoped list.
         id: "tenants",
         label: "Tenants",
         icon: Building2,
-        milestone: "M47",
         route: "/tenants",
+        requiresCapability: { resource: RES_TENANTS, verb: "list" },
       },
     ],
   },
@@ -493,13 +402,19 @@ export const NAV_SECTIONS: NavSection[] = [
 // NAV_ITEMS is the flat list (every section's items) — handy for route/lookup.
 export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);
 
+// navCountGate is the capability a live count is fetched under: the gate of the item
+// that shows it, so a caller who cannot see the item never polls its backend.
+export function navCountGate(source: NavCountSource): NavItem["requiresCapability"] {
+  return NAV_ITEMS.find((i) => i.count?.source === source)?.requiresCapability;
+}
+
 // navRoute resolves a nav item's router path by id — the single lookup so any
 // route the console references stays anchored to the IA source of truth above. It
 // throws on an unknown id (a nav rename then fails loudly at module-load in tests,
 // not silently at runtime).
 export function navRoute(id: string): string {
   const item = NAV_ITEMS.find((i) => i.id === id);
-  if (!item?.route) {
+  if (!item) {
     throw new Error(`navRoute: no routed nav item with id "${id}"`);
   }
   return item.route;
@@ -551,6 +466,15 @@ export const FIRST_RUN_CHECKLIST: FirstRunStep[] = [
   },
 ];
 
+// FIRST_RUN_NAV_IDS — the only destinations the sidebar shows while the workspace
+// in view provably has no agent. Until one exists the rest of the console has
+// nothing to show: no runs or cost, nothing waiting for approval, nothing to stop,
+// evaluate, route or bind. Home holds the checklist; Providers is where its first
+// step connects a model; Agents is where its second step creates the agent. Its
+// third step, the Playground, needs an agent, and by then the whole nav is back.
+// Every other page still answers a link, a typed URL and the command palette.
+export const FIRST_RUN_NAV_IDS: readonly string[] = ["home", "agents", "providers"];
+
 // ── The breadcrumb trail (M151 §4.2) ────────────────────────────────────────
 
 export interface ShellCrumb {
@@ -560,9 +484,9 @@ export interface ShellCrumb {
 }
 
 /** Longest-prefix first, so /tools/mcp-servers wins over a hypothetical /tools. */
-const ROUTED_ITEMS: NavItem[] = NAV_ITEMS.filter(
-  (i): i is NavItem & { route: string } => Boolean(i.route) && i.route !== "/",
-).sort((a, b) => (b.route ?? "").length - (a.route ?? "").length);
+const ROUTED_ITEMS: NavItem[] = NAV_ITEMS.filter((i) => i.route !== "/").sort(
+  (a, b) => b.route.length - a.route.length,
+);
 
 function humanizeSegment(seg: string): string {
   const words = decodeURIComponent(seg).replace(/-/g, " ");
@@ -584,25 +508,10 @@ export function buildCrumbs(pathname: string): ShellCrumb[] {
 
   const home: ShellCrumb = { label: "Home", to: "/" };
 
-  // A not-yet-built IA destination: /soon/<nav id>.
-  const soon = /^\/soon\/([^/]+)$/.exec(path);
-  if (soon) {
-    const item = NAV_ITEMS.find((i) => i.id === soon[1]);
-    if (item) {
-      const section = navSectionOf(item.id);
-      return [
-        home,
-        ...(section && section !== item.label ? [{ label: section }] : []),
-        { label: item.label },
-      ];
-    }
-    return [home, { label: humanizeSegment(soon[1]) }];
-  }
-
   const match = ROUTED_ITEMS.find(
     (i) => path === i.route || path.startsWith(`${i.route}/`),
   );
-  if (!match || !match.route) {
+  if (!match) {
     // A route the IA does not name (a not-found, a deep link to a surface reached
     // only from another page). Say what the URL says rather than inventing a home
     // for it.

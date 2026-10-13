@@ -4,7 +4,7 @@ import { Label } from "@/components/ui/label";
 
 // FormField — a labelled form control with an optional hint + inline validation
 // message. Pure layout over the token primitives; the error text uses the
-// destructive token (no hardcoded color). Every config-builder field composes it
+// destructive token (no hardcoded color). Every agent-config field composes it
 // so labels/spacing/error styling are uniform.
 export function FormField({
   id,

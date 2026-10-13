@@ -29,7 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 )
 
@@ -40,9 +40,11 @@ import (
 //	offline gate passes + spec.rollout.strategy == "canary" (and a distinct OLD
 //	serving revision exists) → the Knative Service serves a NAMED-revision traffic
 //	split {old: 100-canaryPercent, candidate: canaryPercent}; gate phase = canary.
-//	Both arms accumulate online scores for free — each Knative revision serves its
-//	own AgentVersion, so the m69.5 `version:<agentVersion>` trace tag already
-//	separates the arms' traces. The human then:
+//	The arms are scored apart because each revision's pod carries the AGENT_VERSION
+//	of the spec it was built from (buildPodTemplate), which the launcher stamps on
+//	every trace as `version:<agentVersion>`. A revision created before the
+//	controller set AGENT_VERSION has no version tag, so its traces score under no
+//	version until it is replaced. The human then:
 //	  - promote=<candidate> → traffic 100% candidate (phase promoted); or
 //	  - agents.ctxmesh.ai/rollout-abort → traffic 100% old (phase aborted).
 //
@@ -64,11 +66,12 @@ const rolloutStrategyCanary = "canary"
 // eval-gate controller owns both. The controller clears it after acting so the
 // abort fires once.
 //
-// The other abort path is REMOVING the candidate (a spec revert / rollback), which
-// simply produces a new-or-prior candidate revision that the ordinary reconcile
-// serves — no canary-specific handling needed. This annotation is the explicit,
-// documented in-flight abort that keeps the OLD revision serving without a spec
-// change to the candidate.
+// The other abort path is REMOVING the candidate: reverting the spec, mid-split or
+// after an abort, to the revision that was serving. That revision is then the
+// candidate and the stable arm at once, so the ordinary reconcile pins all traffic
+// back to it (see oldServingRevision). This annotation is the explicit, documented
+// in-flight abort that keeps the OLD revision serving without a spec change to the
+// candidate.
 const rolloutAbortAnnotation = "agents.ctxmesh.ai/rollout-abort"
 
 // canaryConfigured reports whether the deployment requests a canary rollout for
@@ -76,7 +79,7 @@ const rolloutAbortAnnotation = "agents.ctxmesh.ai/rollout-abort"
 // promote-all/hold, byte-for-byte unchanged). Canary is serving-only: for
 // eventing/job the strategy is deferred and ignored (the caller falls back to
 // promote-all/hold — see the m69.9 scope note).
-func canaryConfigured(deploy *agentsv1alpha1.AgentDeployment, model string) bool {
+func canaryConfigured(deploy *agentsv1beta1.AgentDeployment, model string) bool {
 	if model != execModelServing {
 		return false
 	}
@@ -86,7 +89,7 @@ func canaryConfigured(deploy *agentsv1alpha1.AgentDeployment, model string) bool
 // canaryPercent returns the candidate-arm traffic percent for a canary rollout,
 // clamped to the CRD-validated 1..99 band (defence for a hand-built spec that
 // bypassed admission). Defaults to 10 when unset.
-func canaryPercent(deploy *agentsv1alpha1.AgentDeployment) int64 {
+func canaryPercent(deploy *agentsv1beta1.AgentDeployment) int64 {
 	p := int64(10)
 	if deploy.Spec.Rollout != nil && deploy.Spec.Rollout.CanaryPercent != 0 {
 		p = int64(deploy.Spec.Rollout.CanaryPercent)
@@ -101,31 +104,35 @@ func canaryPercent(deploy *agentsv1alpha1.AgentDeployment) int64 {
 }
 
 // oldServingRevision resolves the revision name that is the "old" arm of a canary
-// split — the revision serving today that is NOT the candidate being rolled out.
-// candidateRev is excluded so that, during an ACTIVE split (spec.template.name is
-// already the candidate and spec.traffic pins {old, candidate}), the resolver still
-// returns the OLD arm rather than mistaking the candidate for the old revision.
+// split: the revision that was serving before any candidate, which a new candidate
+// splits against.
 //
-// Resolution order (each source excludes the candidate):
-//  1. spec.traffic — the named block the controller configured (a split's old arm,
-//     or a prior completed promote). Source of truth, available in envtest.
-//  2. status.traffic — what Knative reports is actually serving (real cluster).
-//  3. spec.template.name — the revision the current spec pins (a ksvc with no
-//     explicit traffic, e.g. an ungated/first-promoted single revision).
+// The first source that names a revision decides:
+//  1. spec.traffic — the named block the controller configured. Source of truth,
+//     available in envtest.
+//  2. status.traffic — what Knative programmed, when spec.traffic names no revision
+//     (Knative defaults an empty block to {latestRevision: true, percent: 100}).
+//  3. spec.template.name — only when neither block names a revision: Knative then
+//     serves the latest revision, which is the template's.
 //
-// Returns "" when the ksvc does not exist yet OR the only serving revision IS the
-// candidate (a first deploy, or a candidate already fully promoted — no distinct
-// old arm). A canary needs two distinct arms, so the caller then falls back to the
-// ordinary promote-all/hold path.
+// The old arm is the block's stable arm (see stableArm), never the template of a
+// candidate: after an abort the template still names the rejected candidate, which
+// serves nothing.
+//
+// Returns "" when the ksvc does not exist yet, or when the candidate IS the stable
+// arm: a promoted candidate, or a spec reverted to the revision that was serving.
+// A canary needs two distinct arms, so the caller then takes the ordinary path.
 func oldServingRevision(ksvc *servingv1.Service, candidateRev string) string {
 	if ksvc == nil {
 		return ""
 	}
-	if rev := pickOldArm(ksvc.Spec.Traffic, candidateRev); rev != "" {
-		return rev
-	}
-	if rev := pickOldArm(ksvc.Status.Traffic, candidateRev); rev != "" {
-		return rev
+	for _, traffic := range [][]servingv1.TrafficTarget{ksvc.Spec.Traffic, ksvc.Status.Traffic} {
+		if stable := stableArm(traffic); stable != "" {
+			if stable == candidateRev {
+				return ""
+			}
+			return stable
+		}
 	}
 	if ksvc.Spec.Template.Name != "" && ksvc.Spec.Template.Name != candidateRev {
 		return ksvc.Spec.Template.Name
@@ -133,26 +140,19 @@ func oldServingRevision(ksvc *servingv1.Service, candidateRev string) string {
 	return ""
 }
 
-// pickOldArm returns the highest-percent named revision in a traffic block that is
-// NOT the candidate — the "old" arm. Returns "" when the block names no non-candidate
-// revision.
-func pickOldArm(traffic []servingv1.TrafficTarget, candidateRev string) string {
-	var best string
-	var bestPct int64 = -1
+// stableArm returns the revision holding a traffic block's stable share: its first named
+// entry. The controller writes a split old arm first (namedSplitTraffic) and a pin as one
+// entry (namedFullTraffic), so this is the revision that served before the candidate,
+// whatever percent the candidate has reached. Choosing by percent instead would hand a
+// new candidate's split to an unpromoted candidate that had passed 50%. Returns "" when
+// the block names no revision.
+func stableArm(traffic []servingv1.TrafficTarget) string {
 	for _, tt := range traffic {
-		if tt.RevisionName == "" || tt.RevisionName == candidateRev {
-			continue
-		}
-		pct := int64(0)
-		if tt.Percent != nil {
-			pct = *tt.Percent
-		}
-		if pct > bestPct {
-			bestPct = pct
-			best = tt.RevisionName
+		if tt.RevisionName != "" {
+			return tt.RevisionName
 		}
 	}
-	return best
+	return ""
 }
 
 // namedSplitTraffic builds a NAMED-revision Knative traffic split
@@ -190,15 +190,18 @@ func namedFullTraffic(rev string) []servingv1.TrafficTarget {
 // the desired revision/traffic differ from the live object, so a steady-state
 // canary does not thrash.
 //
-// candidateRev is the deterministic revision name the candidate would create (the
-// same value the gate scored + pinned). oldRev is the currently-serving revision.
+// cand is the deterministic revision the candidate would create (the same value the
+// gate scored + pinned). oldRev is the currently-serving revision.
 func (r *AgentDeploymentReconciler) reconcileCanary(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-	hash, versionName, candidateRev, oldRev string,
+	deploy *agentsv1beta1.AgentDeployment,
+	hash, versionName string,
+	cand candidateRevision,
+	oldRev string,
 	outcome *gateOutcome,
 ) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
+	candidateRev := cand.name
 
 	// The scored value/threshold from the offline gate outcome — recorded on the
 	// canary gate status so the split/completion carries the score that earned it.
@@ -211,8 +214,13 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 	// old revision until the SPEC changes (a new candidate re-gates fresh) or the
 	// operator promotes it explicitly (which overrides below). Idempotent (no write
 	// when traffic already sits on the old revision).
+	//
+	// Keyed on the VERSION the abort recorded (status.latestVersion, written with the
+	// aborted phase), not on the revision name: the name also moves when the spec does
+	// not — a pod-contract bump, a launcher image, any other pod digest input — and
+	// each such move would reopen the split to a candidate a person rejected.
 	if g := deploy.Status.Gate; g != nil && g.Phase == eval.PhaseAborted &&
-		g.ScoredRevision == candidateRev && !r.promotionApproved(deploy, candidateRev) {
+		deploy.Status.LatestVersion == versionName && !r.promotionApproved(deploy, cand) {
 		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(oldRev)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("canary sticky-abort: setting full-old traffic: %w", err)
 		}
@@ -223,7 +231,7 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 	}
 
 	// ── Completion: human promote of THIS candidate → 100% candidate ──────────
-	if r.promotionApproved(deploy, candidateRev) {
+	if r.promotionApproved(deploy, cand) {
 		log.Info("Canary promoted by human", "candidate", candidateRev)
 		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(candidateRev)); err != nil {
 			return ctrl.Result{}, fmt.Errorf("canary promote: setting full-candidate traffic: %w", err)
@@ -275,7 +283,7 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 
 	if dec.promote {
 		// Auto-promote at 100% reuses the human promote path verbatim (full-candidate traffic +
-		// PhasePromoted) so AgentVersion/gate bookkeeping stays single-pathed; the freeze is NOT set —
+		// PhasePromoted) so version/gate bookkeeping stays single-pathed; the freeze is NOT set —
 		// autoRollback must stay armed at 100%.
 		log.Info("Canary auto-promoted", "candidate", candidateRev)
 		if err := r.setCanaryTraffic(ctx, deploy, hash, namedFullTraffic(candidateRev)); err != nil {
@@ -304,6 +312,21 @@ func (r *AgentDeploymentReconciler) reconcileCanary(
 		dec.rollout, ctrl.Result{RequeueAfter: requeue})
 }
 
+// reasonCandidateServing is the gate reason for a passing candidate that already serves all of
+// the configured traffic, so there was nothing to hold for approval.
+const reasonCandidateServing = "CandidateServing"
+
+// candidateServingOutcome turns a passing, unapproved outcome for a candidate that already
+// serves every request into a promotion: the spec matches what serves.
+func candidateServingOutcome(outcome *gateOutcome) *gateOutcome {
+	out := *outcome
+	out.promote = true
+	out.terminal = true
+	out.status.Phase = eval.PhasePromoted
+	out.status.Reason = reasonCandidateServing
+	return &out
+}
+
 // autoProgress reason strings — surfaced on status.rollout.reason + the Ready condition message for
 // operator visibility into WHY the canary advanced or is holding (ADR 0113 §4).
 const (
@@ -319,11 +342,11 @@ const (
 
 // autoProgressDecision is the pure output of the auto-progression state machine.
 type autoProgressDecision struct {
-	rollout          *agentsv1alpha1.RolloutStatus // the status.rollout to persist
-	effectivePercent int32                         // candidate-arm traffic to converge to (ignored when promote)
-	promote          bool                          // true ⇒ auto-promote to 100% candidate
-	requeue          time.Duration                 // RequeueAfter for the split path (dwell-driven)
-	reason           string                        // human-facing reason (status + condition)
+	rollout          *agentsv1beta1.RolloutStatus // the status.rollout to persist
+	effectivePercent int32                        // candidate-arm traffic to converge to (ignored when promote)
+	promote          bool                         // true ⇒ auto-promote to 100% candidate
+	requeue          time.Duration                // RequeueAfter for the split path (dwell-driven)
+	reason           string                       // human-facing reason (status + condition)
 }
 
 // decideAutoProgress is the PURE auto-progression state machine (ADR 0113) — no cluster reads, unit-tested
@@ -331,10 +354,10 @@ type autoProgressDecision struct {
 // anything else (Unknown, regressed, frozen, mid-dwell), and auto-promotes at 100%. Fail-safe by
 // construction: monotone, one step per reconcile (never fast-forward), hold on absence of evidence.
 func decideAutoProgress(
-	prior *agentsv1alpha1.RolloutStatus,
+	prior *agentsv1beta1.RolloutStatus,
 	candidateRev string,
 	basePercent int32,
-	steps []agentsv1alpha1.CanaryStep,
+	steps []agentsv1beta1.CanaryStep,
 	dwell time.Duration,
 	regression metav1.ConditionStatus,
 	frozen bool,
@@ -344,7 +367,7 @@ func decideAutoProgress(
 	// new candidate must EARN its percent from step 0, never inherit the prior candidate's earned percent.
 	if prior == nil || prior.CandidateRevision != candidateRev {
 		return autoProgressDecision{
-			rollout: &agentsv1alpha1.RolloutStatus{
+			rollout: &agentsv1beta1.RolloutStatus{
 				CandidateRevision: candidateRev,
 				CurrentPercent:    basePercent,
 				LastAdvanceAt:     &metav1.Time{Time: now},
@@ -363,7 +386,7 @@ func decideAutoProgress(
 	// hold carries the live percent + dwell clock forward unchanged, only updating the reason.
 	hold := func(reason string, requeue time.Duration) autoProgressDecision {
 		return autoProgressDecision{
-			rollout: &agentsv1alpha1.RolloutStatus{
+			rollout: &agentsv1beta1.RolloutStatus{
 				CandidateRevision: candidateRev,
 				CurrentPercent:    current,
 				LastAdvanceAt:     prior.LastAdvanceAt,
@@ -401,7 +424,7 @@ func decideAutoProgress(
 	}
 	if next >= 100 {
 		return autoProgressDecision{
-			rollout: &agentsv1alpha1.RolloutStatus{
+			rollout: &agentsv1beta1.RolloutStatus{
 				CandidateRevision: candidateRev,
 				CurrentPercent:    100,
 				LastAdvanceAt:     &metav1.Time{Time: now},
@@ -415,7 +438,7 @@ func decideAutoProgress(
 	// Advance EXACTLY ONE step: bump currentPercent + reset the dwell clock atomically (the forward
 	// anti-runaway — never fast-forward multiple steps after controller downtime).
 	return autoProgressDecision{
-		rollout: &agentsv1alpha1.RolloutStatus{
+		rollout: &agentsv1beta1.RolloutStatus{
 			CandidateRevision: candidateRev,
 			CurrentPercent:    next,
 			LastAdvanceAt:     &metav1.Time{Time: now},
@@ -432,7 +455,7 @@ func decideAutoProgress(
 // order-independent: a mis-ordered schedule still advances monotonically one rung at a time and never
 // regresses traffic (admission does not enforce ordering — see AutoProgressConfig.Steps). An empty
 // schedule is the implicit single 100% step (enabled-alone = soak then auto-promote).
-func nextCanaryStep(current int32, steps []agentsv1alpha1.CanaryStep) int32 {
+func nextCanaryStep(current int32, steps []agentsv1beta1.CanaryStep) int32 {
 	if len(steps) == 0 {
 		if current < 100 {
 			return 100
@@ -451,7 +474,7 @@ func nextCanaryStep(current int32, steps []agentsv1alpha1.CanaryStep) int32 {
 
 // autoProgressConfig returns the auto-progression config when it is opt-in enabled, else nil (the M69
 // hold-for-human default). Nil-safe against a partial spec.
-func autoProgressConfig(deploy *agentsv1alpha1.AgentDeployment) *agentsv1alpha1.AutoProgressConfig {
+func autoProgressConfig(deploy *agentsv1beta1.AgentDeployment) *agentsv1beta1.AutoProgressConfig {
 	ro := deploy.Spec.Rollout
 	if ro == nil || ro.AutoProgress == nil || !ro.AutoProgress.Enabled {
 		return nil
@@ -461,7 +484,7 @@ func autoProgressConfig(deploy *agentsv1alpha1.AgentDeployment) *agentsv1alpha1.
 
 // autoProgressDwell is the per-step soak, defaulting to one aggregate window (3600s) and flooring a
 // hand-built spec that bypassed admission (the CRD enforces min 60).
-func autoProgressDwell(cfg *agentsv1alpha1.AutoProgressConfig) time.Duration {
+func autoProgressDwell(cfg *agentsv1beta1.AutoProgressConfig) time.Duration {
 	secs := cfg.DwellSeconds
 	if secs < 60 {
 		secs = 3600
@@ -471,7 +494,7 @@ func autoProgressDwell(cfg *agentsv1alpha1.AutoProgressConfig) time.Duration {
 
 // regressionVerdict reads the candidate's RegressionDetected verdict (the detector sets it against
 // status.latestVersion = the candidate during a canary). Absent ⇒ Unknown (no verdict yet ⇒ hold).
-func regressionVerdict(deploy *agentsv1alpha1.AgentDeployment) metav1.ConditionStatus {
+func regressionVerdict(deploy *agentsv1beta1.AgentDeployment) metav1.ConditionStatus {
 	if c := apimeta.FindStatusCondition(deploy.Status.Conditions, conditionRegressionDetected); c != nil {
 		return c.Status
 	}
@@ -488,47 +511,28 @@ func clampAutoProgressRequeue(d time.Duration) time.Duration {
 }
 
 // canaryAbortRequested reports whether the human set the rollout-abort annotation.
-func (r *AgentDeploymentReconciler) canaryAbortRequested(deploy *agentsv1alpha1.AgentDeployment) bool {
+func (r *AgentDeploymentReconciler) canaryAbortRequested(deploy *agentsv1beta1.AgentDeployment) bool {
 	_, ok := deploy.Annotations[rolloutAbortAnnotation]
 	return ok
 }
 
 // setCanaryTraffic CreateOrUpdate's the ksvc so it (a) carries the candidate
 // revision template (so the candidate revision is created + retained) and (b)
-// serves the given NAMED traffic block. It reuses reconcileKnativeService to build
-// the candidate template identically to the promote path (same pod spec, digest,
-// autoscaling annotations), then layers the traffic block on with a change-guarded
-// write so a steady-state split does not thrash.
+// serves the given NAMED traffic block, in one write. It builds the candidate
+// template identically to the promote path (same pod spec, digest, autoscaling
+// annotations). The write is change-guarded, so a steady-state split does not thrash.
 //
-// The change guard compares the LIVE ksvc's traffic to the desired block and skips
-// the write when they already match (and the template is already the candidate).
+// One write, not template-then-traffic: a template change drops spec.traffic, and for
+// the moment between two writes Knative would serve the latest ready revision, which
+// after an abort is the rejected candidate.
 func (r *AgentDeploymentReconciler) setCanaryTraffic(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
 	traffic []servingv1.TrafficTarget,
 ) error {
-	// Build the candidate revision template exactly as the promote path does. This
-	// applies the candidate pod spec (creating the candidate revision) and leaves
-	// ksvc.Spec.Template with the candidate's name.
-	ksvc, _, err := r.reconcileKnativeService(ctx, deploy, hash)
-	if err != nil {
+	if _, _, err := r.reconcileKnativeService(ctx, deploy, hash, traffic); err != nil {
 		return fmt.Errorf("reconciling Knative Service for canary: %w", err)
-	}
-
-	// Layer the traffic block on with a change-guarded update: only write when the
-	// live traffic differs (no thrash). reconcileKnativeService already persisted the
-	// template; this second update sets spec.traffic.
-	if trafficEqual(ksvc.Spec.Traffic, traffic) {
-		return nil
-	}
-	var fresh servingv1.Service
-	if err := r.Get(ctx, client.ObjectKeyFromObject(ksvc), &fresh); err != nil {
-		return fmt.Errorf("re-fetching ksvc for canary traffic: %w", err)
-	}
-	fresh.Spec.Traffic = traffic
-	if err := r.Update(ctx, &fresh); err != nil {
-		return fmt.Errorf("updating ksvc canary traffic: %w", err)
 	}
 	return nil
 }
@@ -573,18 +577,18 @@ func trafficEqual(a, b []servingv1.TrafficTarget) bool {
 // the auto-progress path returns the dwell clock (its drive shaft); everyone else returns ctrl.Result{}.
 func (r *AgentDeploymentReconciler) recordCanaryPhase(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	versionName, candidateRev, score, threshold, phase, decision, reason string,
 	condStatus metav1.ConditionStatus,
 	condMsg string,
-	rollout *agentsv1alpha1.RolloutStatus,
+	rollout *agentsv1beta1.RolloutStatus,
 	result ctrl.Result,
 ) (ctrl.Result, error) {
-	var fresh agentsv1alpha1.AgentDeployment
+	var fresh agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		return ctrl.Result{}, fmt.Errorf("re-fetching for canary status: %w", err)
 	}
-	gs := agentsv1alpha1.GateStatus{
+	gs := agentsv1beta1.GateStatus{
 		Phase:          phase,
 		Decision:       decision,
 		ScoredRevision: candidateRev,
@@ -595,6 +599,7 @@ func (r *AgentDeploymentReconciler) recordCanaryPhase(
 	fresh.Status.Gate = &gs
 	fresh.Status.LatestVersion = versionName
 	fresh.Status.Rollout = rollout
+	carryVersionRecorded(deploy, &fresh)
 	apimeta.SetStatusCondition(&fresh.Status.Conditions, metav1.Condition{
 		Type:               conditionReady,
 		Status:             condStatus,
@@ -613,9 +618,9 @@ func (r *AgentDeploymentReconciler) recordCanaryPhase(
 // (metadata Update, idempotent). Mirrors the rollback actuator's annotation-clear.
 func (r *AgentDeploymentReconciler) clearCanaryAbort(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) error {
-	var fresh agentsv1alpha1.AgentDeployment
+	var fresh agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKeyFromObject(deploy), &fresh); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil

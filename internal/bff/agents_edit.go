@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
@@ -124,7 +124,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	// server's real 403 on the caller (a viewer), surfaced honestly; a not-found is
 	// a 404. This read also decides the mode: the source-spec annotation is the
 	// console-managed marker.
-	var live agentsv1alpha1.AgentDeployment
+	var live agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		s.writeGetError(w, err, "agent")
 		return
@@ -318,12 +318,50 @@ func readEditBody(r *http.Request) (UpdateAgentRequest, error) {
 // Carry-forward (NOT this task): objects a prior version of expand emitted but the
 // new spec no longer emits (e.g. a removed tool's MCPToolBinding) are left in
 // place — orphan pruning is a later concern; this path never deletes anything.
-func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier AgentApplier, ns, name, editedYAML string) {
-	if err := applyEditedSpec(r.Context(), applier, s.promptStore, s.toolRegistryStore, s.scheme, []byte(editedYAML), ns, name); err != nil {
+func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, caller client.Client, ns, name, editedYAML string) {
+	// The editor's identity scopes which MCP servers the edit may bind (ADR 0029), as on
+	// create. Unresolved ("") sees no private server, never another user's.
+	callerOwner := ""
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		callerOwner = userGrantHash(username)
+	}
+	if err := applyEditedSpec(r.Context(), caller, s.promptStore, s.toolRegistryStore, s.scheme, []byte(editedYAML), ns, name, callerOwner); err != nil {
 		s.writeEditError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, UpdateAgentResponse{Mode: editModeRoundTrip})
+}
+
+// keepLiveToolBindings gives each regenerated MCPToolBinding that already exists for the same
+// agent and tool the live binding's registry and server, and returns the bindings that do not
+// exist yet: the tools this edit adds. The read runs as the editor; a failure other than
+// not-found refuses the edit rather than re-resolving a binding it could not see.
+func keepLiveToolBindings(ctx context.Context, reader AgentApplier, objs []decodedObject, ns string) ([]decodedObject, *createError) {
+	var added []decodedObject
+	for _, d := range objs {
+		b, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
+		if !ok {
+			continue
+		}
+		var live agentsv1beta1.MCPToolBinding
+		err := reader.Get(ctx, client.ObjectKey{Namespace: ns, Name: b.Name}, &live)
+		switch {
+		case apierrors.IsNotFound(err):
+			added = append(added, d)
+			continue
+		case apierrors.IsForbidden(err):
+			return nil, &createError{status: 403, msg: fmt.Sprintf("forbidden: not allowed to read %s %q", mcpToolBindingKind, b.Name)}
+		case err != nil:
+			return nil, &createError{status: 502, msg: fmt.Sprintf("failed to read %s %q", mcpToolBindingKind, b.Name), cause: err}
+		}
+		if live.Spec.ToolName != b.Spec.ToolName || live.Spec.AgentRef != b.Spec.AgentRef {
+			added = append(added, d)
+			continue
+		}
+		b.Spec.RegistryRef = live.Spec.RegistryRef
+		b.Spec.Server = live.Spec.Server
+	}
+	return added, nil
 }
 
 // applyEditedSpec runs the full Mode-A round-trip against the applier: canonicalize
@@ -331,7 +369,7 @@ func (s *Server) editRoundTrip(w http.ResponseWriter, r *http.Request, applier A
 // SSA-apply every manifest under the console field-manager. It refuses to apply a
 // spec whose AgentDeployment name does not match the object being edited so a PUT
 // can never rename/re-target the agent (the {name} in the URL is authoritative).
-func applyEditedSpec(ctx context.Context, applier AgentApplier, promptStore promptversion.Store, regStore toolregistry.Store, scheme *runtime.Scheme, editedYAML []byte, ns, name string) error {
+func applyEditedSpec(ctx context.Context, applier AgentApplier, promptStore promptversion.Store, regStore toolregistry.Store, scheme *runtime.Scheme, editedYAML []byte, ns, name, callerOwner string) error {
 	if scheme == nil {
 		return &createError{status: 500, msg: "server misconfigured: no scheme"}
 	}
@@ -369,10 +407,18 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, promptStore prom
 		}
 	}
 
-	// Point regenerated MCPToolBindings at the registry their tool actually lives in
-	// (m25 S18) — same fix as create: expand's hardcoded default registry doesn't
-	// exist for BYO-MCP tools, so the binding would be RegistryNotFound forever.
-	rewriteBindingRegistries(objs, toolRegistryIndex(ctx, regStore, ns))
+	// A tool the agent already has bound keeps that binding's server: re-resolving it from
+	// the editor's view would re-point another user's binding at whatever the editor can see,
+	// or refuse an edit that never touched tools. Only a tool the edit adds is bound as a
+	// create binds it (m25 S18): to a server the editor may use, refusing a tool none
+	// provides, under the owner guard.
+	added, kErr := keepLiveToolBindings(ctx, applier, objs, ns)
+	if kErr != nil {
+		return kErr
+	}
+	if bErr := bindAgentTools(ctx, regStore, added, ns, callerOwner, false); bErr != nil {
+		return bErr
+	}
 
 	// Re-stamp the NEW source-spec on the AgentDeployment so the next edit
 	// round-trips from the just-submitted intent (ADR 0017 §1).
@@ -423,7 +469,7 @@ func applyEditedSpec(ctx context.Context, applier AgentApplier, promptStore prom
 // non-safe field that merely echoes the live value unchanged is tolerated (the UI
 // may round-trip what it read). Everything the simplified spec doesn't model is
 // ignored — the live object keeps it.
-func (s *Server) editDegraded(w http.ResponseWriter, r *http.Request, applier AgentApplier, live *agentsv1alpha1.AgentDeployment, editedYAML string) {
+func (s *Server) editDegraded(w http.ResponseWriter, r *http.Request, applier AgentApplier, live *agentsv1beta1.AgentDeployment, editedYAML string) {
 	edit, err := parseSafeFieldEdit([]byte(editedYAML), live)
 	if err != nil {
 		s.writeEditError(w, err)
@@ -461,7 +507,7 @@ const (
 type safeFieldEdit struct {
 	image        string
 	imageSet     bool
-	scaling      *agentsv1alpha1.ScalingSpec
+	scaling      *agentsv1beta1.ScalingSpec
 	modelRoute   string
 	modelSet     bool
 	systemPrompt string
@@ -517,7 +563,7 @@ type simplifiedRes struct {
 // we compare the submitted value to what the live object already has, so a UI that
 // round-trips the fields it read is tolerated; only a real attempted change to a
 // field the console can't safely patch is rejected.
-func parseSafeFieldEdit(editedYAML []byte, live *agentsv1alpha1.AgentDeployment) (safeFieldEdit, error) {
+func parseSafeFieldEdit(editedYAML []byte, live *agentsv1beta1.AgentDeployment) (safeFieldEdit, error) {
 	var out safeFieldEdit
 
 	// Reuse the create guard: no inline credential material in the submitted spec
@@ -555,7 +601,7 @@ func parseSafeFieldEdit(editedYAML []byte, live *agentsv1alpha1.AgentDeployment)
 		out.image, out.imageSet = se.Image, true
 	}
 	if se.Scaling != nil {
-		out.scaling = &agentsv1alpha1.ScalingSpec{Min: se.Scaling.Min, Max: se.Scaling.Max}
+		out.scaling = &agentsv1beta1.ScalingSpec{Min: se.Scaling.Min, Max: se.Scaling.Max}
 	}
 	if se.Model != nil && se.Model.Route != "" {
 		out.modelRoute, out.modelSet = se.Model.Route, true
@@ -572,7 +618,7 @@ func parseSafeFieldEdit(editedYAML []byte, live *agentsv1alpha1.AgentDeployment)
 // modeled fields are: executionModel, resources, budget, eval, prompt, and the
 // managed tools list — none of which a degraded patch can safely apply (they
 // regenerate children or roll a revision the console didn't author).
-func disallowedNonSafeChange(se *simplifiedEdit, live *agentsv1alpha1.AgentDeployment) string {
+func disallowedNonSafeChange(se *simplifiedEdit, live *agentsv1beta1.AgentDeployment) string {
 	// executionModel: compare against the live value, treating "" and the CRD
 	// default "serving" as equivalent so a UI echoing the effective value is fine.
 	if se.ExecutionModel != "" && !execModelEqual(se.ExecutionModel, live.Spec.ExecutionModel) {
@@ -612,8 +658,8 @@ func disallowedNonSafeChange(se *simplifiedEdit, live *agentsv1alpha1.AgentDeplo
 // env apply would drop the live env. We therefore rebuild the FULL env list:
 // preserve every hand-set (non-safe) env var verbatim and overlay only the safe
 // MODEL_ROUTE / SYSTEM_PROMPT entries the edit changed.
-func (e safeFieldEdit) applyOnto(live *agentsv1alpha1.AgentDeployment, scheme *runtime.Scheme) *agentsv1alpha1.AgentDeployment {
-	out := &agentsv1alpha1.AgentDeployment{
+func (e safeFieldEdit) applyOnto(live *agentsv1beta1.AgentDeployment, scheme *runtime.Scheme) *agentsv1beta1.AgentDeployment {
+	out := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: live.Name, Namespace: live.Namespace},
 	}
 	_ = ensureGVK(out, scheme)
@@ -631,7 +677,7 @@ func (e safeFieldEdit) applyOnto(live *agentsv1alpha1.AgentDeployment, scheme *r
 	if e.scaling != nil {
 		out.Spec.Scaling = e.scaling
 	} else if live.Spec.Scaling != nil {
-		out.Spec.Scaling = &agentsv1alpha1.ScalingSpec{Min: live.Spec.Scaling.Min, Max: live.Spec.Scaling.Max}
+		out.Spec.Scaling = &agentsv1beta1.ScalingSpec{Min: live.Spec.Scaling.Min, Max: live.Spec.Scaling.Max}
 	}
 
 	out.Spec.Env = mergeSafeEnv(live.Spec.Env, e)
@@ -696,7 +742,7 @@ func mergeSafeEnv(liveEnv []corev1.EnvVar, e safeFieldEdit) []corev1.EnvVar {
 // "drift" from the source-spec). A stored spec that fails to re-expand (should not
 // happen — we canonicalized it at write) is treated as "no drift" rather than
 // surfacing an error on a read.
-func (s *Server) editModeFlags(live *agentsv1alpha1.AgentDeployment) (managedOutsideUI, drift bool) {
+func (s *Server) editModeFlags(live *agentsv1beta1.AgentDeployment) (managedOutsideUI, drift bool) {
 	stored, present := live.Annotations[expand.AnnotationSourceSpec]
 	if !present {
 		return true, false
@@ -709,7 +755,7 @@ func (s *Server) editModeFlags(live *agentsv1alpha1.AgentDeployment) (managedOut
 // intent. See editModeFlags for the compared-field scope. Any error re-expanding /
 // decoding the stored spec → false (no drift) so the detail read never fails on a
 // stale annotation.
-func (s *Server) driftFromSourceSpec(stored string, live *agentsv1alpha1.AgentDeployment) bool {
+func (s *Server) driftFromSourceSpec(stored string, live *agentsv1beta1.AgentDeployment) bool {
 	if s.scheme == nil {
 		return false
 	}
@@ -725,7 +771,7 @@ func (s *Server) driftFromSourceSpec(stored string, live *agentsv1alpha1.AgentDe
 		if d.kind != agentDeploymentKind {
 			continue
 		}
-		want, ok := d.obj.(*agentsv1alpha1.AgentDeployment)
+		want, ok := d.obj.(*agentsv1beta1.AgentDeployment)
 		if !ok {
 			return false
 		}
@@ -738,7 +784,7 @@ func (s *Server) driftFromSourceSpec(stored string, live *agentsv1alpha1.AgentDe
 // fields differ from the expanded (want) object's: image, executionModel
 // (default-normalized), scaling bounds, and the safe env vars. This is the drift
 // comparison — deliberately scoped to what the console owns.
-func managedSpecDiverged(want, live *agentsv1alpha1.AgentDeployment) bool {
+func managedSpecDiverged(want, live *agentsv1beta1.AgentDeployment) bool {
 	if want.Spec.Image != live.Spec.Image {
 		return true
 	}
@@ -805,7 +851,7 @@ func (s *Server) writeEditError(w http.ResponseWriter, err error) {
 	var ce *createError
 	if errors.As(err, &ce) {
 		if ce.status >= 500 {
-			s.log.Error(err, "update agent failed")
+			s.log.Error(ce.logged(), "update agent failed")
 		}
 		writeError(w, ce.status, ce.msg)
 		return
@@ -852,7 +898,7 @@ func normExecModel(v string) string {
 // live object's. An empty submitted CPU/Memory field is treated as "not asserting
 // that dimension" and does not count as a change (only a non-empty, differing
 // value trips it).
-func resourcesChanged(sub *simplifiedRes, live *agentsv1alpha1.AgentResources) bool {
+func resourcesChanged(sub *simplifiedRes, live *agentsv1beta1.AgentResources) bool {
 	liveCPU, liveMem := "", ""
 	if live != nil {
 		liveCPU = live.CPU.String()
@@ -870,13 +916,13 @@ func resourcesChanged(sub *simplifiedRes, live *agentsv1alpha1.AgentResources) b
 // scalingChanged reports whether two scaling specs differ, normalizing a nil spec
 // to the CRD defaults (min=0, max=3) so an omitted block compares equal to an
 // explicit default block.
-func scalingChanged(a, b *agentsv1alpha1.ScalingSpec) bool {
+func scalingChanged(a, b *agentsv1beta1.ScalingSpec) bool {
 	aMin, aMax := scalingBounds(a)
 	bMin, bMax := scalingBounds(b)
 	return aMin != bMin || aMax != bMax
 }
 
-func scalingBounds(s *agentsv1alpha1.ScalingSpec) (min, max int32) {
+func scalingBounds(s *agentsv1beta1.ScalingSpec) (min, max int32) {
 	if s == nil {
 		return 0, 3 // CRD defaults
 	}

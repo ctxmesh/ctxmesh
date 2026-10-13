@@ -16,10 +16,6 @@ limitations under the License.
 
 package v1beta1
 
-// GuardrailPolicy is a NEW type (M66, ADR 0059) with no v1alpha1 history, so it is born directly in the
-// storage version (v1beta1) as a SINGLE-version CRD — no deprecated spoke, no conversion. The
-// CRD-version-parity guard (hack/check-crd-version-parity.sh) skips single-version CRDs.
-
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -293,7 +289,6 @@ type StreamingStatus struct {
 // GuardrailPolicy is a namespaced, reusable content-governance policy referenced by
 // AgentDeployment.spec.guardrailPolicyRef (M66, ADR 0059). The policy configures deterministic
 // PII scanning, pattern-based deny lists, an optional LLM-judge layer, and per-user rate limits.
-// It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook needed.
 //
 // The guardrail engine (m66.3) enforces the policy at inference time via a sidecar that intercepts
 // model input/output. failMode="closed" (default) ensures that if the engine cannot run, the

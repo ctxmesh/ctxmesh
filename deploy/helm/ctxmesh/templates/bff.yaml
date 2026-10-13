@@ -29,6 +29,22 @@ metadata:
 rules: []
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: bff
+  name: ctxmesh-bff-tokenreviewer
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   labels:
@@ -41,6 +57,23 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: ctxmesh-bff-role
+subjects:
+- kind: ServiceAccount
+  name: ctxmesh-bff
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: bff
+  name: ctxmesh-bff-tokenreviewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ctxmesh-bff-tokenreviewer
 subjects:
 - kind: ServiceAccount
   name: ctxmesh-bff
@@ -93,7 +126,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: bff
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - env:
         - name: CONTAINER_MEMORY_LIMIT_BYTES
@@ -114,6 +147,11 @@ spec:
           value: {{ .Values.statelayer.externalAddr | default (printf "ctxmesh-statelayer.%s.svc:6379" .Values.namespace) }}
         - name: COST_ROLLUP_ENABLED
           value: {{ .Values.bff.costRollupEnabled | quote }}
+        {{- $pop := (.Values.bff.runCapabilities | default dict).requireProofOfPossession }}
+        {{- if or (kindIs "bool" $pop) (and (kindIs "string" $pop) (ne $pop "")) }}
+        - name: RUNCAP_REQUIRE_POP
+          value: {{ $pop | toString | quote }}
+        {{- end }}
         - name: PLATFORM_GENERATION_MODELS
           value: {{ .Values.bff.generation.platformModels | quote }}
         - name: MCP_ENABLED
@@ -126,10 +164,12 @@ spec:
           value: {{ .Values.bff.mcp.credentialNamespace | default .Values.namespace }}
         - name: TOKEN_SERVICE_URL
           value: {{ .Values.controllerManager.oboEgress.tokenServiceURL | default (printf "%s://ctxmesh-token-service.%s.svc:8443" (ternary "https" "http" .Values.tokenService.tls.required) .Values.namespace) }}
+        - name: TOKEN_SERVICE_TOKEN_PATH
+          value: /var/run/secrets/ctxmesh-token-service/token
         - name: MODEL_GATEWAY_URL
           value: {{ .Values.bff.modelGatewayURL | default (printf "http://ctxmesh-gateway.%s.svc:4000" .Values.namespace) }}
         - name: MANAGED_AGENT_IMAGE
-          value: {{ .Values.bff.managedAgentImage | default "" | quote }}
+          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.bff.managedAgentImage "ctx" $) | quote }}
         - name: INGEST_OCR_URL
           value: {{ .Values.bff.ingestOcrURL | default "" | quote }}
         - name: KNOWLEDGE_RERANK_URL
@@ -148,10 +188,18 @@ spec:
           value: {{ .Values.bff.natsURL | default "" | quote }}
         - name: NATS_CREDENTIALS_FILE
           value: {{ .Values.bff.natsCredentialsFile | default "" | quote }}
+        - name: ASYNC_DELIVERY_CONCURRENCY
+          value: {{ .Values.bff.asyncDeliveryConcurrency | default "" | quote }}
         - name: MCP_OBO_REQUIRED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
+        - name: MCP_CAPABILITY_AUDIENCE
+          value: {{ .Values.controllerManager.oboEgress.capabilityAudience | default "" | quote }}
         - name: MCP_GRANT_HMAC_KEY
-          value: {{ .Values.bff.mcp.grantHmacKey | default "" | quote }}
+          valueFrom:
+            secretKeyRef:
+              key: MCP_GRANT_HMAC_KEY
+              name: {{ .Values.bff.mcp.grantHmacKeySecret | default "ctxmesh-grant-hmac" }}
+              optional: {{ not .Values.bff.mcp.grantHmacKeySecret }}
         - name: OIDC_ENABLED
           value: {{ .Values.auth.oidc.enabled | quote }}
         - name: OIDC_ISSUER
@@ -159,7 +207,7 @@ spec:
         - name: OIDC_CLIENT_ID
           value: {{ if .Values.auth.oidc.enabled }}{{ .Values.auth.oidc.client.id | quote }}{{ else }}""{{ end }}
         - name: OBJECT_STORE_ADDR
-          value: ctxmesh-objectstore.ctxmesh.svc:9000
+          value: {{ if and .Values.devDataPlane.enabled .Values.devDataPlane.objectstore.enabled }}{{ printf "ctxmesh-objectstore.%s.svc:9000" .Values.namespace }}{{ else }}""{{ end }}
         - name: OBJECT_STORE_ACCESS_KEY
           valueFrom:
             secretKeyRef:
@@ -222,6 +270,9 @@ spec:
         - mountPath: /etc/ctxmesh/recipes
           name: recipe-overlay
           readOnly: true
+        - mountPath: /var/run/secrets/ctxmesh-token-service
+          name: token-service-token
+          readOnly: true
       securityContext:
         runAsNonRoot: true
         seccompProfile:
@@ -233,4 +284,11 @@ spec:
           name: ctxmesh-recipes
           optional: true
         name: recipe-overlay
+      - name: token-service-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              audience: ctxmesh-token-service
+              expirationSeconds: 600
+              path: token
 {{- end }}

@@ -45,6 +45,8 @@ type AgentCapability struct {
 	Namespace   string
 	Agent       string
 	RegistryID  string   // the agent's AgentRegistry membership — the discovery scope; "" ⇒ unscoped
+	Role        string   // the agent's registry role (spec.role), which the BFF attests for AMP (ADR 0153)
+	Endpoint    string   // where the agent receives async AMP deliveries, by execution model; "" ⇒ none (a job)
 	Description string   // the natural-language capability statement (the embedded text); "" ⇒ not discoverable
 	Tags        []string // coarse labels; they FILTER the candidate set, they never rank
 	Ready       bool     // the agent's Ready condition at registration — a caller may skip a not-Ready agent
@@ -68,4 +70,8 @@ type Store interface {
 	// registryID returns no candidates — discovery is scoped to a registry, and an agent outside one has no
 	// discoverable peers (fail-closed).
 	List(ctx context.Context, namespace, registryID string) ([]AgentCapability, error)
+	// ListMembers returns every agent that belongs to a registry, in every namespace, described or not,
+	// ordered by namespace and name: the agents that can be sent an async AMP hop, each of which the
+	// JetStream dispatcher keeps a queue for.
+	ListMembers(ctx context.Context) ([]AgentCapability, error)
 }

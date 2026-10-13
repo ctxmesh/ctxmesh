@@ -34,7 +34,6 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	authnv1 "k8s.io/api/authentication/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,30 +44,26 @@ import (
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/audit"
 	"github.com/ctxmesh/ctxmesh/internal/controller"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/ingestion"
 	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
@@ -173,14 +168,15 @@ const (
 // Cluster-wide get;list;watch stays: the controller genuinely resolves SecretBindings'
 // referenced Secrets in agent namespaces. Reads were never the finding — SEC-3's cache half
 // is closed harder than the audit asked, since Secrets are not cached at all
-// (client.CacheOptions{DisableFor: Secret}).
+// (controller.CacheScope).
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,namespace=ctxmesh,verbs=create;update
 
-// managerNamespace resolves the manager's install namespace (where the cert Secret lives +
-// the webhook Service resolves): POD_NAMESPACE (downward API) first, then the ServiceAccount
-// namespace file, then the install default. Used by the cert-controller (ADR 0102).
+// managerNamespace resolves the manager's install namespace: POD_NAMESPACE (downward API) first, then
+// the ServiceAccount namespace file, then the chart's default. The cert-controller keeps its Secret
+// there and the webhook Service resolves there (ADR 0102); every platform service runs there too, so
+// the reconcilers derive the addresses they give agents from it.
 func managerNamespace() string {
 	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
 		return ns
@@ -190,7 +186,7 @@ func managerNamespace() string {
 			return ns
 		}
 	}
-	return "ctxmesh"
+	return controller.DefaultPlatformNamespace
 }
 
 // selfControllerUsername asks the API server for the manager's OWN identity via SelfSubjectReview
@@ -270,10 +266,6 @@ func launcherImageDigestWarning(launcherImage string) (string, bool) {
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
-	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
-	// v1beta1 carries the AgentTeam kind (M64) the AgentTeam controller reconciles + the AgentDeployment
-	// controller reads; it MUST be registered or the manager fails to construct those controllers (the
-	// v1alpha1 Hub covers the graduated CRDs, but AgentTeam is v1beta1-only).
 	utilruntime.Must(agentsv1beta1.AddToScheme(scheme))
 	utilruntime.Must(servingv1.AddToScheme(scheme))
 	utilruntime.Must(eventingv1.AddToScheme(scheme))
@@ -428,18 +420,15 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// The cache holds the controller's own objects of the core and Knative kinds, not the cluster's,
+	// and Secrets not at all (SEC-3); see controller.CacheScope. NewCache and NewClient go together:
+	// the cache filters on the label the client stamps.
+	cacheScope := controller.CacheScope{PlatformNamespace: managerNamespace()}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:  scheme,
-		Metrics: metricsServerOptions,
-		// SEC-3: never cache Secrets on the manager client. The ModelRoute reconciler reads
-		// provider-key Secrets from ARBITRARY tenant namespaces (SecretBinding.spec.secretRef)
-		// — a full-object Secret cache mirrors EVERY Secret in the cluster into manager memory
-		// (128Mi → OOM) and puts every tenant's secret material in one process. Live
-		// (uncached) Secret reads keep memory bounded AND preserve the syncGatewaySecrets
-		// clobber-guard (a filtered/absent cache would return NotFound for an unlabelled
-		// pre-existing Secret → overwrite it). Rotation events still fire via the
-		// metadata-only Watch (builder.OnlyMetadata) in the ModelRoute reconciler.
-		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}}},
+		Scheme:                 scheme,
+		Metrics:                metricsServerOptions,
+		NewCache:               cacheScope.NewCache,
+		NewClient:              cacheScope.NewClient,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
@@ -473,7 +462,6 @@ func main() {
 		SidecarImage:           os.Getenv("EGRESS_SIDECAR_IMAGE"),
 		CapabilityPublicKeyB64: os.Getenv("MCP_CAPABILITY_PUBLIC_KEY"),
 		CapabilityAudience:     os.Getenv("MCP_CAPABILITY_AUDIENCE"),
-		CredentialNamespace:    os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
 		TokenServiceURL:        os.Getenv("TOKEN_SERVICE_URL"),
 		// M146.7 (m52.M143-knobs): the two tool-call timeouts finally get a config surface. Both were
 		// read by cmd/egress-sidecar and set by NOTHING, so an operator with a legitimately slow tool
@@ -510,6 +498,23 @@ func main() {
 	}
 	defer func() { _ = cpDB.Close() }()
 	toolRegistryStore := toolregistry.NewPostgresStore(cpDB)
+
+	// Agent version history lives in the control-plane store (ADR 0042). An upgrade from a release that
+	// wrote AgentVersion objects copies them in first: the import must precede every version this
+	// controller records, or the order of an agent's history would be wrong. It runs once per database;
+	// a failure exits, and the restart retries it.
+	versionStore := agentversion.NewPostgresStore(cpDB)
+	importCtx, cancelImport := context.WithTimeout(context.Background(), 5*time.Minute)
+	imported, importErr := controller.ImportAgentVersions(
+		logf.IntoContext(importCtx, setupLog), mgr.GetAPIReader(), versionStore)
+	cancelImport()
+	if importErr != nil {
+		setupLog.Error(importErr, "Failed to import AgentVersion objects into the version history")
+		os.Exit(1)
+	}
+	if imported.Ran {
+		setupLog.Info("Version history import complete", "imported", imported.Imported, "skipped", imported.Skipped)
+	}
 
 	// Read-switch: ONE shared Postgres reader for BOTH the MCPToolBinding and
 	// AgentDeployment reconcilers — they compute the pushed manifest and the pod
@@ -557,25 +562,14 @@ func main() {
 			"group", "eventing.knative.dev/v1")
 	}
 
-	if err := (&controller.AgentDeploymentReconciler{
+	platformNamespace := managerNamespace()
+	deployments := &controller.AgentDeploymentReconciler{
 		EventingAvailable: eventingAvailable,
+		PlatformNamespace: platformNamespace,
 		Client:            mgr.GetClient(),
 		APIReader:         mgr.GetAPIReader(), // uncached telemetry-Secret read (collector env stability)
 		Scheme:            mgr.GetScheme(),
 		OBOEgress:         oboEgress,
-		// End-user AGENT exposure mirror (M137/EU1b, ADR 0107): the reconciler writes an endUserAccess
-		// agent's endpoint + spec here so the BFF resolves an end-user run without a K8s read.
-		EndUserAgentStore: enduseragent.NewPostgresStore(cpDB),
-		// Capability registry (M141, ADR 0120): the reconciler registers an agent's capability descriptor
-		// here so the BFF's discovery path can rank a registry's agents against a capability query — again
-		// with no K8s read on the BFF SA.
-		AgentCapabilityStore: agentcapability.NewPostgresStore(cpDB),
-		// Declared per-team spawn budget (M142.6, m52.C19b): the controller can read AgentTeam, the BFF
-		// cannot (ADR 0011), so the number the BFF's authoritative gate enforces is projected here.
-		SpawnBudgetStore: spawnbudget.NewPostgresStore(cpDB),
-		// spec.suspend projection (M146.6, ADR 0126 §4): the BFF cannot read AgentDeployment, so the
-		// declarative halt reaches the worker + the run-create edge through this mirror.
-		KillScopeStore: killscope.NewPostgresStore(cpDB),
 		// M146.7 (m52.M143-knobs): how long to wait for a referenced KnowledgeBase to appear before
 		// deploying without it. Zero ⇒ the 30s default; NEGATIVE disables the settle gate entirely
 		// (pre-M143 behaviour, accepting the revision churn) — an escape hatch, not a setting to reach
@@ -592,13 +586,19 @@ func main() {
 			ExcludeCIDRs: splitCommaList(os.Getenv("EGRESS_REDIRECT_EXCLUDE_CIDRS")),
 		},
 		CollectorImage: strings.TrimSpace(os.Getenv("COLLECTOR_IMAGE")),
-		DiscoveryImage: strings.TrimSpace(os.Getenv("DISCOVERY_IMAGE")),
 		// Dev data plane gate (OPS-2): whether to inject the DEV-ONLY object-store + Langfuse
 		// feedback creds into agent pods. From DEV_DATA_PLANE, which the chart templates from
 		// .Values.devDataPlane.enabled (true == the kustomize dev posture; profile=production sets
 		// it false). False ⇒ neither dev credential family is injected, so a production render
 		// never ships the bundled dev.local creds.
 		DevDataPlane: strings.TrimSpace(os.Getenv("DEV_DATA_PLANE")) == envValueTrue,
+		// The bundled object store can be off while the rest of the dev data plane is on. Only an
+		// explicit "false" withholds its env, so an install that predates DEV_OBJECT_STORE is unchanged.
+		DevObjectStoreOff: strings.TrimSpace(os.Getenv("DEV_OBJECT_STORE")) == "false",
+		// In-mesh call posture (ADR 0153): a registry member requires an attested caller unless the
+		// operator explicitly opts out (chart: controllerManager.amp.requireAttestation=false) to roll
+		// out in two steps. Unset or anything but "false" requires.
+		AMPAcceptUnattested: strings.TrimSpace(os.Getenv("AMP_REQUIRE_ATTESTATION")) == "false",
 		// State-layer proxy URL (M51, ADR 0050 §8 phase 1): opt-in. Set ⇒ memory-bound
 		// agents route session/shared memory through the proxy; empty ⇒ direct Valkey.
 		StatelayerProxyURL: statelayerProxyURL,
@@ -612,26 +612,23 @@ func main() {
 		// (ADR 0004, mock-first). A production go-git resolver is a drop-in future
 		// impl of prompt.Resolver swapped in HERE; nothing else changes.
 		PromptResolver: prompt.NewFixtureResolver(),
+		// Skill bodies (ADR 0137) are fetched for real: a digest-pinned version's bytes must be the
+		// bytes at its source, which a fixture cannot produce. Public github.com repositories only, with
+		// no token: whoever adds a skill version names the file, so a token would be theirs to use.
+		SkillGit: controller.NewSkillGitFetcher(),
 		// Registry read source — nil ⇒ CRD default; the shared Postgres reader when
 		// ToolRegistry is retired (RETIRE_TR). MUST be the SAME instance the
 		// MCPToolBinding reconciler uses (below), or the two drift.
 		Registry: registryReader,
-		// Online-score store (m69.8, ADR 0062 Fork 4): the SAME cpDB store the regression
-		// detector reads (below). The human rollback actuator's healthy-target damping guard
-		// reads it to refuse a rollback to a version that itself regressed. nil-safe (dev
-		// without cpDB ⇒ the store-backed half of the guard is skipped; the auto-trigger is
-		// deferred, so this is guard-side only).
-		OnlineScore: onlinescore.NewPostgresStore(cpDB),
-		// Online-scoring config writer (m84.3, ADR 0062 Fork 2 / ADR 0011): the controller resolves each
-		// agent's evalSuiteRef → EvalSuite.spec.online and UPSERTS/CLEARS the per-(ns, agent) config row the
-		// BFF online-scoring worker reads (cpDB, no agent-CRD RBAC on the BFF SA). Same cpDB store; nil-safe.
-		OnlineConfig: onlinescore.NewPostgresStore(cpDB),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	deployments.UseControlPlaneDB(cpDB, versionStore)
+	if err := deployments.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentdeployment")
 		os.Exit(1)
 	}
 	if err := (&controller.ModelRouteReconciler{
-		Client: mgr.GetClient(),
+		Client:            mgr.GetClient(),
+		PlatformNamespace: platformNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "modelroute")
 		os.Exit(1)
@@ -648,16 +645,22 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "mcptoolbinding")
 		os.Exit(1)
 	}
+	// The async backend, read from the settings the BFF starts it from: it decides what a queue-depth
+	// policy can scale on and whether the BFF's dispatcher must reach eventing agents.
+	asyncBackend := controller.AsyncBackendFromEnv(os.Getenv)
 	if err := (&controller.AgentRegistryReconciler{
 		EventingAvailable: eventingAvailable,
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
+		PlatformNamespace: platformNamespace,
+		AsyncBackend:      asyncBackend,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentregistry")
 		os.Exit(1)
 	}
 	if err := (&controller.AgentScalingPolicyReconciler{
 		KEDAAvailable: kedaAvailable,
+		AsyncBackend:  asyncBackend,
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
@@ -674,18 +677,6 @@ func main() {
 		Client: mgr.GetClient(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "guardrailpolicy")
-		os.Exit(1)
-	}
-	if err := (&controller.ApprovalPolicyReconciler{
-		Client: mgr.GetClient(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "approvalpolicy")
-		os.Exit(1)
-	}
-	if err := (&controller.FeedbackStoreReconciler{
-		Client: mgr.GetClient(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "feedbackstore")
 		os.Exit(1)
 	}
 	if err := (&controller.WorkflowReconciler{
@@ -711,7 +702,8 @@ func main() {
 		// owned member namespaces into a small (namespace, tenant) index so the m73.4 catalog resolves
 		// membership without the BFF reading namespaces (ADR 0011). The manager's existing cpDB store
 		// (mirrors the KnowledgeBase / regression-detector wiring); nil-safe if cpDB were absent.
-		NamespaceTenant: namespacetenant.NewPostgresStore(cpDB),
+		NamespaceTenant:   namespacetenant.NewPostgresStore(cpDB),
+		PlatformNamespace: platformNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "tenant")
 		os.Exit(1)
@@ -766,7 +758,7 @@ func main() {
 		os.Exit(1)
 	}
 	// Regression detector (M69, ADR 0062 Fork 4): maintains the RegressionDetected condition on
-	// each AgentDeployment by comparing the serving AgentVersion's online-score aggregates against
+	// each AgentDeployment by comparing the serving version's online-score aggregates against
 	// the prior version's baseline (delta-vs-baseline + min-n + persistence). DETECTION ONLY — the
 	// auto-rollback trigger is DEFERRED (PRD §17.4); the console pairs the condition with a
 	// one-click HUMAN rollback (m69.8). The store is the manager's existing cpDB (mirrors the
@@ -774,6 +766,7 @@ func main() {
 	if err := (&controller.RegressionDetectorReconciler{
 		Client:      mgr.GetClient(),
 		OnlineScore: onlinescore.NewPostgresStore(cpDB),
+		Versions:    versionStore,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "regressiondetector")
 		os.Exit(1)

@@ -20,20 +20,37 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/ctxmesh/ctxmesh/internal/deliveryclaim"
 )
 
 // dedupRequest / dedupResponse are the async-dedup body (M53, ADR 0050 §6). The
 // caller sends only the messageID + TTL — the proxy scopes the key by the pod's
 // namespace (from the SA token), so the caller cannot name another namespace's
 // seen-space.
+//
+// Op selects the claim lifecycle (claim, complete, release; deliveryclaim), and
+// Token names the claim. With no op the request is the single-step MarkSeen that
+// launchers built before claims send, so they keep working against this proxy.
 type dedupRequest struct {
 	MessageID  string `json:"messageID"`
 	TTLSeconds int    `json:"ttlSeconds"`
+	Op         string `json:"op,omitempty"`
+	Token      string `json:"token,omitempty"`
 }
 
+// dedupResponse answers a claim with its State; FirstSeen is set too, so a claim
+// answered as a MarkSeen by an older proxy still reads correctly.
 type dedupResponse struct {
-	FirstSeen bool `json:"firstSeen"`
+	FirstSeen bool                `json:"firstSeen"`
+	State     deliveryclaim.State `json:"state,omitempty"`
 }
+
+const (
+	dedupOpClaim    = "claim"
+	dedupOpComplete = "complete"
+	dedupOpRelease  = "release"
+)
 
 const (
 	maxDedupMessageID = 256
@@ -72,14 +89,36 @@ func (s *Server) handleDedup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ttl := min(max(time.Duration(req.TTLSeconds)*time.Second, dedupMinTTL), dedupMaxTTL)
+	if req.Op == dedupOpClaim || req.Op == dedupOpRelease {
+		if err := validateConversationID(req.Token); err != nil || len(req.Token) > maxDedupMessageID {
+			writeJSONError(w, http.StatusBadRequest, "a claim needs a token: a bounded id without control chars")
+			return
+		}
+	}
 
-	firstSeen, err := s.dedup.MarkSeen(ctx, dedupKey(ns, req.MessageID), ttl)
+	ttl := min(max(time.Duration(req.TTLSeconds)*time.Second, dedupMinTTL), dedupMaxTTL)
+	key := dedupKey(ns, req.MessageID)
+
+	// A backend error → 502; the launcher's dedup client fails CLOSED (NACK) on
+	// any non-200, per the M11 posture (a dedup blip must not double-process).
+	var resp dedupResponse
+	switch req.Op {
+	case "":
+		resp.FirstSeen, err = s.dedup.MarkSeen(ctx, key, ttl)
+	case dedupOpClaim:
+		resp.State, err = s.dedup.Claim(ctx, key, req.Token, ttl)
+		resp.FirstSeen = resp.State == deliveryclaim.Claimed
+	case dedupOpComplete:
+		err = s.dedup.Complete(ctx, key, ttl)
+	case dedupOpRelease:
+		err = s.dedup.Release(ctx, key, req.Token)
+	default:
+		writeJSONError(w, http.StatusBadRequest, "op must be claim, complete or release")
+		return
+	}
 	if err != nil {
-		// A backend error → 502; the launcher's dedup client fails CLOSED (NACK) on
-		// any non-200, per the M11 posture (a dedup blip must not double-process).
 		writeJSONError(w, http.StatusBadGateway, "dedup backend: "+err.Error())
 		return
 	}
-	writeJSON(w, dedupResponse{FirstSeen: firstSeen})
+	writeJSON(w, resp)
 }

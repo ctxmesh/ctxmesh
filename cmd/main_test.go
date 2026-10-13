@@ -22,19 +22,18 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // TestSchemeRegistersManagerKinds guards the M64 manager-scheme gap: a controller cannot be constructed
 // for a kind the manager scheme doesn't recognize (the manager crash-loops on "no kind is registered").
 // The controller ENVTEST builds its own scheme, so a missing AddToScheme in main's init() slips past it —
-// only a live deploy (or this test) catches it. AgentTeam is v1beta1-only, so v1beta1 MUST be registered.
+// only a live deploy (or this test) catches it.
 func TestSchemeRegistersManagerKinds(t *testing.T) {
 	for _, gvk := range []schema.GroupVersionKind{
 		agentsv1beta1.GroupVersion.WithKind("AgentTeam"),
-		agentsv1alpha1.GroupVersion.WithKind("AgentDeployment"),
-		agentsv1alpha1.GroupVersion.WithKind("AgentRegistry"),
+		agentsv1beta1.GroupVersion.WithKind("AgentDeployment"),
+		agentsv1beta1.GroupVersion.WithKind("AgentRegistry"),
 	} {
 		if !scheme.Recognizes(gvk) {
 			t.Errorf("manager scheme does not recognize %s — its controller will fail to construct", gvk)

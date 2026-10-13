@@ -1137,3 +1137,43 @@ func TestPostgresStore_CountRunOutcomes(t *testing.T) {
 	assert.Equal(t, 0, fz)
 	assert.Equal(t, 0, tz)
 }
+
+// A terminal run's backlog that cannot be read is Subscribe's error. Before, the read happened in the
+// delivering goroutine and its error was dropped, so the stream closed with nothing on it and a reader
+// took an empty log for a complete one. A row whose time cannot be scanned stands in for a failed read.
+func TestPostgresStore_SubscribeReportsAnUnreadableTerminalBacklog(t *testing.T) {
+	s := openPGStore(t)
+	require.NoError(t, s.Create(New("bad-log", "team", "worker", nil, "", t0)))
+	require.NoError(t, s.AppendEvent("bad-log", EventStep, `{"kind":"model"}`))
+	_, err := s.Update("bad-log", func(r *Run) error { return r.Transition(StatusCancelled, t0) })
+	require.NoError(t, err)
+	_, err = s.db.Exec(`UPDATE run_events SET at = 'infinity' WHERE run_id = 'bad-log' AND seq = 1`)
+	require.NoError(t, err)
+
+	ch, cancel, err := s.Subscribe("bad-log", 0)
+	if err == nil {
+		cancel()
+		var got []Event
+		for ev := range ch {
+			got = append(got, ev)
+		}
+		t.Fatalf("Subscribe returned no error and delivered %d of the run's events", len(got))
+	}
+	assert.NotErrorIs(t, err, ErrNotFound)
+
+	// A readable terminal backlog is still delivered whole, then closed.
+	require.NoError(t, s.Create(New("good-log", "team", "worker", nil, "", t0)))
+	for _, d := range []string{"a", "b"} {
+		require.NoError(t, s.AppendEvent("good-log", EventToken, d))
+	}
+	_, err = s.Update("good-log", func(r *Run) error { return r.Transition(StatusCancelled, t0) })
+	require.NoError(t, err)
+	ch, cancel, err = s.Subscribe("good-log", 0)
+	require.NoError(t, err)
+	defer cancel()
+	var kinds []EventKind
+	for ev := range ch {
+		kinds = append(kinds, ev.Kind)
+	}
+	assert.Equal(t, []EventKind{EventToken, EventToken, EventState}, kinds)
+}

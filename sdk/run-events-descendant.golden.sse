@@ -1,0 +1,36 @@
+id: 1
+event: state
+data: running
+
+id: 2
+event: state
+data: waiting
+
+id: 3
+event: descendant-requires-action
+data: sub-8e73d278ca2ffccb17dabcf43d43500d
+
+id: 4
+event: state
+data: queued
+
+id: 5
+event: state
+data: running
+
+id: 6
+event: token
+data: The researcher 
+
+id: 7
+event: token
+data: found 3 sources.
+
+id: 8
+event: message
+data: The researcher found 3 sources.
+
+id: 9
+event: state
+data: succeeded
+

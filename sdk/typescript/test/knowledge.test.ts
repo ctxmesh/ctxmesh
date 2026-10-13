@@ -1,163 +1,104 @@
 /**
  * KnowledgeClient tests — parity with `sdk/python/tests/test_knowledge.py`.
  *
- * Exercises the /knowledge/search wire contract and gating logic.
+ * Exercises the /knowledge/search wire contract and gating logic against the fake generated from
+ * sdk/launcher-routes.json, so a body the launcher would not accept fails here.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { PlaneConfig } from "../src/config.js";
 import { ConfigError, EndpointError } from "../src/errors.js";
 import { KnowledgeClient } from "../src/knowledge.js";
-import { startPlane, type MockPlane } from "../src/testing.js";
+import { FakeLauncher } from "./generated/fake-launcher.js";
 
-let plane: MockPlane;
+const ROUTE = "POST /knowledge/search";
+
+let fake: FakeLauncher;
 
 beforeEach(async () => {
-  plane = await startPlane();
+  fake = await FakeLauncher.start();
 });
 
 afterEach(async () => {
-  await plane.stop();
+  await fake.stop();
+  fake.assertConforms();
 });
 
-// Add a /knowledge/search route to the memory stub (it listens on :2998).
-function addKnowledgeRoute(
-  stub: MockPlane["memory"],
-  response: { status: number; body?: unknown },
-): void {
-  stub["routes"].set("POST /knowledge/search", () => {
-    if (typeof response.body === "undefined") {
-      return { status: response.status };
-    }
-    return {
-      status: response.status,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(response.body),
-    };
-  });
+function enabled(): KnowledgeClient {
+  return new KnowledgeClient(PlaneConfig.forTest({ memoryBaseUrl: fake.baseUrl, knowledgeEnabled: true }));
 }
 
 describe("KnowledgeClient.available", () => {
   it("returns empty list when KNOWLEDGE_BASES is not set", () => {
-    const client = new KnowledgeClient(plane.config);
+    const client = new KnowledgeClient(PlaneConfig.forTest());
     expect(client.available()).toEqual([]);
   });
 
   it("does not require knowledgeEnabled to call available()", () => {
     // knowledgeEnabled=false (forTest default), but available() still works.
-    const client = new KnowledgeClient(plane.config);
-    // No throw.
+    const client = new KnowledgeClient(PlaneConfig.forTest());
     expect(() => client.available()).not.toThrow();
   });
 });
 
 describe("KnowledgeClient.search gating", () => {
   it("throws ConfigError when knowledgeEnabled is false", async () => {
-    // forTest defaults knowledgeEnabled=false
-    const client = new KnowledgeClient(plane.config);
+    const client = new KnowledgeClient(PlaneConfig.forTest({ memoryBaseUrl: fake.baseUrl }));
     await expect(client.search("hello")).rejects.toBeInstanceOf(ConfigError);
   });
 
   it("throws ConfigError for an empty query", async () => {
-    const config = { ...plane.config, knowledgeEnabled: true } as typeof plane.config;
-    const client = new KnowledgeClient(config);
+    const client = enabled();
     await expect(client.search("")).rejects.toBeInstanceOf(ConfigError);
     await expect(client.search("   ")).rejects.toBeInstanceOf(ConfigError);
   });
 
   it("throws ConfigError when knowledgeBase is undefined and roster is empty", async () => {
-    const config = { ...plane.config, knowledgeEnabled: true } as typeof plane.config;
-    const client = new KnowledgeClient(config);
     // KNOWLEDGE_BASES unset → empty roster → ConfigError.
-    await expect(client.search("anything")).rejects.toBeInstanceOf(ConfigError);
+    await expect(enabled().search("anything")).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it("makes no request when it refuses locally", async () => {
+    await enabled().search("").catch(() => undefined);
+    expect(fake.received).toHaveLength(0);
   });
 });
 
 describe("KnowledgeClient.search HTTP contract", () => {
-  it("POST /knowledge/search with the correct body and returns results", async () => {
-    addKnowledgeRoute(plane.memory, {
-      status: 200,
-      body: {
-        results: [
-          {
-            content: "chunk text",
-            documentRef: "doc-1",
-            chunkIndex: 0,
-            startOffset: 0,
-            endOffset: 10,
-            mimeType: "text/plain",
-            score: 0.92,
-          },
-        ],
-      },
-    });
+  it("POST /knowledge/search with the correct body and returns the launcher's results", async () => {
+    const results = await enabled().search("find this", "kb-alpha", 5, 0.5);
 
-    const config = {
-      ...plane.config,
-      knowledgeEnabled: true,
-      memoryBaseUrl: plane.memory.baseUrl,
-    } as typeof plane.config;
+    const golden = fake.golden(ROUTE).response.body as { results: unknown[] };
+    expect(results).toEqual(golden.results);
 
-    const client = new KnowledgeClient(config);
-    const results = await client.search("find this", "kb-alpha", 5, 0.5);
-
-    expect(results).toHaveLength(1);
-    expect(results[0]?.content).toBe("chunk text");
-    expect(results[0]?.score).toBe(0.92);
-
-    const req = plane.memory.requests[0];
+    const req = fake.received[0];
     expect(req?.method).toBe("POST");
     expect(req?.path).toBe("/knowledge/search");
-    expect(req?.json()).toMatchObject({
-      knowledgeBase: "kb-alpha",
-      query: "find this",
-      topK: 5,
-      threshold: 0.5,
-    });
+    expect(req?.json()).toEqual({ knowledgeBase: "kb-alpha", query: "find this", topK: 5, threshold: 0.5 });
   });
 
-  it("returns empty array when results key is absent", async () => {
-    addKnowledgeRoute(plane.memory, { status: 200, body: {} });
-
-    const config = {
-      ...plane.config,
-      knowledgeEnabled: true,
-      memoryBaseUrl: plane.memory.baseUrl,
-    } as typeof plane.config;
-
-    const client = new KnowledgeClient(config);
-    const results = await client.search("q", "kb-beta");
-    expect(results).toEqual([]);
+  it("returns an empty array when the launcher finds nothing", async () => {
+    fake.respond(ROUTE, 200, { results: [] });
+    expect(await enabled().search("q", "kb-beta")).toEqual([]);
   });
 
-  it("throws EndpointError on non-200", async () => {
-    addKnowledgeRoute(plane.memory, { status: 503, body: "unavailable" });
-
-    const config = {
-      ...plane.config,
-      knowledgeEnabled: true,
-      memoryBaseUrl: plane.memory.baseUrl,
-    } as typeof plane.config;
-
-    const client = new KnowledgeClient(config);
-    const err = await client.search("q", "kb-gamma").catch((e: unknown) => e);
+  it("throws EndpointError carrying the status of a refusal", async () => {
+    fake.useGolden(ROUTE, "refuses-a-knowledge-base-not-granted");
+    const err = await enabled().search("q", "payroll").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EndpointError);
-    expect((err as EndpointError).status).toBe(503);
+    expect((err as EndpointError).status).toBe(403);
+  });
+
+  it("throws EndpointError when the token service fails", async () => {
+    fake.respond(ROUTE, 502, "knowledge search failed\n");
+    const err = await enabled().search("q", "kb-gamma").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EndpointError);
+    expect((err as EndpointError).status).toBe(502);
   });
 
   it("uses default topK=10 and threshold=0.0", async () => {
-    addKnowledgeRoute(plane.memory, { status: 200, body: { results: [] } });
-
-    const config = {
-      ...plane.config,
-      knowledgeEnabled: true,
-      memoryBaseUrl: plane.memory.baseUrl,
-    } as typeof plane.config;
-
-    const client = new KnowledgeClient(config);
-    await client.search("q", "kb-delta");
-
-    const req = plane.memory.requests[0];
-    expect(req?.json()).toMatchObject({ topK: 10, threshold: 0.0 });
+    await enabled().search("q", "kb-delta");
+    expect(fake.received[0]?.json()).toMatchObject({ topK: 10, threshold: 0.0 });
   });
 });

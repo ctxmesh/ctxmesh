@@ -23,12 +23,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/go-logr/logr"
 	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authnv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,9 +38,12 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // theMCPKey is the bearer key the BYO-MCP tests paste. DELIBERATELY recognizable
@@ -93,6 +98,11 @@ func fakeMCPServer(t *testing.T, requireKey bool) *httptest.Server {
 // newMCPServer builds a Server with the BYO-MCP flow ENABLED, the fake caller
 // factory, and a real HTTP client (the probe reaches the httptest MCP server). It
 // returns the server, the token-recording factory, and the log buffer.
+//
+// It is wired as production is: an in-memory ToolRegistry store and an authorizer that
+// allows, because registration authorizes before it probes — a server with neither would
+// refuse every register before reaching the path under test. A test that needs a denial
+// or seeded registries calls wireTRStore again, which replaces both.
 func newMCPServer(t *testing.T, c client.Client, requireApproval bool) (*Server, *fakeCallerClientFactory, *logBuffer) {
 	t.Helper()
 	factory := &fakeCallerClientFactory{client: c}
@@ -108,6 +118,7 @@ func newMCPServer(t *testing.T, c client.Client, requireApproval bool) (*Server,
 		Version:            "test",
 		Log:                log,
 	})
+	wireTRStore(t, s, nil)
 	return s, factory, lb
 }
 
@@ -135,7 +146,7 @@ func registerBody(t *testing.T, name, url, key string) []byte {
 // any log line.
 func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	mcp := fakeMCPServer(t, true)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := registrantClient(t, interceptor.Funcs{})
 	s, factory, lb := newMCPServer(t, c, false)
 	store := wireTRStore(t, s, nil) // register writes the ToolRegistry to the store (retired, ADR 0044)
 
@@ -153,7 +164,7 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	assert.Equal(t, "my-weather-mcp", resp.Server.Name)
 	assert.Equal(t, mcp.URL, resp.Server.URL)
 	assert.Equal(t, 2, resp.Server.ToolCount)
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, resp.Server.Status, "self-serve default")
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, resp.Server.Status, "self-serve default")
 	assert.Equal(t, "my-weather-mcp", resp.Server.SecretName)
 
 	// The response carries the tools with their inputSchema.
@@ -167,7 +178,7 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	var parsedSchema map[string]any
 	require.NoError(t, json.Unmarshal(weather.InputSchema, &parsedSchema))
 	assert.Equal(t, "object", parsedSchema["type"])
-	assert.Equal(t, agentsv1alpha1.SourceUserAdded, weather.Source)
+	assert.Equal(t, agentsv1beta1.SourceUserAdded, weather.Source)
 
 	// Created objects: Secret, SecretBinding, ToolRegistry, NetworkPolicy.
 	require.Len(t, resp.Created, 4)
@@ -188,10 +199,12 @@ func TestRegisterMCPDiscoversToolsAndCapturesInputSchema(t *testing.T) {
 	require.Len(t, tr.Tools, 2)
 	for _, e := range tr.Tools {
 		require.NotEmpty(t, e.InputSchema, "ToolRegistry entry MUST store inputSchema for m14.6b")
-		assert.Equal(t, agentsv1alpha1.SourceUserAdded, e.Source)
-		assert.Equal(t, agentsv1alpha1.ApprovalApproved, e.ApprovalStatus)
+		assert.Equal(t, agentsv1beta1.SourceUserAdded, e.Source)
+		assert.Equal(t, agentsv1beta1.ApprovalApproved, e.ApprovalStatus)
 		assert.Equal(t, mcp.URL, e.URL)
 	}
+	assert.Equal(t, visibilityPrivate, tr.Labels[labelMCPVisibility], "a keyed server is private")
+	assert.Equal(t, userGrantHash(oauthRegistrant), tr.Labels[labelMCPOwner], "and belongs to its registrant")
 
 	// The per-server egress NetworkPolicy exists, is egress-only, and bounds to the
 	// server's port (never a blanket open).
@@ -256,13 +269,13 @@ func TestRegisterMCPHardenedIsPendingApprovalNoEgress(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	var resp RegisterMCPServerResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, resp.Server.Status, "hardened → pending-approval")
+	assert.Equal(t, agentsv1beta1.ApprovalPending, resp.Server.Status, "hardened → pending-approval")
 
 	// The catalog entry (store row) is pending.
 	tr, trErr := store.Get(context.Background(), "prod", "hardened-mcp")
 	require.NoError(t, trErr)
 	for _, e := range tr.Tools {
-		assert.Equal(t, agentsv1alpha1.ApprovalPending, e.ApprovalStatus)
+		assert.Equal(t, agentsv1beta1.ApprovalPending, e.ApprovalStatus)
 	}
 
 	// B1: NO NetworkPolicy is created for a pending server — the created list
@@ -276,15 +289,58 @@ func TestRegisterMCPHardenedIsPendingApprovalNoEgress(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(err), "no egress NetworkPolicy exists for a pending server")
 }
 
+// TestRegisterKeyedMCPWithoutIdentityIsRefused: a keyed server is private to whoever registers
+// it. A registrant the API server cannot name would get a private server stored without an owner,
+// visible to nobody, the registrant included. The register is refused before the server is
+// contacted and nothing is stored. An open server is team-visible and still registers.
+func TestRegisterKeyedMCPWithoutIdentityIsRefused(t *testing.T) {
+	register := func(t *testing.T, key string) (*httptest.ResponseRecorder, *atomic.Int32, toolregistry.Store, *bool) {
+		inner := fakeMCPServer(t, key != "")
+		srv, hits := countingServer(t, inner.Config.Handler)
+		createCalled := false
+		// A plain fake client answers a SelfSubjectReview with no username.
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*authnv1.SelfSubjectReview); !ok {
+					createCalled = true
+				}
+				return c.Create(ctx, obj, opts...)
+			},
+		}).Build()
+		s, _, _ := newMCPServer(t, c, false)
+		store := wireTRStore(t, s, nil)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/api/mcpservers", bytes.NewReader(registerBody(t, "anon-mcp", srv.URL, key)))
+		req.Header.Set("Authorization", "Bearer developer-persona-token")
+		s.Handler().ServeHTTP(rec, req)
+		return rec, hits, store, &createCalled
+	}
+
+	t.Run("keyed", func(t *testing.T) {
+		rec, hits, store, created := register(t, theMCPKey)
+		require.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "failed to resolve caller identity")
+		assert.Zero(t, hits.Load(), "the server is never contacted")
+		assert.False(t, *created, "no object is created")
+		_, err := store.Get(context.Background(), "prod", "anon-mcp")
+		assert.ErrorIs(t, err, controlplane.ErrNotFound, "no server is stored")
+	})
+
+	t.Run("open", func(t *testing.T) {
+		rec, _, store, _ := register(t, "")
+		require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+		tr, err := store.Get(context.Background(), "prod", "anon-mcp")
+		require.NoError(t, err)
+		assert.Equal(t, visibilityTeam, tr.Labels[labelMCPVisibility])
+	})
+}
+
 // TestRegisterMCPUnreachableIs4xxNoOrphan proves an unreachable / mis-speaking MCP
 // server yields an honest 4xx (NOT a 500) and NO CRDs are created (no partial
 // orphan) — the probe fails before any create.
 func TestRegisterMCPUnreachableIs4xxNoOrphan(t *testing.T) {
 	createCalled := false
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptorCreateFlag(&createCalled)).
-		Build()
+	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, _ := newMCPServer(t, c, false)
 
 	rec := httptest.NewRecorder()
@@ -329,10 +385,7 @@ func TestRegisterMCPNonMCPEndpointIs4xx(t *testing.T) {
 func TestRegisterMCPBadKeyIs422(t *testing.T) {
 	mcp := fakeMCPServer(t, true) // requires theMCPKey
 	createCalled := false
-	c := fake.NewClientBuilder().
-		WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptorCreateFlag(&createCalled)).
-		Build()
+	c := registrantClient(t, interceptorCreateFlag(&createCalled))
 	s, _, lb := newMCPServer(t, c, false)
 
 	rec := httptest.NewRecorder()
@@ -371,9 +424,9 @@ func TestRegisterMCPViewerForbiddenIs403(t *testing.T) {
 // name) collides → a clean 409, never a silent overwrite.
 func TestRegisterMCPReconnectIs409(t *testing.T) {
 	mcp := fakeMCPServer(t, false)
-	existing := &agentsv1alpha1.ToolRegistry{
+	existing := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "dup-mcp", Namespace: "prod"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "x"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "x"}}},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
 	s, _, _ := newMCPServer(t, c, false)
@@ -456,23 +509,23 @@ func TestListMCPServersEmpty(t *testing.T) {
 // TestListMCPServersProjectsNoSecrets proves the list projects register-managed
 // registries onto the summary WITHOUT any secret material — only the Secret NAME.
 func TestListMCPServersProjectsNoSecrets(t *testing.T) {
-	tr := &agentsv1alpha1.ToolRegistry{
+	tr := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "weather-mcp",
 			Namespace: "prod",
 			Labels:    map[string]string{labelManagedBy: managedByMCP},
 			Annotations: map[string]string{
 				annMCPURL:    "http://weather.example/mcp",
-				annMCPStatus: agentsv1alpha1.ApprovalApproved,
+				annMCPStatus: agentsv1beta1.ApprovalApproved,
 				annMCPSecret: "weather-mcp",
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "get_weather"}}},
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "get_weather"}}},
 	}
 	// A curated (non-register) registry must be excluded (no managed-by=mcp label).
-	curated := &agentsv1alpha1.ToolRegistry{
+	curated := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "default-tools", Namespace: "prod"},
-		Spec:       agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{Name: "curated_tool"}}},
+		Spec:       agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{Name: "curated_tool"}}},
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "weather-mcp", Namespace: "prod"},
@@ -515,24 +568,24 @@ func TestListMCPServersForbiddenIs403(t *testing.T) {
 // TestListToolsMergesCuratedAndUserAdded proves GET /api/tools merges curated +
 // user-added tools, includes inputSchema, no secrets, [] not null.
 func TestListToolsMergesCuratedAndUserAdded(t *testing.T) {
-	curated := &agentsv1alpha1.ToolRegistry{
+	curated := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: "default-tools", Namespace: "prod"},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{
 			// A legacy curated entry with no explicit source/status/schema.
 			{Name: "curated_tool", Description: "an operator tool"},
 		}},
 	}
-	userAdded := &agentsv1alpha1.ToolRegistry{
+	userAdded := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "weather-mcp",
 			Namespace: "prod",
 			Labels:    map[string]string{labelManagedBy: managedByMCP},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: []agentsv1alpha1.ToolEntry{{
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: []agentsv1beta1.ToolEntry{{
 			Name:           "get_weather",
 			Description:    "Get the weather",
-			Source:         agentsv1alpha1.SourceUserAdded,
-			ApprovalStatus: agentsv1alpha1.ApprovalApproved,
+			Source:         agentsv1beta1.SourceUserAdded,
+			ApprovalStatus: agentsv1beta1.ApprovalApproved,
 			InputSchema:    rawExt(`{"type":"object","properties":{"city":{"type":"string"}}}`),
 		}}},
 	}
@@ -560,13 +613,13 @@ func TestListToolsMergesCuratedAndUserAdded(t *testing.T) {
 	}
 	// The curated legacy entry defaults to curated/approved; no schema.
 	cur := byName["curated_tool"]
-	assert.Equal(t, agentsv1alpha1.SourceCurated, cur.Source)
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, cur.ApprovalStatus)
+	assert.Equal(t, agentsv1beta1.SourceCurated, cur.Source)
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, cur.ApprovalStatus)
 	// A legacy curated entry has no schema → the wire carries JSON null.
 	assert.Equal(t, "null", string(cur.InputSchema))
 	// The user-added entry carries its inputSchema + source.
 	wea := byName["get_weather"]
-	assert.Equal(t, agentsv1alpha1.SourceUserAdded, wea.Source)
+	assert.Equal(t, agentsv1beta1.SourceUserAdded, wea.Source)
 	require.NotNil(t, wea.InputSchema, "the merged catalog MUST include inputSchema")
 	var parsedSchema map[string]any
 	require.NoError(t, json.Unmarshal(wea.InputSchema, &parsedSchema))

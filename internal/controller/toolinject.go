@@ -26,56 +26,28 @@ import (
 )
 
 const (
-	// DiscoveryImage is the tool-discovery sidecar image (Dockerfile.discovery,
-	// built by `make docker-build-discovery`). dev.local/ prefix → Knative
-	// skips tag→digest resolution for the local image (same rationale as the
-	// collector image).
-	DiscoveryImage = "dev.local/agent-discovery:0.1.0"
-
-	// DiscoveryContainerName is the discovery sidecar container name in the pod.
-	DiscoveryContainerName = "tool-discovery"
-
-	// discoveryPort is the sidecar's control/query port. NOT declared as a
-	// container port — Knative permits exactly one port across the pod (the
-	// user container's). The sidecar still binds it inside the shared netns and
-	// the controller reaches it on the pod IP.
-	discoveryPort = 2999
-
-	// toolsMountPath is where the <agent>-tools ConfigMap is mounted; the
-	// sidecar reads TOOLS_JSON_PATH=<toolsMountPath>/tools.json for cold start.
-	toolsMountPath = "/etc/agent"
+	// toolsMountPath is where the <agent>-tools ConfigMap is mounted in the agent container. The
+	// launcher serves the manifest on :2999 and follows its updates; the SDKs read the file directly
+	// when :2999 is not answering. Not /etc/agent itself: the prompt, guardrail and skill volumes mount
+	// beneath that.
+	toolsMountPath = "/etc/agent/tools"
 
 	// toolsVolumeName is the pod volume name for the tools ConfigMap.
 	toolsVolumeName = "agent-tools"
+
+	// envToolsJSONPath names the mounted manifest for the launcher and the SDKs.
+	envToolsJSONPath = "TOOLS_JSON_PATH"
 )
 
-// discoverySidecarContainer builds the discovery sidecar container. It declares
-// no container ports (Knative single-port rule), mounts the <agent>-tools
-// ConfigMap read-only, and carries the cold-start env the sidecar reads. image is the
-// resolved sidecar image (COLLECTOR_IMAGE-style override, OPS-1) — DiscoveryImage default.
-func discoverySidecarContainer(image string) corev1.Container {
-	return corev1.Container{
-		Name:  DiscoveryContainerName,
-		Image: image,
-		Env: []corev1.EnvVar{
-			{Name: "DISCOVERY_PORT", Value: fmt.Sprintf("%d", discoveryPort)},
-			{Name: "TOOLS_JSON_PATH", Value: toolsMountPath + "/" + toolsConfigMapKey},
-		},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("25m"),
-				corev1.ResourceMemory: resource.MustParse("32Mi"),
-			},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: toolsVolumeName, MountPath: toolsMountPath, ReadOnly: true},
-		},
-	}
+// toolsMount mounts the <agent>-tools ConfigMap read-only into the agent container. A whole-volume
+// mount, never subPath: the kubelet does not update a subPath mount when the ConfigMap changes.
+func toolsMount() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: toolsVolumeName, MountPath: toolsMountPath, ReadOnly: true}
 }
 
 // toolsVolume is the ConfigMap-backed volume mounting the <agent>-tools CM.
 // Optional so the pod starts even before the binding controller has written the
-// CM (cold start then reads an absent file and serves empty until the push).
+// CM: the launcher serves an empty manifest until the kubelet projects it.
 func toolsVolume(agentName string) corev1.Volume {
 	optional := true
 	return corev1.Volume{

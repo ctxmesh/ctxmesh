@@ -27,7 +27,7 @@ import (
 
 // Validate replicates the PromptVersion CRD's API-server schema validation for the
 // write path once PromptVersion writes leave the CRD (ADR 0044): the git pointer
-// fields are all required non-empty (MinLength=1 in api/v1alpha1), and the object
+// fields are all required non-empty (MinLength=1 in api/v1beta1), and the object
 // name/namespace must be valid Kubernetes identifiers (the API server enforced
 // DNS-1123 subdomain names). It returns an error wrapping controlplane.ErrInvalid
 // so the BFF maps it to 422; nil when the record is valid.

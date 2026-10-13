@@ -51,7 +51,7 @@ const (
 // fields that shape the manifest and the pod template. The controller resolves
 // each binding to one of these (dropping invalid ones) before rendering.
 //
-// It deliberately does NOT depend on the api/v1alpha1 types so the render logic
+// It deliberately does NOT depend on the api/v1beta1 types so the render logic
 // stays a pure, dependency-light unit under test.
 type Binding struct {
 	// BindingName is the MCPToolBinding object name. It orders deterministic
@@ -174,18 +174,17 @@ func normalizeSchema(raw json.RawMessage) json.RawMessage {
 // StructuralDigest is the load-bearing hash for the Knative revision name: it
 // captures ONLY the pod-template shape a binding set induces — which sidecar
 // tool containers exist (by name + image + assigned port) and whether the
-// discovery sidecar/volume are present at all. It deliberately EXCLUDES
-// remote-mode endpoints and the manifest version, because a remote URL change
-// is a manifest-only (hot-path) update that must NOT roll a new revision
-// (specs/mcp-tools.md — "Hot path vs cold path"). Remote pod-template state is
-// identical regardless of the URL: the discovery sidecar + CM volume are the
-// same containers.
+// tools volume is mounted at all. It deliberately EXCLUDES remote-mode endpoints
+// and the manifest version, because a remote URL change is a manifest-only
+// (hot-path) update that must NOT roll a new revision (specs/mcp-tools.md —
+// "Hot path vs cold path"). Remote pod-template state is identical regardless of
+// the URL: the same CM volume and mount.
 //
 // Contract, unit-tested in both directions:
 //   - add/remove a binding, or change a sidecar image → digest changes → new
 //     revision name → pod rolls (deploy-time semantics).
 //   - change only a remote URL → digest UNCHANGED → same revision name → no
-//     roll → restart-free hot path (push + SSE propagate the manifest).
+//     roll → restart-free hot path (the launcher follows the mounted manifest).
 //
 // The empty binding set returns "" so callers can special-case "no bindings"
 // (revision name stays the bare spec-hash, unchanged from pre-M4 behaviour).
@@ -195,8 +194,8 @@ func StructuralDigest(sidecars []SidecarTool, hasBindings bool) string {
 	}
 
 	// Canonical, order-independent shape. Sidecar containers by
-	// name/image/port; a marker that the discovery sidecar + volume are present
-	// (true whenever hasBindings). Remote URLs are intentionally absent.
+	// name/image/port; a marker that the tools volume is mounted into the agent
+	// container (true whenever hasBindings). Remote URLs are intentionally absent.
 	sorted := make([]SidecarTool, len(sidecars))
 	copy(sorted, sidecars)
 	slices.SortFunc(sorted, func(a, b SidecarTool) int {
@@ -204,10 +203,12 @@ func StructuralDigest(sidecars []SidecarTool, hasBindings bool) string {
 	})
 
 	type shape struct {
-		DiscoverySidecar bool          `json:"discovery"`
-		Sidecars         []SidecarTool `json:"sidecars"`
+		// AgentMount replaced a discovery-sidecar marker; the new key gives every tool-bound agent a new
+		// revision name, which is what lands the new pod shape on an existing agent.
+		AgentMount bool          `json:"toolsMount"`
+		Sidecars   []SidecarTool `json:"sidecars"`
 	}
-	b, err := json.Marshal(shape{DiscoverySidecar: true, Sidecars: sorted})
+	b, err := json.Marshal(shape{AgentMount: true, Sidecars: sorted})
 	if err != nil {
 		return "invalid"
 	}

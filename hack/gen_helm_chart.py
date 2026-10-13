@@ -7,10 +7,12 @@ documents, buckets each by component, and writes three template files:
   templates/crds.yaml          — the CustomResourceDefinitions (always installed)
   templates/control-plane.yaml — namespace, RBAC, controller-manager, gateway,
                                  metrics service (the production control plane)
-  templates/dev-data-plane.yaml— statelayer (Valkey) + objectstore (MinIO) +
-                                 their dev creds/config — gated by
-                                 `.Values.devDataPlane.enabled` (dev/trial ONLY,
-                                 PRD §23; production brings its own data plane)
+  templates/dev-data-plane.yaml— postgres + statelayer (Valkey) + objectstore
+                                 (SeaweedFS) + nats and their dev creds/config —
+                                 gated by `.Values.devDataPlane.enabled` (dev/trial
+                                 ONLY, PRD §23; production brings its own data
+                                 plane); objectstore and nats each have their own
+                                 switch inside it
   templates/bff.yaml           — the Go BFF (UI server-side layer) Deployment +
                                  Service + its least-privilege SA/RBAC (ADR 0011:
                                  no agent-CRD access) — gated by
@@ -200,17 +202,54 @@ DURABILITY_KNOB_ENV = [
     ("KNOWLEDGE_SETTLE_WINDOW", "knowledgeSettleWindow"),
 ]
 
-# MCP_GRANT_HMAC_KEY (M150 m150.2): the per-cluster salt for MCP grant identity hashes.
-# config/bff hardcodes "" so the render is unchanged and the honest warning still fires;
-# the chart templates it so an install can actually provide one.
-MCP_HMAC_ENV = [("MCP_GRANT_HMAC_KEY", "bff.mcp.grantHmacKey")]
+# MCP_GRANT_HMAC_KEY (M150 m150.2, ADR 0154): the per-cluster salt for MCP grant identity
+# hashes, read from a Secret. config/bff references the chart's default Secret name; the chart
+# renders that Secret from bff.mcp.grantHmacKey (templates/grant-hmac-secret.yaml) or points at
+# an operator's own Secret named by bff.mcp.grantHmacKeySecret.
+# A Secret the operator names must exist: optional only for the chart's own, so a missing one stops the
+# pod at CreateContainerConfigError instead of starting with unsalted hashes.
+GRANT_HMAC_SECRET_KUSTOMIZE = (
+    "              key: MCP_GRANT_HMAC_KEY\n"
+    "              name: ctxmesh-grant-hmac\n"
+    "              optional: true\n"
+)
+GRANT_HMAC_SECRET_HELM = (
+    "              key: MCP_GRANT_HMAC_KEY\n"
+    '              name: {{ .Values.bff.mcp.grantHmacKeySecret | default "ctxmesh-grant-hmac" }}\n'
+    "              optional: {{ not .Values.bff.mcp.grantHmacKeySecret }}\n"
+)
+
+# The token service's NetworkPolicy admits agent pods from every namespace but the install's
+# (ADR 0154). The install namespace is an entry in a value list, which the namespace: rule cannot
+# reach.
+TOKEN_SERVICE_NP_NAMESPACE_KUSTOMIZE = (
+    "          operator: NotIn\n"
+    "          values:\n"
+    f"          - {NS_KUSTOMIZE}\n"
+)
+TOKEN_SERVICE_NP_NAMESPACE_HELM = (
+    "          operator: NotIn\n"
+    "          values:\n"
+    "          - {{ .Values.namespace }}\n"
+)
+
+# The bundled NATS admits KEDA's operator to its monitoring port, where the nats-jetstream scaler reads an
+# agent's queue. config/nats names KEDA's default namespace and operator label; the chart takes both from
+# devDataPlane.nats.kedaOperator, whose defaults render the kustomize literal.
+NATS_KEDA_NP_KUSTOMIZE = (
+    "          kubernetes.io/metadata.name: keda\n"
+    "      podSelector:\n"
+    "        matchLabels:\n"
+    "          app: keda-operator\n"
+)
+NATS_KEDA_NP_HELM = (
+    "          kubernetes.io/metadata.name: {{ .Values.devDataPlane.nats.kedaOperator.namespace }}\n"
+    "      podSelector:\n"
+    "        matchLabels:\n"
+    "          {{- toYaml .Values.devDataPlane.nats.kedaOperator.podLabels | nindent 10 }}\n"
+)
 
 OPTIONAL_MODEL_ENV = [
-    # MANAGED_AGENT_IMAGE (M153): the runtime image a MANAGED agent runs. The expander's
-    # compiled-in default is a public GHCR tag — right for a stock install, wrong wherever
-    # a registry is mirrored or air-gapped, and until now changeable only by patching the
-    # Deployment. Empty keeps the compiled-in default, byte-identical to before.
-    ("MANAGED_AGENT_IMAGE", "bff.managedAgentImage"),
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
     ("DISCOVERY_EMBEDDING_ROUTE", "bff.discoveryEmbeddingRoute"),
@@ -223,6 +262,8 @@ OPTIONAL_MODEL_ENV = [
     ("ASYNC_BACKEND", "bff.asyncBackend"),
     ("NATS_URL", "bff.natsURL"),
     ("NATS_CREDENTIALS_FILE", "bff.natsCredentialsFile"),
+    ("NATS_ACCOUNT", "bff.natsAccount"),
+    ("ASYNC_DELIVERY_CONCURRENCY", "bff.asyncDeliveryConcurrency"),
 ]
 
 COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
@@ -231,6 +272,18 @@ COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
 COST_ROLLUP_ENABLED_ENV_HELM = (
     "        - name: COST_ROLLUP_ENABLED\n"
     "          value: {{ .Values.bff.costRollupEnabled | quote }}"
+)
+
+# RUNCAP_REQUIRE_POP (ADR 0124): config/bff leaves it unset, so the BFF requires proof-of-possession
+# whenever it can bind (it has the state layer). bff.runCapabilities.requireProofOfPossession sets it
+# explicitly, true or false, and an empty value renders nothing (== kustomize, no drift). It has no
+# kustomize literal to replace, so it is appended after COST_ROLLUP_ENABLED, which only the BFF has.
+RUNCAP_REQUIRE_POP_ENV_HELM = (
+    "\n        {{- $pop := (.Values.bff.runCapabilities | default dict).requireProofOfPossession }}"
+    '\n        {{- if or (kindIs "bool" $pop) (and (kindIs "string" $pop) (ne $pop "")) }}'
+    "\n        - name: RUNCAP_REQUIRE_POP"
+    "\n          value: {{ $pop | toString | quote }}"
+    "\n        {{- end }}"
 )
 
 # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2): config/bff hardcodes "false" (no-OBO install
@@ -255,6 +308,81 @@ TOKEN_SERVICE_TLS_REQUIRED_ENV_KUSTOMIZE = (
 TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM = (
     "        - name: TOKEN_SERVICE_TLS_REQUIRED\n"
     "          value: {{ .Values.tokenService.tls.required | quote }}"
+)
+
+# The token-service's credential backend (ADR 0152 §1). config/token-service carries no
+# CREDENTIAL_BACKEND* env (unset = the kubernetes backend), so there is no kustomize literal to
+# replace: the block is appended after TOKEN_SERVICE_TLS_REQUIRED, which only the token-service has.
+# type kubernetes (the default) renders NOTHING, so the default render == kustomize (no drift).
+# Otherwise each set value renders as one env var named after its values path; the token-service
+# validates them and refuses to start on a bad one, naming the variable, so the chart only renders.
+CREDENTIAL_BACKEND_ENV_HELM = (
+    "\n        {{- $cb := .Values.tokenService.credentialBackend | default dict }}"
+    '\n        {{- $cbType := $cb.type | default "kubernetes" | toString | lower }}'
+    '\n        {{- if ne $cbType "kubernetes" }}'
+    "\n        - name: CREDENTIAL_BACKEND"
+    "\n          value: {{ $cbType | quote }}"
+    "\n        {{- end }}"
+    '\n        {{- if eq $cbType "postgres" }}'
+    "\n        {{- $pg := $cb.postgres | default dict }}"
+    "\n        {{- with $pg.dsnSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_DSN_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- $enc := $pg.encryption | default dict }}"
+    "\n        {{- with $enc.localKEKSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_LOCAL_KEK_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with $enc.openBaoTransit }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_ADDRESS"
+    "\n          value: {{ .address | quote }}"
+    "\n        {{- with .tokenSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_TOKEN_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .mountPath }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_MOUNT_PATH"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .keyPrefix }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_KEY_PREFIX"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with .caSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_OPENBAO_TRANSIT_CA_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    "\n        {{- with $enc.kmsV2 }}"
+    "\n        - name: CREDENTIAL_BACKEND_POSTGRES_KMSV2_ENDPOINT"
+    "\n          value: {{ .endpoint | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
+    '\n        {{- if eq $cbType "remote" }}'
+    "\n        {{- $rm := $cb.remote | default dict }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_ENDPOINT"
+    "\n          value: {{ $rm.endpoint | quote }}"
+    "\n        {{- $mtls := $rm.mtls | default dict }}"
+    "\n        {{- with $mtls.caSecretRef }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_NAME"
+    "\n          value: {{ .name | quote }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CA_SECRET_KEY"
+    "\n          value: {{ .key | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- with $mtls.clientTLSSecretName }}"
+    "\n        - name: CREDENTIAL_BACKEND_REMOTE_MTLS_CLIENT_TLS_SECRET_NAME"
+    "\n          value: {{ . | quote }}"
+    "\n        {{- end }}"
+    "\n        {{- end }}"
 )
 
 # The console OIDC/SSO seam (m19.6, ADR 0020). config/bff hardcodes the OFF defaults
@@ -289,23 +417,14 @@ OIDC_CLIENT_ID_ENV_HELM = (
 # OPS-4a — the controller-injected sidecar images + the OBO egress-sidecar config (ADR 0030) ->
 # Helm values. config/manager hardcodes each to its os.Getenv code default (empty image / off), so
 # the DEFAULT render == kustomize (no drift); the chart templates them from controllerManager.* so a
-# real install points the injected collector/discovery/egress images at its registry (they
-# ImagePullBackOff off dev.local — OPS-1) and enables OBO egress. MCP_CREDENTIAL_NAMESPACE is NOT
-# here: the manager shares the BFF's locked namespace via the existing bff.mcp.credentialNamespace
-# replace below (one namespace across the BFF + the controller's OBO injection, by construction).
+# real install points the injected collector/egress images at its registry (they
+# ImagePullBackOff off dev.local — OPS-1) and enables OBO egress.
 COLLECTOR_IMAGE_ENV_KUSTOMIZE = (
     '        - name: COLLECTOR_IMAGE\n' '          value: ""'
 )
 COLLECTOR_IMAGE_ENV_HELM = (
     "        - name: COLLECTOR_IMAGE\n"
     '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.collector "ctx" $) | quote }}'
-)
-DISCOVERY_IMAGE_ENV_KUSTOMIZE = (
-    '        - name: DISCOVERY_IMAGE\n' '          value: ""'
-)
-DISCOVERY_IMAGE_ENV_HELM = (
-    "        - name: DISCOVERY_IMAGE\n"
-    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.injectedImages.discovery "ctx" $) | quote }}'
 )
 MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE = (
     '        - name: MCP_OBO_EGRESS_ENABLED\n' '          value: "false"'
@@ -326,6 +445,17 @@ EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE = (
 EGRESS_SIDECAR_IMAGE_ENV_HELM = (
     "        - name: EGRESS_SIDECAR_IMAGE\n"
     '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.controllerManager.oboEgress.sidecarImage "ctx" $) | quote }}'
+)
+# MANAGED_AGENT_IMAGE: the image every console-created (managed) agent runs. It was an optional
+# empty value, and empty meant the BFF's compiled-in ghcr.io/ctxmesh/managed-agent:latest, a tag the
+# release never publishes: every agent a stock install's console created waited on a missing image.
+# It is versioned like the injected images now.
+MANAGED_AGENT_IMAGE_ENV_KUSTOMIZE = (
+    '        - name: MANAGED_AGENT_IMAGE\n' '          value: ""'
+)
+MANAGED_AGENT_IMAGE_ENV_HELM = (
+    "        - name: MANAGED_AGENT_IMAGE\n"
+    '          value: {{ include "ctxmesh.injectedImage" (dict "ref" .Values.bff.managedAgentImage "ctx" $) | quote }}'
 )
 # MCP_CAPABILITY_PUBLIC_KEY is NO LONGER templated (M124/Gate A): config/manager now reads it from the
 # bff-capability Secret via valueFrom.secretKeyRef (the keygen hook provisions it). The chart copies that
@@ -355,13 +485,112 @@ TOKEN_SERVICE_URL_ENV_HELM = (
 # dev posture, so the DEFAULT render matches, no drift); the chart templates it from
 # devDataPlane.enabled so a `profile: production` render sets it "false" and the controller injects
 # NO dev-only object-store / Langfuse feedback creds into agent pods (OPS-2). One source of truth
-# with the bundled dev Valkey/MinIO, which are gated on the same value.
+# with the bundled dev Valkey/object store, which are gated on the same value.
 DEV_DATA_PLANE_ENV_KUSTOMIZE = (
     '        - name: DEV_DATA_PLANE\n' '          value: "true"'
 )
 DEV_DATA_PLANE_ENV_HELM = (
     "        - name: DEV_DATA_PLANE\n"
     "          value: {{ .Values.devDataPlane.enabled | quote }}"
+)
+
+# The bundled object store can be off while the rest of the dev data plane is on
+# (devDataPlane.objectstore.enabled). Both ends follow it: the controller withholds the object-store
+# env from agent pods, and the BFF gets no OBJECT_STORE_ADDR, so KB uploads and run fixtures answer
+# 501 instead of dialling a Service that is not rendered. Defaults render the kustomize literals.
+OBJECT_STORE_DEPLOYED = (
+    "and .Values.devDataPlane.enabled .Values.devDataPlane.objectstore.enabled"
+)
+DEV_OBJECT_STORE_ENV_KUSTOMIZE = (
+    '        - name: DEV_OBJECT_STORE\n' '          value: "true"'
+)
+DEV_OBJECT_STORE_ENV_HELM = (
+    "        - name: DEV_OBJECT_STORE\n"
+    "          value: {{ if " + OBJECT_STORE_DEPLOYED + ' }}"true"{{ else }}"false"{{ end }}'
+)
+BFF_OBJECT_STORE_ADDR_KUSTOMIZE = (
+    "        - name: OBJECT_STORE_ADDR\n"
+    f"          value: ctxmesh-objectstore.{NS_KUSTOMIZE}.svc:9000"
+)
+BFF_OBJECT_STORE_ADDR_HELM = (
+    "        - name: OBJECT_STORE_ADDR\n"
+    "          value: {{ if " + OBJECT_STORE_DEPLOYED + " }}"
+    '{{ printf "ctxmesh-objectstore.%s.svc:9000" .Values.namespace }}{{ else }}""{{ end }}'
+)
+
+# Third-party images, keyed by repository path, to their thirdPartyImages entry in values.yaml.
+# config/ names each one in full (registry/repository:tag@digest) so the dev path and the chart pull
+# the same bytes; helm-verify holds the values defaults equal to those literals. An image the render
+# names that is neither first-party nor listed here fails the generation: a ref no value reaches is
+# a ref an air-gapped or mirrored install cannot move.
+THIRD_PARTY_IMAGES = {
+    "berriai/litellm": "litellm",
+    "valkey/valkey": "valkey",
+    "pgvector/pgvector": "postgres",
+    "library/nats": "nats",
+    "chrislusf/seaweedfs": "seaweedfs",
+}
+WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job"}
+IMAGE_LINE = re.compile(r"^([ \t]*(?:-[ \t]+)?image:[ \t]*)(\S+)[ \t]*$", re.MULTILINE)
+
+
+def template_third_party_images(doc: str) -> str:
+    """Replace each third-party `image:` literal with its thirdPartyImages value."""
+
+    def repl(m: re.Match) -> str:
+        ref = m.group(2)
+        if ref.startswith("{{"):
+            return m.group(0)  # a first-party image, already templated
+        name = ref.split("@", 1)[0]
+        last = name.rsplit("/", 1)[-1]
+        if ":" in last:
+            name = name[: len(name) - len(last)] + last.split(":", 1)[0]
+        host, _, path = name.partition("/")
+        if not path or not ("." in host or ":" in host or host == "localhost"):
+            sys.exit(
+                f"gen_helm_chart: image {ref} names no registry. Write it in full "
+                "(docker.io/library/... for an official image) so the chart and config/ agree."
+            )
+        key = THIRD_PARTY_IMAGES.get(path)
+        if key is None:
+            sys.exit(
+                f"gen_helm_chart: image {ref} has no values seam. Add {path!r} to THIRD_PARTY_IMAGES "
+                "and a thirdPartyImages entry in values.yaml."
+            )
+        return m.group(1) + '{{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.%s) }}' % key
+
+    return IMAGE_LINE.sub(repl, doc)
+
+
+def inject_pull_secrets(doc: str) -> str:
+    """Append the imagePullSecrets include to the pod template's `spec:` line."""
+    lines = doc.split("\n")
+    for i, line in enumerate(lines):
+        if line.strip() != "template:":
+            continue
+        indent = len(line) - len(line.lstrip())
+        for j in range(i + 1, len(lines)):
+            cur = lines[j]
+            if not cur.strip():
+                continue
+            cur_indent = len(cur) - len(cur.lstrip())
+            if cur_indent <= indent:
+                break
+            if cur_indent == indent + 2 and cur.strip() == "spec:":
+                lines[j] = cur.rstrip() + '{{ include "ctxmesh.imagePullSecrets" (list $ %d) }}' % (indent + 4)
+                return "\n".join(lines)
+    sys.exit(f"gen_helm_chart: no pod template spec in {kind_of(doc)}/{name_of(doc)} for imagePullSecrets")
+
+
+# AMP_REQUIRE_ATTESTATION (ADR 0153) — DEFAULT-ON. config/manager hardcodes "true" (== the kustomize default,
+# so the DEFAULT render matches → no drift); the chart templates it from controllerManager.amp.requireAttestation
+# so an operator can roll out in two steps. ternary, not `default`, so an explicit false stays false.
+AMP_REQUIRE_ATTESTATION_ENV_KUSTOMIZE = (
+    '        - name: AMP_REQUIRE_ATTESTATION\n' '          value: "true"'
+)
+AMP_REQUIRE_ATTESTATION_ENV_HELM = (
+    "        - name: AMP_REQUIRE_ATTESTATION\n"
+    '          value: {{ ternary "true" "false" .Values.controllerManager.amp.requireAttestation | quote }}'
 )
 
 # ENABLE_TENANT_LABEL_WEBHOOK (M134, ADR 0102) — DEFAULT-ON tenant-label fail-closed webhook. config/manager
@@ -379,15 +608,61 @@ ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM = (
 )
 
 # Resources whose `control-plane:` label marks them as the bundled DEV data
-# plane (in-cluster Valkey/MinIO). Production supplies its own — PRD §23 — so
+# plane (in-cluster Valkey/object store). Production supplies its own — PRD §23 — so
 # these are gated behind .Values.devDataPlane.enabled.
 DEV_DATA_PLANE_LABELS = {"statelayer", "objectstore", "postgres", "nats"}
+
+# Dev data-plane components with a switch of their own, inside devDataPlane.enabled.
+OPTIONAL_DEV_COMPONENTS = {
+    "objectstore": ".Values.devDataPlane.objectstore.enabled",
+    "nats": ".Values.devDataPlane.nats.enabled",
+}
 
 # Resources whose `control-plane:` label marks them as the Go BFF (the UI's
 # server-side layer) + its least-privilege SA/RBAC. Gated behind
 # .Values.ui.enabled (default true) so an operator can install the platform
 # headless; with the default it renders, keeping no-drift with kustomize.
 BFF_LABELS = {"bff"}
+
+# Retired kinds guard (ADR 0152). ApprovalPolicy, FeedbackStore, CredentialStore and
+# ClusterCredentialStore are no longer served or read. Helm keeps CRDs on upgrade
+# (resource-policy: keep), so their objects survive unread, and an ApprovalPolicy's approval gates
+# would stop applying with no error anywhere. The guard fails the render while any such object
+# exists. It calls lookup only for a kind the cluster serves, so a fresh install and `helm template`
+# never reach the API and render nothing (helm-verify stays no-drift). Each kind lists every version
+# a release ever served it at.
+RETIRED_KINDS_GUARD = r"""{{- /* Retired kinds guard (ADR 0152): see hack/gen_helm_chart.py. Renders no resources. */ -}}
+{{- $retired := list
+      (dict "kind" "ApprovalPolicy" "crd" "approvalpolicies.agents.ctxmesh.ai" "versions" (list "v1beta1")
+            "move" "move each into spec.runtime.toolPolicy (default, overrides, approvers) of the AgentDeployment that names it in spec.approvalPolicyRef")
+      (dict "kind" "FeedbackStore" "crd" "feedbackstores.agents.ctxmesh.ai" "versions" (list "v1beta1")
+            "move" "move each spec into spec.feedback of the AgentDeployment that names it in spec.feedbackStoreRef")
+      (dict "kind" "CredentialStore" "crd" "credentialstores.agents.ctxmesh.ai" "versions" (list "v1beta1" "v1alpha1")
+            "move" "move the backend you use into the chart value tokenService.credentialBackend")
+      (dict "kind" "ClusterCredentialStore" "crd" "clustercredentialstores.agents.ctxmesh.ai" "versions" (list "v1beta1" "v1alpha1")
+            "move" "move the backend you use into the chart value tokenService.credentialBackend") }}
+{{- $found := list }}
+{{- $crds := list }}
+{{- range $r := $retired }}
+{{- $served := "" }}
+{{- range $v := $r.versions }}
+{{- if and (not $served) ($.Capabilities.APIVersions.Has (printf "agents.ctxmesh.ai/%s/%s" $v $r.kind)) }}
+{{- $served = $v }}
+{{- end }}
+{{- end }}
+{{- if $served }}
+{{- $objs := lookup (printf "agents.ctxmesh.ai/%s" $served) $r.kind "" "" }}
+{{- $n := len ((default dict $objs).items | default list) }}
+{{- if gt $n 0 }}
+{{- $found = append $found (printf "  - %s (%d): %s." $r.kind $n $r.move) }}
+{{- $crds = append $crds $r.crd }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $found }}
+{{- fail (printf "\n\nThis release no longer serves or reads these kinds (ADR 0152), and objects of them still exist (kind, count):\n%s\nUpgrading now would drop their settings silently: an ApprovalPolicy's approval gates would stop applying.\nAfter moving them, delete the objects and the retired CRDs; deleting a CRD deletes its objects:\n  kubectl delete crd %s\nThe CHANGELOG (Unreleased) has the field-by-field migration.\n" (join "\n" $found) (join " " $crds)) }}
+{{- end }}
+"""
 
 GEN_BANNER = (
     "# ============================================================================\n"
@@ -526,7 +801,15 @@ def substitute(doc: str) -> str:
             "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
             % (env_name, val_path),
         )
-    for env_name, val_path in OPTIONAL_MODEL_ENV + MCP_HMAC_ENV:
+    doc = doc.replace(MANAGED_AGENT_IMAGE_ENV_KUSTOMIZE, MANAGED_AGENT_IMAGE_ENV_HELM)
+    doc = doc.replace(GRANT_HMAC_SECRET_KUSTOMIZE, GRANT_HMAC_SECRET_HELM)
+    if kind_of(doc) == "NetworkPolicy" and "control-plane: token-service" in doc:
+        doc = doc.replace(TOKEN_SERVICE_NP_NAMESPACE_KUSTOMIZE, TOKEN_SERVICE_NP_NAMESPACE_HELM)
+    if kind_of(doc) == "NetworkPolicy" and "control-plane: nats" in doc:
+        if NATS_KEDA_NP_KUSTOMIZE not in doc:
+            sys.exit("gen_helm_chart: the NATS NetworkPolicy no longer names KEDA's operator as config/nats did")
+        doc = doc.replace(NATS_KEDA_NP_KUSTOMIZE, NATS_KEDA_NP_HELM)
+    for env_name, val_path in OPTIONAL_MODEL_ENV:
         doc = doc.replace(
             f'        - name: {env_name}\n          value: ""',
             "        - name: %s\n          value: {{ .Values.%s | default \"\" | quote }}"
@@ -575,7 +858,7 @@ def substitute(doc: str) -> str:
     # plain HTTP, enforced under profile=production by ha-profile-guards.yaml.
     doc = doc.replace(
         TOKEN_SERVICE_TLS_REQUIRED_ENV_KUSTOMIZE,
-        TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM,
+        TOKEN_SERVICE_TLS_REQUIRED_ENV_HELM + CREDENTIAL_BACKEND_ENV_HELM,
     )
     # BFF console OIDC/SSO seam -> Helm values (m19.6, ADR 0020). With auth.oidc
     # disabled (the default) all three render == the kustomize OFF literals (no drift);
@@ -585,20 +868,24 @@ def substitute(doc: str) -> str:
     doc = doc.replace(OIDC_CLIENT_ID_ENV_KUSTOMIZE, OIDC_CLIENT_ID_ENV_HELM)
     # OPS-4a — the controller's injected-image + OBO-egress env -> Helm values. All default
     # empty/false render == the config/manager literals (no drift); a real install points the
-    # injected collector/discovery/egress-sidecar images at its registry + enables OBO egress
+    # injected collector/egress-sidecar images at its registry + enables OBO egress
     # (ADR 0030). Manager-only literals, so these never collide with the BFF/token-service docs.
     doc = doc.replace(COLLECTOR_IMAGE_ENV_KUSTOMIZE, COLLECTOR_IMAGE_ENV_HELM)
-    doc = doc.replace(DISCOVERY_IMAGE_ENV_KUSTOMIZE, DISCOVERY_IMAGE_ENV_HELM)
     doc = doc.replace(MCP_OBO_EGRESS_ENABLED_ENV_KUSTOMIZE, MCP_OBO_EGRESS_ENABLED_ENV_HELM)
     doc = doc.replace(EGRESS_SIDECAR_IMAGE_ENV_KUSTOMIZE, EGRESS_SIDECAR_IMAGE_ENV_HELM)
     # MCP_CAPABILITY_PUBLIC_KEY is now a secretKeyRef in config/manager, copied verbatim (no replace).
+    # MCP_CAPABILITY_AUDIENCE is not manager-only: the BFF and the token service carry the same literal,
+    # and every one takes the same value (hack/capability_audience.py).
     doc = doc.replace(MCP_CAPABILITY_AUDIENCE_ENV_KUSTOMIZE, MCP_CAPABILITY_AUDIENCE_ENV_HELM)
     doc = doc.replace(TOKEN_SERVICE_URL_ENV_KUSTOMIZE, TOKEN_SERVICE_URL_ENV_HELM)
-    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM)
+    doc = doc.replace(COST_ROLLUP_ENABLED_ENV_KUSTOMIZE, COST_ROLLUP_ENABLED_ENV_HELM + RUNCAP_REQUIRE_POP_ENV_HELM)
     doc = doc.replace(MCP_OBO_REQUIRED_ENV_KUSTOMIZE, MCP_OBO_REQUIRED_ENV_HELM)
     # OPS-2 — the dev-data-plane gate -> Helm value. Default "true" renders == kustomize (no drift);
     # profile=production sets devDataPlane.enabled=false so the controller injects no dev creds.
     doc = doc.replace(DEV_DATA_PLANE_ENV_KUSTOMIZE, DEV_DATA_PLANE_ENV_HELM)
+    doc = doc.replace(DEV_OBJECT_STORE_ENV_KUSTOMIZE, DEV_OBJECT_STORE_ENV_HELM)
+    doc = doc.replace(BFF_OBJECT_STORE_ADDR_KUSTOMIZE, BFF_OBJECT_STORE_ADDR_HELM)
+    doc = doc.replace(AMP_REQUIRE_ATTESTATION_ENV_KUSTOMIZE, AMP_REQUIRE_ATTESTATION_ENV_HELM)
     doc = doc.replace(ENABLE_TENANT_LABEL_WEBHOOK_ENV_KUSTOMIZE, ENABLE_TENANT_LABEL_WEBHOOK_ENV_HELM)
     # The Namespace object's own name + RoleBinding/ClusterRoleBinding subject
     # namespaces use `name:`/`namespace:` -> also parameterize the Namespace name.
@@ -693,6 +980,17 @@ def main() -> None:
 
         # Apply substitutions to every doc uniformly (image + namespace fields).
         doc = substitute(doc)
+        # A platform address that still names the default namespace points every install outside it
+        # at a Service that does not exist; each one needs a rule in substitute().
+        fixed = re.search(rf"[\w.-]*\.{re.escape(NS_KUSTOMIZE)}\.svc[\w.:/-]*", doc)
+        if fixed:
+            raise SystemExit(
+                f"{kind} {name_of(doc)}: {fixed.group(0)} names the install namespace; "
+                "template it from .Values.namespace in substitute()"
+            )
+        if kind in WORKLOAD_KINDS:
+            doc = template_third_party_images(doc)
+            doc = inject_pull_secrets(doc)
         if kind in ("Deployment", "StatefulSet") and cp in RESOURCE_DIALS:
             doc = template_resources(doc, RESOURCE_DIALS[cp])
         # The release Namespace is NOT the chart's to own (2026-09-18). It came through from
@@ -722,7 +1020,7 @@ def main() -> None:
         if kind == "CustomResourceDefinition":
             crds.append(doc)
         elif cp in DEV_DATA_PLANE_LABELS:
-            dev_data_plane.append(doc)
+            dev_data_plane.append((cp, doc))
         elif cp in BFF_LABELS:
             bff.append(doc)
         else:
@@ -738,6 +1036,7 @@ def main() -> None:
     # --- control-plane.yaml --------------------------------------------------
     with open(os.path.join(out_dir, "control-plane.yaml"), "w") as f:
         f.write(GEN_BANNER)
+        f.write(RETIRED_KINDS_GUARD)
         # Control-plane HA dials (ADR 0037 m34.5 + M50 hardening): template each control-plane
         # Deployment's replica count. The controller-manager runs --leader-elect, so >1 is a
         # hot-standby cluster (one leader reconciles). The gateway (config-rendered LiteLLM proxy)
@@ -758,6 +1057,9 @@ def main() -> None:
         }
         cp_docs = []
         for doc in control_plane:
+            # Defence in depth that an operator can turn off where it gets in the way (ADR 0154).
+            if kind_of(doc) == "NetworkPolicy" and "control-plane: token-service" in doc:
+                doc = "{{- if .Values.tokenService.networkPolicy.enabled }}\n" + doc + "\n{{- end }}"
             if kind_of(doc) == "Deployment":
                 for marker, valpath in replica_dials.items():
                     if f"control-plane: {marker}" in doc:
@@ -772,18 +1074,28 @@ def main() -> None:
 
     # --- dev-data-plane.yaml -------------------------------------------------
     # Gated: dev/trial ONLY (PRD §23). Production disables it and points the
-    # controller at an externally-managed Valkey/MinIO (values seam).
+    # controller at an externally-managed Valkey/object store (values seam).
     with open(os.path.join(out_dir, "dev-data-plane.yaml"), "w") as f:
         f.write(GEN_BANNER)
         f.write(
-            "# The bundled in-cluster Valkey (statelayer) + MinIO (objectstore)"
-            " are for\n# DEV / TRIAL ONLY (PRD §23). Deterministic dev creds,"
+            "# The bundled in-cluster Postgres, Valkey (statelayer), SeaweedFS (objectstore)"
+            " and NATS\n# are for DEV / TRIAL ONLY (PRD §23). Deterministic dev creds,"
             " never real secrets.\n"
             "# Production sets devDataPlane.enabled=false and brings its own"
             " data plane.\n"
         )
         f.write("{{- if .Values.devDataPlane.enabled }}\n")
-        f.write("\n---\n".join(dev_data_plane))
+        f.write("\n---\n".join(d for cp, d in dev_data_plane if cp not in OPTIONAL_DEV_COMPONENTS))
+        # Components with their own switch. NATS is off by default: nothing uses it until
+        # bff.asyncBackend names it. The object store is on by default: KB documents and run
+        # fixtures live there, and turning it off makes those features answer 501.
+        for cp, gate in OPTIONAL_DEV_COMPONENTS.items():
+            docs = [d for c, d in dev_data_plane if c == cp]
+            if not docs:
+                sys.exit(f"gen_helm_chart: no {cp} resources in the render, but {gate} gates them")
+            f.write("\n{{- if %s }}\n---\n" % gate)
+            f.write("\n---\n".join(docs))
+            f.write("\n{{- end }}")
         f.write("\n{{- end }}\n")
 
     # --- bff.yaml ------------------------------------------------------------

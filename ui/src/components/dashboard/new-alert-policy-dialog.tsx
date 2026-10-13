@@ -7,7 +7,7 @@ import { useFocusTrap } from "@/components/kit/use-focus-trap";
 // NewAlertPolicyDialog — the "New alert policy" create path (M144.7).
 //
 // AlertPolicy has no dedicated BFF create endpoint yet (unlike agents, which the
-// config-builder POSTs). Rather than a dead-end ("AlertPolicy rules fire…" with
+// create-agent review POSTs). Rather than a dead-end ("AlertPolicy rules fire…" with
 // no way to make one), this gives operators an honest, actionable path: a
 // ready-to-edit AlertPolicy manifest seeded with the current namespace, a Copy
 // button, and the one-liner to apply it. This is how kubectl-native platforms

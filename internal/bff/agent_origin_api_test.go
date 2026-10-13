@@ -33,6 +33,7 @@ func TestRestrictAgentOriginAPI(t *testing.T) {
 		{"GET", "/api/agents/default/foo"}, // agent detail
 		{"POST", "/api/invoke"},
 		{"POST", "/api/mcp/oauth/grant"},
+		{"POST", "/api/mcp/oauth/ticket"}, // the chatbox mints its consent ticket here
 		{"GET", "/api/traces/abc123"},
 		{"GET", "/api/traces/abc123/detail"},
 		{"GET", "/api/authconfig"},
@@ -65,6 +66,7 @@ func TestRestrictAgentOriginAPI(t *testing.T) {
 		{"GET", "/api/agents/default/foo/runs"}, // a sub-resource
 		{"GET", "/api/extauth"},                 // internal ext-auth endpoint
 		{"GET", "/api/mcpservers"},
+		{"POST", "/api/mcp/oauth/grant/redeem"}, // console origin only (ADR 0040 amendment)
 	}
 	for _, tc := range blocked {
 		if code := call(tc.m, tc.p, true); code != http.StatusNotFound || reached {

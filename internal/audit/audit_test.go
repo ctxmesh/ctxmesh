@@ -24,7 +24,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // fixedTime is a deterministic clock for the entry-shape assertions.
@@ -57,7 +57,7 @@ func TestEmit_EntryShape_CreateUpdateDelete(t *testing.T) {
 			sink := &captureSink{}
 			a := newTestAuditor(sink)
 
-			obj := &agentsv1alpha1.AgentDeployment{
+			obj := &agentsv1beta1.AgentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "checkout-agent",
 					Namespace: "team-a",
@@ -117,19 +117,19 @@ func TestSubjectFromObject(t *testing.T) {
 	}{
 		{
 			name: "no managed fields",
-			obj:  &agentsv1alpha1.AgentDeployment{},
+			obj:  &agentsv1beta1.AgentDeployment{},
 			want: unknownSubject,
 		},
 		{
 			name: "single field manager",
-			obj: &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
+			obj: &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
 				ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "argocd", Time: &newer}},
 			}},
 			want: "argocd",
 		},
 		{
 			name: "most recent field manager wins",
-			obj: &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
+			obj: &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
 				ManagedFields: []metav1.ManagedFieldsEntry{
 					{Manager: "old-manager", Time: &older},
 					{Manager: "recent-manager", Time: &newer},
@@ -139,7 +139,7 @@ func TestSubjectFromObject(t *testing.T) {
 		},
 		{
 			name: "empty manager falls back to unknown",
-			obj: &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
+			obj: &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{
 				ManagedFields: []metav1.ManagedFieldsEntry{{Manager: "", Time: &newer}},
 			}},
 			want: unknownSubject,
@@ -155,9 +155,9 @@ func TestSubjectFromObject(t *testing.T) {
 }
 
 func TestSameResourceVersion(t *testing.T) {
-	a := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "100"}}
-	b := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "100"}}
-	c := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "101"}}
+	a := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "100"}}
+	b := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "100"}}
+	c := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{ResourceVersion: "101"}}
 
 	if !sameResourceVersion(a, b) {
 		t.Error("equal resourceVersions should report same (resync)")
@@ -172,15 +172,15 @@ func TestAuditedTypes_CoversEveryAgentCRD(t *testing.T) {
 	// the platform-persona RBAC roles — the two sets must not drift. Kinds are
 	// resolved from the scheme, the same way the Auditor does at runtime.
 	testScheme := k8sruntime.NewScheme()
-	if err := agentsv1alpha1.AddToScheme(testScheme); err != nil {
+	if err := agentsv1beta1.AddToScheme(testScheme); err != nil {
 		t.Fatalf("adding agents scheme: %v", err)
 	}
 
 	// PromptVersion and ToolRegistry retired to Postgres (ADR 0044); MemoryBinding
-	// folded into AgentDeployment.spec.sessionMemory + retired (ADR 0101) — no longer
-	// CRDs, so not audited.
+	// folded into AgentDeployment.spec.sessionMemory + retired (ADR 0101); AgentVersion
+	// retired to Postgres (ADR 0042) — no longer CRDs, so not audited.
 	wantKinds := map[string]bool{
-		"AgentDeployment": true, "AgentVersion": true, "ModelRoute": true,
+		"AgentDeployment": true, "ModelRoute": true,
 		"SecretBinding": true, "MCPToolBinding": true,
 		"AgentRegistry": true, "AgentScalingPolicy": true,
 		"EvalSuite": true,

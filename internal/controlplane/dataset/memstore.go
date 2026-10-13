@@ -97,6 +97,21 @@ func (m *memStore) EnsureDataset(_ context.Context, namespace, name string) (*Da
 	return &out, nil
 }
 
+func (m *memStore) GetDataset(_ context.Context, namespace, name string) (*Dataset, error) {
+	namespace, name = strings.TrimSpace(namespace), strings.TrimSpace(name)
+	if namespace == "" || name == "" {
+		return nil, fmt.Errorf("dataset: %w: namespace and name are required", controlplane.ErrInvalid)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d, ok := m.datasets[memKey(namespace, name)]
+	if !ok {
+		return nil, controlplane.ErrNotFound
+	}
+	out := d.dataset
+	return &out, nil
+}
+
 func (m *memStore) AppendCase(_ context.Context, datasetID string, c Case) (string, error) {
 	if strings.TrimSpace(c.Input) == "" {
 		return "", fmt.Errorf("dataset: %w: case input is required", controlplane.ErrInvalid)

@@ -26,7 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -100,12 +100,12 @@ func (s *Server) handleListMCPApprovals(w http.ResponseWriter, r *http.Request) 
 // the entries' own ApprovalStatus so an object written before the annotation
 // existed is still classified correctly. A registry with ANY pending entry counts
 // as pending (a whole server is approved atomically, so this is normally uniform).
-func mcpRegistryIsPending(tr *agentsv1alpha1.ToolRegistry) bool {
+func mcpRegistryIsPending(tr *agentsv1beta1.ToolRegistry) bool {
 	if status := tr.Annotations[annMCPStatus]; status != "" {
-		return status == agentsv1alpha1.ApprovalPending
+		return status == agentsv1beta1.ApprovalPending
 	}
 	for i := range tr.Spec.Tools {
-		if tr.Spec.Tools[i].ApprovalStatus == agentsv1alpha1.ApprovalPending {
+		if tr.Spec.Tools[i].ApprovalStatus == agentsv1beta1.ApprovalPending {
 			return true
 		}
 	}
@@ -149,12 +149,12 @@ func (s *Server) handleApproveMCP(w http.ResponseWriter, r *http.Request) {
 	// then persist with the CALLER'S client. This UPDATE is the operator-gated write:
 	// a viewer/developer without update on toolregistries → the API server's real 403.
 	for i := range tr.Spec.Tools {
-		tr.Spec.Tools[i].ApprovalStatus = agentsv1alpha1.ApprovalApproved
+		tr.Spec.Tools[i].ApprovalStatus = agentsv1beta1.ApprovalApproved
 	}
 	if tr.Annotations == nil {
 		tr.Annotations = map[string]string{}
 	}
-	tr.Annotations[annMCPStatus] = agentsv1alpha1.ApprovalApproved
+	tr.Annotations[annMCPStatus] = agentsv1beta1.ApprovalApproved
 
 	// The approve write is the operator-gated flip of the controller-owned
 	// approvalStatus — persist to the store behind SSAR VerbUpdate (the RBAC the CRD
@@ -260,7 +260,7 @@ func (s *Server) handleRejectMCP(w http.ResponseWriter, r *http.Request) {
 // ok=false. A read that succeeds but finds a registry NOT managed by the register
 // flow (no managed-by=ctxmesh-mcp label) is a 404 — the approval surface acts
 // ONLY on BYO-MCP servers, never on operator-curated ToolRegistries.
-func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, caller client.Client, ns, name string) (*agentsv1alpha1.ToolRegistry, bool) {
+func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, caller client.Client, ns, name string) (*agentsv1beta1.ToolRegistry, bool) {
 	tr, err := s.mcpGetToolRegistry(r.Context(), caller, ns, name)
 	if err != nil {
 		s.writeGetError(w, err, "MCP server")
@@ -281,7 +281,7 @@ func (s *Server) getManagedMCPRegistry(w http.ResponseWriter, r *http.Request, c
 // an AlreadyExists (a re-approve or race) is tolerated — the destination is already
 // open. The server's URL is read from the annMCPURL annotation the register flow
 // stamped (non-secret).
-func (s *Server) openMCPEgress(r *http.Request, caller client.Client, tr *agentsv1alpha1.ToolRegistry) *createError {
+func (s *Server) openMCPEgress(r *http.Request, caller client.Client, tr *agentsv1beta1.ToolRegistry) *createError {
 	rawURL := tr.Annotations[annMCPURL]
 	labels := map[string]string{labelManagedBy: managedByMCP}
 	np, npErr := mcpEgressNetworkPolicy(tr.Name, tr.Namespace, rawURL, labels)
@@ -303,7 +303,7 @@ func (s *Server) openMCPEgress(r *http.Request, caller client.Client, tr *agents
 // hard failure surfaces as a *createError so a partial-permission reject is not
 // silently half-done.
 func (s *Server) deleteMCPCredentialArtifacts(r *http.Request, caller client.Client, ns, name string) *createError {
-	binding := &agentsv1alpha1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+	binding := &agentsv1beta1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 	if err := caller.Delete(r.Context(), binding); err != nil && !apierrors.IsNotFound(err) {
 		status, msg := classifyMCPDeleteError(err, "SecretBinding", name)
 		return &createError{status: status, msg: msg}

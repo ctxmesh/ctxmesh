@@ -6,6 +6,7 @@ import {
   navRoute,
   navSectionOf,
   FIRST_RUN_CHECKLIST,
+  FIRST_RUN_NAV_IDS,
 } from "@/lib/nav";
 
 // The M151 IA: six sections — Home / Agents / Library / Govern / Activity /
@@ -76,8 +77,6 @@ describe("every pre-M151 destination still lands somewhere", () => {
     "prompts",
     "evals",
     "mcp-servers",
-    "mcp-approvals",
-    "tool-catalog",
     "runs",
     "my-shares",
     "approvals",
@@ -89,7 +88,6 @@ describe("every pre-M151 destination still lands somewhere", () => {
     "guardrails",
     "workflows",
     "knowledgebases",
-    "config",
     "registries",
     "routes",
     "secrets",
@@ -105,6 +103,19 @@ describe("every pre-M151 destination still lands somewhere", () => {
     // The page is the same surface (spec §6.1 A11); only the name changed.
     expect(NAV_ITEMS.find((i) => i.id === "dashboard")).toBeUndefined();
     expect(navRoute("home")).toBe("/");
+  });
+});
+
+// m184.43 folded pages into the page that holds their subject. Each is gone from the nav, and
+// its old route redirects to the tab or mode that holds it (App.test.tsx).
+describe("pages folded into another page (m184.43)", () => {
+  it.each([
+    ["mcp-approvals", "approvals"],
+    ["tool-catalog", "mcp-servers"],
+    ["config", "agents"],
+  ])("%s is reached through %s", (gone, holder) => {
+    expect(NAV_ITEMS.find((i) => i.id === gone)).toBeUndefined();
+    expect(NAV_ITEMS.find((i) => i.id === holder)).toBeDefined();
   });
 });
 
@@ -146,16 +157,15 @@ describe("nav consolidation (m23.7 / m25 S8, carried forward)", () => {
     expect(labelsOf("Agents")).not.toContain("New agent");
   });
 
-  it("keeps the hand-authoring Config builder out of the agent-creation flow", () => {
-    expect(labelsOf("Agents")).not.toContain("Config builder");
-    expect(sectionOf("Config builder")).toBe("Library");
+  it("has one authoring path: the config builder is New agent's agent.yaml entrance", () => {
+    expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Config builder");
   });
 
   it("groups the MCP/tool surfaces in Library, with the approval queue in Govern", () => {
+    // The tool catalog is MCP servers' Tools tab.
     expect(sectionOf("MCP servers")).toBe("Library");
-    expect(sectionOf("Tool catalog")).toBe("Library");
-    // The approval QUEUE is a human gate, so it sits with the other queues.
-    expect(sectionOf("MCP approvals")).toBe("Govern");
+    // The MCP approval QUEUE is a human gate: a tab of Approvals, with the other queue.
+    expect(sectionOf("Approvals")).toBe("Govern");
     expect(NAV_ITEMS.map((i) => i.label)).not.toContain("Add MCP server");
   });
 });
@@ -177,8 +187,8 @@ describe("catalog taxonomy (m76.1)", () => {
     expect(navRoute("mcp-servers")).toBe("/tools/mcp-servers");
   });
 
-  it("tool-catalog nav item stays (bind-time picker, not discovery)", () => {
-    expect(navRoute("tool-catalog")).toBe("/tools/catalog");
+  it("the bind-time picker is the owned list's Tools tab, not a destination of its own", () => {
+    expect(NAV_ITEMS.find((i) => i.id === "tool-catalog")).toBeUndefined();
   });
 });
 
@@ -205,12 +215,8 @@ describe("live counts are declared by the IA, not invented by the shell", () => 
     ]);
   });
 
-  it("routes Stops at /stops now that its page ships (spec §6.2 gap 2, m151.7)", () => {
-    // It was routeless — walking to /soon/stops — while the surface did not exist. The count was
-    // always live, so the item pointed at a placeholder while carrying a real number; shipping the
-    // page closes that gap.
+  it("routes Stops, which carries a live count, at its real page", () => {
     expect(NAV_ITEMS.find((i) => i.id === "stops")?.route).toBe("/stops");
-    expect(NAV_ITEMS.find((i) => i.id === "stops")?.milestone).toBe("M151");
   });
 });
 
@@ -223,12 +229,12 @@ describe("first-run checklist derives from nav (m54.4)", () => {
     expect(() => navRoute("does-not-exist")).toThrow(/no routed nav item/);
   });
 
-  it("resolves every nav destination — the IA has no /soon placeholders left", () => {
-    // Stops was the last unrouted destination (spec §6.2 gap 2); its page shipped in m151.7. The
-    // /soon/<id> mechanism stays in the router for the next unbuilt surface, but nothing in the
-    // shipped IA walks to it, so navRoute now resolves for every item.
-    expect(NAV_ITEMS.filter((i) => !i.route).map((i) => i.id)).toEqual([]);
-    expect(navRoute("stops")).toBe("/stops");
+  it("resolves every nav destination to a real route — no placeholder destinations", () => {
+    for (const item of NAV_ITEMS) {
+      expect(item.route, item.id).toMatch(/^\//);
+      expect(item.route, item.id).not.toMatch(/^\/soon\b/);
+      expect(navRoute(item.id)).toBe(item.route);
+    }
   });
 
   it("each checklist step's route is anchored to its nav surface", () => {
@@ -242,3 +248,30 @@ describe("first-run checklist derives from nav (m54.4)", () => {
   });
 });
 
+
+// The nav a workspace with no agent sees is the checklist's own path, so it is derived against
+// the checklist rather than chosen independently of it.
+describe("the first-run nav", () => {
+  it("names real destinations nobody is gated out of", () => {
+    for (const id of FIRST_RUN_NAV_IDS) {
+      const item = NAV_ITEMS.find((i) => i.id === id);
+      expect(item, id).toBeDefined();
+      expect(item?.requiresCapability, id).toBeUndefined();
+    }
+  });
+
+  it("reaches every checklist step that needs no agent, and Home", () => {
+    expect(FIRST_RUN_NAV_IDS).toContain("home");
+    for (const step of FIRST_RUN_CHECKLIST.filter((s) => s.doneKey !== "run")) {
+      const owner = FIRST_RUN_NAV_IDS.find(
+        (id) => step.to === navRoute(id) || step.to.startsWith(`${navRoute(id)}/`),
+      );
+      expect(owner, step.label).toBeDefined();
+    }
+  });
+
+  it("leaves out the run step's surface, which needs an agent to run", () => {
+    const run = FIRST_RUN_CHECKLIST.find((s) => s.doneKey === "run")!;
+    expect(FIRST_RUN_NAV_IDS.map(navRoute)).not.toContain(run.to);
+  });
+});

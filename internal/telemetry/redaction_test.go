@@ -150,12 +150,6 @@ func TestDefaultDetectorsCopyIsIsolated(t *testing.T) {
 	assert.NotEqual(t, "mutated", DefaultDetectors()[0].Name, "DefaultDetectors returns an isolated copy")
 }
 
-func TestBasicAuthHeader(t *testing.T) {
-	// pk:sk → base64("pk:sk") == "cGs6c2s="
-	got := BasicAuthHeader("pk", "sk")
-	assert.Equal(t, "Basic cGs6c2s=", got)
-}
-
 // TestRenderConfigWiresRedactionProcessor is the unit-level proof that the
 // collector config the reconciler renders WIRES redaction into the traces
 // pipeline before the exporters — the load-bearing before-persistence seam.
@@ -259,4 +253,86 @@ func TestRenderConfigDeterministic(t *testing.T) {
 	a := RenderConfig(true, DefaultDetectors())
 	b := RenderConfig(true, DefaultDetectors())
 	assert.Equal(t, a, b, "RenderConfig must be deterministic")
+}
+
+func TestBasicAuthHeader(t *testing.T) {
+	// "pk:sk" base64-encoded is "cGs6c2s=".
+	if got := BasicAuthHeader("pk", "sk"); got != "Basic cGs6c2s=" {
+		t.Fatalf("BasicAuthHeader = %q, want %q", got, "Basic cGs6c2s=")
+	}
+}
+
+// TestLangfuseEnv_SecretReferencesOnly guards the credential boundary: every Langfuse value the
+// collector needs comes from a Secret in the agent's own namespace, never as a literal. A literal
+// is readable by anyone who can `get pods` — that is how a plaintext Langfuse key reached every
+// agent pod spec until 2026-10-05.
+func TestLangfuseEnv_SecretReferencesOnly(t *testing.T) {
+	env := LangfuseEnv("langfuse-otlp")
+	want := map[string]string{
+		"LANGFUSE_OTLP_ENDPOINT": "otlp-endpoint",
+		"LANGFUSE_PUBLIC_KEY":    "public-key",
+		"LANGFUSE_SECRET_KEY":    "secret-key",
+	}
+	if len(env) != len(want) {
+		t.Fatalf("LangfuseEnv returned %d vars, want %d", len(env), len(want))
+	}
+	for _, e := range env {
+		key, ok := want[e.Name]
+		if !ok {
+			t.Fatalf("unexpected env %q", e.Name)
+		}
+		if e.Value != "" {
+			t.Errorf("%s carries a literal value; it must be a secretKeyRef", e.Name)
+		}
+		if e.ValueFrom == nil || e.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("%s is not a secretKeyRef", e.Name)
+		}
+		if e.ValueFrom.SecretKeyRef.Name != "langfuse-otlp" || e.ValueFrom.SecretKeyRef.Key != key {
+			t.Errorf("%s -> %s/%s, want langfuse-otlp/%s", e.Name,
+				e.ValueFrom.SecretKeyRef.Name, e.ValueFrom.SecretKeyRef.Key, key)
+		}
+		if opt := e.ValueFrom.SecretKeyRef.Optional; opt == nil || !*opt {
+			t.Errorf("%s must be optional: a required reference to a missing Secret stops the pod starting", e.Name)
+		}
+	}
+}
+
+// TestRenderConfig_LangfuseAuthenticatesViaExtension: the collector builds the auth header itself
+// from the two Secret-referenced env vars, so no pre-encoded credential is rendered anywhere.
+func TestRenderConfig_LangfuseAuthenticatesViaExtension(t *testing.T) {
+	cfg := RenderConfig(true, DefaultDetectors())
+	for _, want := range []string{
+		"basicauth/langfuse:",
+		"username: ${env:LANGFUSE_PUBLIC_KEY}",
+		"password: ${env:LANGFUSE_SECRET_KEY}",
+		"authenticator: basicauth/langfuse",
+		"extensions: [basicauth/langfuse]",
+		"exporters: [debug, otlphttp/langfuse]",
+	} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf("collector config missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"Authorization:", "LANGFUSE_OTLP_AUTH"} {
+		if strings.Contains(cfg, forbidden) {
+			t.Errorf("collector config still contains %q — the pre-built header is gone", forbidden)
+		}
+	}
+
+	off := RenderConfig(false, DefaultDetectors())
+	if strings.Contains(off, "basicauth") || strings.Contains(off, "otlphttp/langfuse") {
+		t.Error("debug-only config must carry no Langfuse extension or exporter")
+	}
+}
+
+func TestMissingLangfuseKeys(t *testing.T) {
+	complete := map[string][]byte{"otlp-endpoint": []byte("http://x"), "public-key": []byte("pk"), "secret-key": []byte("sk")}
+	if got := MissingLangfuseKeys(complete); len(got) != 0 {
+		t.Errorf("a complete Secret reports missing %v", got)
+	}
+	partial := map[string][]byte{"public-key": []byte("pk"), "secret-key": []byte("")}
+	got := MissingLangfuseKeys(partial)
+	if len(got) != 2 || got[0] != "otlp-endpoint" || got[1] != "secret-key" {
+		t.Errorf("absent and empty keys must both count as missing, in order; got %v", got)
+	}
 }

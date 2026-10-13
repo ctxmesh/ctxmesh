@@ -106,6 +106,7 @@ export type {
   PageHeaderCrumb,
   PageHeaderAction,
   PageHeaderTab,
+  TabHeaderProps,
 } from "./page-header";
 
 export { SectionHeader, ClosingNote } from "./section-header";

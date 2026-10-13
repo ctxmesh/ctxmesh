@@ -191,8 +191,8 @@ func TestOnlineScorer_ComponentsUncollapsed(t *testing.T) {
 	t.Parallel()
 
 	runs := runsFor("v1", 3, 90)
-	// Feedback: one NUMERIC + one BOOLEAN score on the first trace. Detail: an ERROR SPAN on the second
-	// trace (→ ErrorCount + ToolFailCount).
+	// Feedback: one NUMERIC + one BOOLEAN score on the first trace. Detail: a failed tool SPAN on the
+	// second trace (→ ErrorCount + ToolFailCount).
 	scores := map[string][]FeedbackScore{
 		runs[0].TraceID: {
 			{DataType: scoreDataTypeNumeric, Value: 0.8},
@@ -202,7 +202,7 @@ func TestOnlineScorer_ComponentsUncollapsed(t *testing.T) {
 	}
 	details := map[string]TraceDetail{
 		runs[1].TraceID: {Spans: []SpanSummary{
-			{Type: "SPAN", Level: "ERROR"},
+			{Type: "SPAN", Name: "tool:search", Level: "ERROR"},
 			{Type: "GENERATION", Level: "DEFAULT"},
 		}},
 	}
@@ -225,7 +225,7 @@ func TestOnlineScorer_ComponentsUncollapsed(t *testing.T) {
 	// Operational — Total over all runs; ErrorCount + ToolFailCount from the ERROR SPAN.
 	assert.Equal(t, 3, agg.Operational.Total)
 	assert.Equal(t, 1, agg.Operational.ErrorCount, "one trace with an ERROR span")
-	assert.Equal(t, 1, agg.Operational.ToolFailCount, "one ERROR-level SPAN observation")
+	assert.Equal(t, 1, agg.Operational.ToolFailCount, "one failed tool SPAN")
 	// Feedback — NUMERIC + BOOLEAN counted, CATEGORICAL skipped.
 	assert.Equal(t, 2, agg.Feedback.Count, "NUMERIC + BOOLEAN scores counted; CATEGORICAL skipped")
 	assert.InDelta(t, 1.8, agg.Feedback.SumVal, 1e-9, "0.8 (numeric) + 1.0 (boolean)")
@@ -613,4 +613,32 @@ func TestOnlineScorer_CreateScoreErrorSwallowed(t *testing.T) {
 		"Judge.Count must be identical regardless of CreateScore error (aggregate is the load-bearing output)")
 	assert.InDelta(t, aggOK.Judge.SumVal, aggErr.Judge.SumVal, 1e-9,
 		"Judge.SumVal must be identical regardless of CreateScore error")
+}
+
+// TestComputeOperational_CountsFailedTOOLObservations: the worker's operational component
+// counts a failed TOOL observation — how Langfuse records the platform's tool call — as a tool
+// failure, as well as a legacy SPAN named like a tool call; a failed model call or a failed
+// launcher SPAN (gateway.call, memory.*) is an error but not a tool failure.
+func TestComputeOperational_CountsFailedTOOLObservations(t *testing.T) {
+	t.Parallel()
+	stats := computeOperational(runsFor("v1", 5, 90), map[string][]onlinescore.TraceSpan{
+		"t1": {{Type: "TOOL", Name: "search", Level: "ERROR"}, {Type: "GENERATION", Level: "DEFAULT"}},
+		"t2": {{Type: "SPAN", Name: "tool:search", Level: "ERROR"}},
+		"t3": {{Type: "GENERATION", Level: "ERROR"}, {Type: "TOOL", Name: "search", Level: "DEFAULT"}},
+		"t4": {{Type: "SPAN", Name: "gateway.call", Level: "ERROR"}},
+		"t5": {{Type: "SPAN", Name: "memory.append", Level: "ERROR"}},
+	})
+	assert.Equal(t, 5, stats.Total)
+	assert.Equal(t, 5, stats.ErrorCount, "every trace has an ERROR-level observation")
+	assert.Equal(t, 2, stats.ToolFailCount, "the failed TOOL and the legacy tool SPAN, not the launcher's own")
+}
+
+// TestSpansToTraceSpansCarriesTheName: the scorer tells a tool SPAN from the launcher's own by
+// its name, so the projection must carry it.
+func TestSpansToTraceSpansCarriesTheName(t *testing.T) {
+	t.Parallel()
+	got := spansToTraceSpans([]SpanSummary{{Type: "SPAN", Name: "gateway.call", Level: "ERROR"}})
+	require.Len(t, got, 1)
+	assert.Equal(t, onlinescore.TraceSpan{Type: "SPAN", Name: "gateway.call", Level: "ERROR"}, got[0])
+	assert.False(t, onlinescore.IsToolFailure(got[0]))
 }

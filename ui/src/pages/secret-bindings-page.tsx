@@ -23,8 +23,9 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type SecretBindingSummary } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { api, type SecretBindingSummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_SECRETS } from "@/lib/nav";
 
@@ -229,17 +230,18 @@ export function closingLine(
 // (faint icons that firm up on hover) instead of hidden.
 function RowActions({
   binding,
-  canEdit,
-  canDelete,
   onEdit,
   onDelete,
 }: {
   binding: SecretBindingSummary;
-  canEdit: boolean;
-  canDelete: boolean;
   onEdit: (s: SecretBindingSummary) => void;
   onDelete: (s: SecretBindingSummary) => void;
 }) {
+  // Edit and Delete act in the binding's own namespace, which under "All workspaces" is not the
+  // shell's.
+  const { can } = useCapabilitiesIn(binding.namespace);
+  const canEdit = can(RES_SECRETS, "update");
+  const canDelete = can(RES_SECRETS, "delete");
   if (!canEdit && !canDelete) return null;
   return (
     <div
@@ -281,11 +283,6 @@ function RowActions({
   );
 }
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; items: SecretBindingSummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 export function SecretBindingsPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
@@ -297,45 +294,23 @@ export function SecretBindingsPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewId>("all");
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [state, setState] = useState<Load>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
 
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listSecretBindings(
+  const fetchPage = useCallback(
+    (signal: AbortSignal) =>
+      api.listSecretBindings(
         {
           limit: PAGE_LIMIT,
           cursor: cursor || undefined,
           q: query || undefined,
           namespace: namespace || undefined,
         },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", items: res.items, nextCursor: res.nextCursor });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden,
-        });
-      });
-  }, [cursor, query, namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+        signal,
+      ),
+    [cursor, query, namespace],
+  );
+  const { state, reload } = useLoad(fetchPage);
 
   const resetPaging = useCallback(() => setPageStack([""]), []);
 
@@ -353,10 +328,10 @@ export function SecretBindingsPage() {
   }, [namespace, resetPaging]);
 
   const items = useMemo(
-    () => (state.kind === "ready" ? state.items : []),
+    () => (state.kind === "ready" ? state.data.items : []),
     [state],
   );
-  const nextCursor = state.kind === "ready" ? state.nextCursor : "";
+  const nextCursor = state.kind === "ready" ? state.data.nextCursor : "";
   // hasNext keys off the CURSOR (BFF), never items.length — a page-windowed `q`
   // filter can empty a page while later pages still match.
   const hasNext = nextCursor !== "";
@@ -410,7 +385,7 @@ export function SecretBindingsPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "secret bindings",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 
@@ -603,15 +578,14 @@ export function SecretBindingsPage() {
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Secret bindings"
         onRowClick={(t) => navigate(bindingPath(t.binding))}
-        // The actions column only appears when the caller can edit or delete.
-        // A viewer sees a clean table with no dead or greyed-out buttons.
+        // The actions column only appears when the caller can edit or delete in the selected
+        // workspace; under "All workspaces" each row decides by its own namespace. A viewer sees
+        // a clean table with no dead or greyed-out buttons.
         rowActions={
-          canEdit || canDelete
+          namespace === "" || canEdit || canDelete
             ? (t) => (
                 <RowActions
                   binding={t.binding}
-                  canEdit={canEdit}
-                  canDelete={canDelete}
                   onEdit={(s) => navigate(bindingPath(s, "?edit=1"))}
                   onDelete={(s) => navigate(bindingPath(s, "?delete=1"))}
                 />

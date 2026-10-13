@@ -50,9 +50,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
@@ -108,6 +110,7 @@ func TestUploadKBDocument_HappyPath(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	content := []byte("This is a test document.")
 	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", content)
@@ -151,6 +154,7 @@ func TestUploadKBDocument_StorageHardCapRejects413(t *testing.T) {
 		DocStore:             docStore,
 		NamespaceTenantStore: nsStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", []byte("blocked content"))
 	require.Equal(t, http.StatusRequestEntityTooLarge, code, "an at-cap upload must be 413; body: %s", string(body))
@@ -184,6 +188,7 @@ func TestUploadKBDocument_StorageHardCapUnsetAllows(t *testing.T) {
 		DocStore:             docStore,
 		NamespaceTenantStore: nsStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	content := []byte("allowed content")
 	code, body := postUpload(t, s, "my-kb", kbNS, "guide.md", "text/markdown", content)
@@ -209,6 +214,7 @@ func TestUploadKBDocument_UnknownKB_Returns404(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := postUpload(t, s, "ghost-kb", kbNS, "doc.txt", "text/plain", []byte("hello"))
 	assert.Equal(t, http.StatusNotFound, code, "expected 404 for missing KB; body: %s", string(body))
@@ -232,6 +238,7 @@ func TestUploadKBDocument_OverLimit_Returns413(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	// Build a body that is 1 byte over the limit.
 	oversized := make([]byte, maxDocumentUploadBytes+1)
@@ -256,6 +263,7 @@ func TestUploadKBDocument_UnconfiguredStore_Returns501(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      nil,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := postUpload(t, s, "my-kb", kbNS, "doc.txt", "text/plain", []byte("hello"))
 	assert.Equal(t, http.StatusNotImplemented, code, "expected 501 when store is unconfigured; body: %s", string(body))
@@ -274,6 +282,7 @@ func TestUploadKBDocument_MissingFilename_Returns400(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	// No ?filename in the URL, no Content-Disposition.
 	req := httptest.NewRequest(http.MethodPost, "/api/knowledgebases/my-kb/documents?namespace="+kbNS,
@@ -298,6 +307,7 @@ func TestUploadKBDocument_ContentDispositionFilename(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	// No ?filename but Content-Disposition carries the filename.
 	req := httptest.NewRequest(http.MethodPost, "/api/knowledgebases/my-kb/documents?namespace="+kbNS,
@@ -333,6 +343,7 @@ func TestUploadKBDocument_CrossNamespace(t *testing.T) {
 		Log:           logr.Discard(),
 		DocStore:      docStore,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	content := []byte("cross-namespace content")
 	code, body := postUpload(t, s, "alt-kb", altNS, "report.pdf", "application/pdf", content)
@@ -454,11 +465,11 @@ func postIngest(t *testing.T, s *Server, kbName, ns string) (int, []byte) {
 func newIngestEndpointServer(t *testing.T, kb *agentsv1beta1.KnowledgeBase) (*Server, *objectstore.MemObjectStore) {
 	t.Helper()
 	sc := testScheme(t)
-	builder := fake.NewClientBuilder().WithScheme(sc)
+	var objs []client.Object
 	if kb != nil {
-		builder = builder.WithObjects(kb)
+		objs = append(objs, kb)
 	}
-	fc := builder.Build()
+	fc := identityClient(t, kbIngester, objs...)
 	docStore := objectstore.NewMemObjectStore()
 	s := NewServer(Options{
 		CallerClients:  newFakeFactory(fc),
@@ -468,8 +479,82 @@ func newIngestEndpointServer(t *testing.T, kb *agentsv1beta1.KnowledgeBase) (*Se
 		DocStore:       docStore,
 		KnowledgeStore: knowledge.NewMemStore(),
 		Embedder:       newMockEmbedder(),
+		// The run routes (an ingestion's status and cancel) are served only with an invoke adapter.
+		Adapters: Adapters{Invoke: &fakeInvokeAdapter{}},
 	})
+	s.authorizer = &recordingAuthorizer{}
 	return s, docStore
+}
+
+// kbIngester is the identity newIngestEndpointServer's caller resolves to.
+const kbIngester = "kb-builder@example.com"
+
+// runRequest sends method to /api/runs/{id}{suffix} as the server's caller.
+func runRequest(t *testing.T, s *Server, method, id, suffix string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, "/api/runs/"+id+suffix, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestIngestKB_RunBelongsToItsCreator: the person who starts an ingestion reads and cancels its run.
+// Anyone else needs update on that KnowledgeBase: reading an agent that happens to share the
+// KnowledgeBase's name, which the run's Agent field carries, is not enough.
+func TestIngestKB_RunBelongsToItsCreator(t *testing.T) {
+	kb := mockKnowledgeBase("my-kb", kbNS)
+	kb.Spec.EmbeddingRoute = "embed-v1"
+	start := func(t *testing.T) (*Server, string) {
+		t.Helper()
+		s, docStore := newIngestEndpointServer(t, kb.DeepCopy())
+		key := objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md")
+		require.NoError(t, docStore.Put(context.Background(), key, bytes.NewReader([]byte("some text to embed")), -1, "text/markdown"))
+		code, body := postIngest(t, s, "my-kb", kbNS)
+		require.Equal(t, http.StatusAccepted, code, string(body))
+		var resp IngestResponse
+		require.NoError(t, json.Unmarshal(body, &resp))
+		rn, err := s.runStore.Get(resp.RunID)
+		require.NoError(t, err)
+		require.Equal(t, kbIngester, rn.CallerUsername, "the run records who started it")
+		return s, resp.RunID
+	}
+	sameNamedAgent := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "my-kb", Namespace: kbNS}}
+
+	t.Run("the creator reads and cancels it", func(t *testing.T) {
+		s, id := start(t)
+		rec := runRequest(t, s, http.MethodGet, id, "")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		rec = runRequest(t, s, http.MethodPost, id, "/cancel")
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		rn, err := s.runStore.Get(id)
+		require.NoError(t, err)
+		assert.Equal(t, run.StatusCancelled, rn.Status)
+	})
+
+	t.Run("a reader of a same-named agent can neither read nor cancel it", func(t *testing.T) {
+		s, id := start(t)
+		s.callerClients = newFakeFactory(identityClient(t, "mallory@example.com", sameNamedAgent))
+		auth := &recordingAuthorizer{err: authz.ErrForbidden}
+		s.authorizer = auth
+		for _, req := range []struct{ method, suffix string }{{http.MethodGet, ""}, {http.MethodPost, "/cancel"}} {
+			rec := runRequest(t, s, req.method, id, req.suffix)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", req.method, req.suffix, rec.Body.String())
+		}
+		rn, err := s.runStore.Get(id)
+		require.NoError(t, err)
+		assert.Equal(t, run.StatusQueued, rn.Status, "the refused cancel changed nothing")
+		assert.Equal(t, authz.Action{Verb: authz.VerbUpdate, Group: agentsAPIGroup, Resource: resKnowledgeBases, Namespace: kbNS, Name: "my-kb"},
+			auth.last, "a non-creator is authorized on the KnowledgeBase itself")
+	})
+
+	t.Run("anyone who may update the KnowledgeBase reads it", func(t *testing.T) {
+		s, id := start(t)
+		s.callerClients = newFakeFactory(identityClient(t, "operator@example.com"))
+		s.authorizer = &recordingAuthorizer{}
+		rec := runRequest(t, s, http.MethodGet, id, "")
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
 }
 
 func TestIngestKB_HappyPath_CreatesRun(t *testing.T) {
@@ -541,6 +626,7 @@ func TestIngestKB_Unwired_Returns501(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 	code, body := postIngest(t, s, "my-kb", kbNS)
 	assert.Equal(t, http.StatusNotImplemented, code, "expected 501 when ingestion is unwired; body: %s", string(body))
 }
@@ -612,6 +698,7 @@ func TestListKBs_ReturnsSummaries(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := listKBs(t, s, kbNS)
 	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
@@ -647,6 +734,7 @@ func TestGetKB_ReturnsDetail(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := getKB(t, s, "detail-kb", kbNS)
 	require.Equal(t, http.StatusOK, code, "expected 200; body: %s", string(body))
@@ -673,6 +761,7 @@ func TestGetKB_AbsentKB_Returns404(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	code, body := getKB(t, s, "ghost-kb", kbNS)
 	assert.Equal(t, http.StatusNotFound, code, "expected 404 for absent KB; body: %s", string(body))
@@ -724,6 +813,7 @@ func TestSearchKB_ForwardsToTokenServiceAndReturnsResults(t *testing.T) {
 		Log:             logr.Discard(),
 		TokenServiceURL: ts.URL,
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	reqBody, _ := json.Marshal(map[string]any{"query": "how to configure", "topK": 5})
 	code, body := searchKB(t, s, "search-kb", kbNS, reqBody)
@@ -750,6 +840,7 @@ func TestSearchKB_Unconfigured_Returns501(t *testing.T) {
 		Auth:          AllowAll{},
 		Log:           logr.Discard(),
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	reqBody, _ := json.Marshal(map[string]any{"query": "test"})
 	code, body := searchKB(t, s, "search-kb", kbNS, reqBody)
@@ -767,6 +858,7 @@ func TestSearchKB_AbsentKB_Returns404(t *testing.T) {
 		Log:             logr.Discard(),
 		TokenServiceURL: "http://token-service:8443",
 	})
+	s.authorizer = &recordingAuthorizer{}
 
 	reqBody, _ := json.Marshal(map[string]any{"query": "test"})
 	code, body := searchKB(t, s, "ghost-kb", kbNS, reqBody)
@@ -819,4 +911,36 @@ func TestIngestKB_TheConflictIsScopedToTheKnowledgeBase(t *testing.T) {
 	code2, body2 := postIngest(t, s, "kb-b", kbNS)
 	assert.NotEqual(t, http.StatusConflict, code2,
 		"the in-flight conflict must be scoped to the KB being ingested; body: %s", string(body2))
+}
+
+// TestKBWrites_AuthorizeUpdateOnTheKnowledgeBase: uploading a document and starting an ingestion ask
+// for update on that KnowledgeBase, and a refusal is a 403 that leaves the corpus untouched.
+func TestKBWrites_AuthorizeUpdateOnTheKnowledgeBase(t *testing.T) {
+	want := authz.Action{Verb: authz.VerbUpdate, Group: agentsAPIGroup, Resource: resKnowledgeBases, Namespace: kbNS, Name: "my-kb"}
+	for _, tc := range []struct {
+		name string
+		send func(*Server) (int, []byte)
+	}{
+		{"upload", func(s *Server) (int, []byte) {
+			return postUpload(t, s, "my-kb", kbNS, "notes.md", "text/markdown", []byte("text"))
+		}},
+		{"ingest", func(s *Server) (int, []byte) { return postIngest(t, s, "my-kb", kbNS) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, docStore := newIngestEndpointServer(t, mockKnowledgeBase("my-kb", kbNS))
+			require.NoError(t, docStore.Put(context.Background(), objectstore.KnowledgeKey(kbNS, "my-kb", "guide.md"),
+				bytes.NewReader([]byte("some text")), -1, "text/markdown"))
+			auth := &recordingAuthorizer{err: authz.ErrForbidden}
+			s.authorizer = auth
+			code, body := tc.send(s)
+			assert.Equal(t, http.StatusForbidden, code, string(body))
+			assert.Equal(t, want, auth.last)
+			keys, err := docStore.List(context.Background(), objectstore.KnowledgePrefix(kbNS, "my-kb"))
+			require.NoError(t, err)
+			assert.Len(t, keys, 1, "nothing was uploaded")
+			active, err := s.runStore.ActiveIngestion(kbNS, "my-kb")
+			require.NoError(t, err)
+			assert.Empty(t, active, "no ingestion was started")
+		})
+	}
 }

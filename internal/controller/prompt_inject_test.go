@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 )
 
@@ -36,22 +36,22 @@ import (
 func promptTestReconciler(t *testing.T, resolver prompt.Resolver) *AgentDeploymentReconciler {
 	t.Helper()
 	scheme := runtime.NewScheme()
-	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	require.NoError(t, agentsv1beta1.AddToScheme(scheme))
 	return &AgentDeploymentReconciler{
 		Client:         fake.NewClientBuilder().WithScheme(scheme).Build(),
 		PromptResolver: resolver,
 	}
 }
 
-func promptAgent(promptRef string, ann map[string]string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func promptAgent(promptRef string, ann map[string]string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "a", Annotations: ann},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{PromptRef: promptRef},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{PromptRef: promptRef},
 	}
 }
 
 func TestResolvePrompt_AnnotationFirst_NoCRDNeeded(t *testing.T) {
-	src := agentsv1alpha1.GitPromptSource{Repo: "https://git/x.git", Ref: "v1", Path: "p/s.txt"}
+	src := agentsv1beta1.GitPromptSource{Repo: "https://git/x.git", Ref: "v1", Path: "p/s.txt"}
 	r := promptTestReconciler(t, prompt.NewFixtureResolver().Seed(src, "hello prompt")) // NO PromptVersion in the store
 
 	raw, err := json.Marshal(prompt.ResolvedPointer{Name: "greeter", Repo: src.Repo, Ref: src.Ref, Path: src.Path})
@@ -96,7 +96,7 @@ func TestResolvePrompt_NoPromptRef_NoOp(t *testing.T) {
 // and yields a stable, non-empty digest (so a stamped agent rolls to a deterministic ksvc revision suffix).
 func TestResolvePrompt_AnnotationResolves(t *testing.T) {
 	ctx := context.Background()
-	src := agentsv1alpha1.GitPromptSource{Repo: "https://git/x.git", Ref: "v9", Path: "p/s.txt"}
+	src := agentsv1beta1.GitPromptSource{Repo: "https://git/x.git", Ref: "v9", Path: "p/s.txt"}
 	resolver := prompt.NewFixtureResolver().Seed(src, "same content")
 	r := promptTestReconciler(t, resolver)
 

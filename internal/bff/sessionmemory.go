@@ -24,7 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // sessionMemoryScopeSession is the private per-agent scope (the CRD default). perUser is only meaningful
@@ -44,7 +44,7 @@ type SessionMemoryConfig struct {
 	PerUser bool `json:"perUser"`
 }
 
-func sessionMemoryConfigOf(ad *agentsv1alpha1.AgentDeployment) SessionMemoryConfig {
+func sessionMemoryConfigOf(ad *agentsv1beta1.AgentDeployment) SessionMemoryConfig {
 	sm := ad.Spec.SessionMemory
 	if sm == nil {
 		return SessionMemoryConfig{}
@@ -63,7 +63,7 @@ func (s *Server) handleGetSessionMemoryConfig(w http.ResponseWriter, r *http.Req
 	if !ok {
 		return
 	}
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(),
 		client.ObjectKey{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
@@ -92,7 +92,7 @@ func (s *Server) handleUpdateSessionMemory(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(),
 		client.ObjectKey{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
@@ -107,13 +107,13 @@ func (s *Server) handleUpdateSessionMemory(w http.ResponseWriter, r *http.Reques
 			scope = sessionMemoryScopeSession
 		}
 		// Preserve a configured backend across the toggle (never clobber it).
-		var backend *agentsv1alpha1.MemoryBackend
+		var backend *agentsv1beta1.MemoryBackend
 		if sm := ad.Spec.SessionMemory; sm != nil {
 			backend = sm.Backend
 		}
 		// perUser is meaningful only for the private session scope (the CRD ignores it for "shared").
 		perUser := req.PerUser && scope == sessionMemoryScopeSession
-		ad.Spec.SessionMemory = &agentsv1alpha1.SessionMemorySpec{
+		ad.Spec.SessionMemory = &agentsv1beta1.SessionMemorySpec{
 			Scope:   scope,
 			PerUser: perUser,
 			Backend: backend,

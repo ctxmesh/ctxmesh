@@ -16,11 +16,6 @@ limitations under the License.
 
 package v1beta1
 
-// KnowledgeBase is a NEW type (M68, ADR 0061) with no v1alpha1 history, so it is born directly in the
-// storage version (v1beta1) as a SINGLE-version CRD — no deprecated spoke, no conversion (the
-// AgentTeam/GuardrailPolicy/Workflow precedent). The CRD-version-parity guard
-// (hack/check-crd-version-parity.sh) skips single-version CRDs.
-
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -41,7 +36,7 @@ type KnowledgeBaseSource struct {
 
 	// objectStorePrefix is the durable object-store prefix from which documents are fetched when
 	// type="objectStorePrefix". The ObjectStore SPI resolves this against the configured store
-	// (MinIO in dev, BYO-S3 in prod). Must be set when type="objectStorePrefix"; ignored otherwise.
+	// (the bundled SeaweedFS in dev, BYO-S3 in prod). Must be set when type="objectStorePrefix"; ignored otherwise.
 	// +optional
 	ObjectStorePrefix string `json:"objectStorePrefix,omitempty"`
 }
@@ -84,8 +79,8 @@ type ChunkingConfig struct {
 //     requires a full background re-ingest.
 //  2. chunking (size/overlap/splitter): re-chunking requires re-ingest and drives retrieval quality.
 //
-// Both are enforced by CEL transition rules (the XValidation pattern used by AgentVersion and
-// AgentRegistry in this codebase, preferred over a validating webhook).
+// Both are enforced by CEL transition rules (the XValidation pattern used by AgentRegistry in
+// this codebase, preferred over a validating webhook).
 //
 // +kubebuilder:validation:XValidation:rule="self.embeddingRoute == oldSelf.embeddingRoute",message="embeddingRoute is immutable after creation (one-way door #1, ADR 0061): changing the embedding model requires a full re-ingest — delete and recreate the KnowledgeBase"
 // +kubebuilder:validation:XValidation:rule="self.chunking.size == oldSelf.chunking.size && self.chunking.overlap == oldSelf.chunking.overlap && self.chunking.splitter == oldSelf.chunking.splitter",message="chunking parameters (size/overlap/splitter) are immutable after creation (one-way door #2, ADR 0061): re-chunking requires a full re-ingest — delete and recreate the KnowledgeBase"
@@ -229,7 +224,6 @@ type KnowledgeBaseStatus struct {
 
 // KnowledgeBase is a namespaced managed RAG corpus: a user uploads documents; the platform
 // chunks, embeds, indexes, and serves them for retrieval-augmented generation (M68, ADR 0061).
-// It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook.
 //
 // Key design properties:
 //   - embeddingRoute and chunking parameters are IMMUTABLE after creation (the two one-way doors,

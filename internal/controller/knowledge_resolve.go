@@ -27,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -81,7 +80,7 @@ type kbResolveResult struct {
 func resolveKnowledgeBases(
 	ctx context.Context,
 	c client.Client,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (kbResolveResult, error) {
 	if len(deploy.Spec.KnowledgeBases) == 0 {
 		return kbResolveResult{}, nil
@@ -123,8 +122,8 @@ func resolveKnowledgeBases(
 		return kbResolveResult{}, fmt.Errorf("marshalling KNOWLEDGE_BASES roster: %w", err)
 	}
 	res.env = []corev1.EnvVar{
-		{Name: "KNOWLEDGE_BASE_ENABLED", Value: gatewaySyncValue},
-		{Name: "KNOWLEDGE_BASES", Value: string(rosterJSON)},
+		{Name: envKnowledgeBaseEnabled, Value: gatewaySyncValue},
+		{Name: envKnowledgeBases, Value: string(rosterJSON)},
 	}
 	return res, nil
 }

@@ -61,6 +61,9 @@ type Capability struct {
 	// proof-of-possession signed by that key, so a copied token alone authorizes nothing. Empty ⇒ a
 	// legacy bearer capability.
 	KeyThumbprint string
+	// ID is the JWT `jti`, unique per minted token. A run is re-minted on every claim and resume, so a
+	// binding must be single-use per token, not per run. Empty on a token minted before ids existed.
+	ID string
 	// IssuedAt / ExpiresAt bound the validity window (JWT `iat` / `exp`). TTL is short —
 	// approximately the run timeout — so a leaked capability expires quickly.
 	IssuedAt  time.Time
@@ -93,6 +96,10 @@ var (
 	ErrProofWrongRequest    = errors.New("runcap: proof is for a different method or URI")
 	ErrProofExpired         = errors.New("runcap: proof expired")
 	ErrProofReplayed        = errors.New("runcap: proof already used")
+	// ErrProofUnchecked — the shared replay set could not be reached, so the proof could be neither
+	// accepted nor refused on its merits. The edge still refuses (fails closed), but says the platform is
+	// unavailable rather than that the caller's proof was bad.
+	ErrProofUnchecked = errors.New("runcap: the proof replay set is unavailable")
 	// ErrWrongAudience — the capability was minted for a different audience.
 	ErrWrongAudience = errors.New("runcap: capability audience mismatch")
 	// ErrIncomplete — a required claim (sub / run) is empty.
@@ -134,6 +141,7 @@ type jwtClaims struct {
 	Run string    `json:"run"`           // custom: the run id
 	Bnd string    `json:"bnd,omitempty"` // custom: the trust boundary (ADR 0033); "" = unscoped
 	Cnf *cnfClaim `json:"cnf,omitempty"` // RFC 7800 confirmation: the sender's key thumbprint
+	Jti string    `json:"jti,omitempty"` // unique per minted token; what a bind is single-use on
 	Iat int64     `json:"iat"`
 	Exp int64     `json:"exp"`
 }
@@ -170,6 +178,10 @@ const (
 // signer and a verifier does not spuriously reject a capability or voucher.
 const clockSkew = 30 * time.Second
 
+// VerifiableUntil is the last instant Verify still accepts c. A verifier that remembers a capability as
+// spent must remember it at least this long, or a copy verifies again after it has been forgotten.
+func (c Capability) VerifiableUntil() time.Time { return c.ExpiresAt.Add(clockSkew) }
+
 // ApprovalVoucher is the decoded, VERIFIED approval voucher (ADR 0074 §3): the stateless proof that
 // a human approved a specific require-approval tool for a specific run. The egress sidecar mints
 // nothing — the BFF mints a voucher on approval-grant, the SDK relays it as X-Ctxmesh-Approval on the
@@ -199,3 +211,19 @@ type voucherClaims struct {
 	Iat  int64  `json:"iat"`
 	Exp  int64  `json:"exp"`
 }
+
+// BFFPodAudience is the audience of the projected ServiceAccount token a guarded agent's pod presents to
+// the BFF alongside a run capability it cannot prove: one relayed to it over AMP, bound to its caller's
+// key. The controller projects the token; the BFF reviews it.
+const BFFPodAudience = "ctxmesh-bff"
+
+// The two audiences of the projected ServiceAccount tokens the token service reviews (ADR 0154). They
+// differ so that a token one container can read is refused where only the other may call.
+const (
+	// TokenServicePodAudience is mounted only into an agent's egress sidecar container and into the BFF,
+	// never into a container that runs the agent's code.
+	TokenServicePodAudience = "ctxmesh-token-service"
+	// TokenServiceAgentAudience is mounted into the user container of an agent with long-term memory or
+	// knowledge bases. The agent's code can read it; it proves only which agent the pod is.
+	TokenServiceAgentAudience = "ctxmesh-token-service-agent"
+)

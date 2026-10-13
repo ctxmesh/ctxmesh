@@ -1,5 +1,4 @@
-import { lazy, Suspense } from "react";
-import { Navigate, Route, Routes, useParams } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
 import { AgentChatboxPage } from "@/pages/agent-chatbox-page";
@@ -14,10 +13,8 @@ import {
 import { AgentsPage } from "@/pages/agents-page";
 import { AddMcpPage } from "@/pages/add-mcp-page";
 import { McpServersPage } from "@/pages/mcp-servers-page";
-import { McpApprovalsPage } from "@/pages/mcp-approvals-page";
+import { McpConnectPage } from "@/pages/mcp-connect-page";
 import { TemplateGalleryPage } from "@/pages/template-gallery-page";
-import { ToolCatalogPage } from "@/pages/tool-catalog-page";
-import { ConfigBuilderPage } from "@/pages/config-builder-page";
 import { CostPage } from "@/pages/cost-page";
 import { ConnectProviderPage } from "@/pages/connect-provider-page";
 import { ProvidersPage } from "@/pages/providers-page";
@@ -31,7 +28,7 @@ import {
   NewModelRoutePage,
 } from "@/pages/model-route-detail-page";
 import { ModelRoutesPage } from "@/pages/model-routes-page";
-import { PlaceholderPage } from "@/pages/placeholder-page";
+import { NotFoundPage } from "@/pages/not-found-page";
 import { PlaygroundPage } from "@/pages/playground-page";
 import { RunsPage } from "@/pages/runs-page";
 import { RunDetailPage } from "@/pages/run-detail-page";
@@ -58,38 +55,6 @@ import { StopsPage } from "@/pages/stops-page";
 import { SharedRunPage } from "@/pages/shared-run-page";
 import { RequireAuth, SessionProvider } from "@/lib/session-provider";
 import { ToastProvider } from "@/components/kit";
-import { NAV_ITEMS } from "@/lib/nav";
-import { DESIGN_GALLERY_ENABLED } from "@/design/flag";
-
-// SoonPage resolves the /soon/:id placeholder for a nav destination the approved
-// IA lists but a later milestone ships (m13.5 keeps the full IA walkable without
-// pulling those surfaces forward). It reads the owning milestone + label from the
-// shared nav source so the "arrives in M<n>" copy is always correct.
-function SoonPage() {
-  const { id } = useParams();
-  const item = NAV_ITEMS.find((n) => n.id === id);
-  return (
-    <PlaceholderPage
-      title={item?.label ?? "Coming soon"}
-      milestone={item?.milestone ?? "a later milestone"}
-    />
-  );
-}
-
-// The design gallery is a REVIEW-only surface (m13.1 design gate) holding
-// static internal wireframes. It renders OUTSIDE the SessionProvider guard, so
-// anything that can reach the route can read it with no login — which is fine
-// on a dev server and was a disclosure hole in production (M151 hardening, A2).
-//
-// The gate is therefore the BUILD, not a runtime check: `lazy()` is called only
-// in the enabled branch of a statically-inlined constant, so a production build
-// folds this to `null`, Rollup drops the dynamic import, and no gallery chunk
-// is emitted at all. `hack/ui-no-internal-routes.sh` asserts that on every
-// build. Keep the ternary — hoisting `lazy()` out of it makes the import
-// unconditional again and the gallery ships even with the route unmounted.
-const DesignGallery = DESIGN_GALLERY_ENABLED
-  ? lazy(() => import("@/design/gallery").then((m) => ({ default: m.DesignGallery })))
-  : null;
 
 // readAgentPin reads the agent this ORIGIN is pinned to (m37.3): when the SPA is served at an agent's
 // OWN hostname, the BFF injects `<meta name="agent-pin" content="namespace/name">` into index.html (a
@@ -140,17 +105,24 @@ function ChatboxApp({ pin }: { pin: { ns: string; name: string } }) {
   );
 }
 
+// MovedTo answers a route whose page now lives elsewhere, keeping what a deep link
+// carried (its query, its hash) and adding what selects the page there (a tab, a mode).
+function MovedTo({ to, set }: { to: string; set: Record<string, string> }) {
+  const { search, hash } = useLocation();
+  const params = new URLSearchParams(search);
+  for (const [k, v] of Object.entries(set)) params.set(k, v);
+  return <Navigate to={`${to}?${params.toString()}${hash}`} replace />;
+}
+
 // App — the SPA route table (ADR 0012 auth routing):
 //   • agent-pinned origin    — the single-agent chatbox ONLY (ChatboxApp, m37.3), no console.
-//   • /design (flag-gated)   — static wireframes, NO auth (outside RequireAuth).
 //   • /login                 — the token login; public. RedirectIfAuthed handled
 //                              inside LoginPage (an authed visit bounces to /).
 //   • everything else        — the console, behind RequireAuth (→ /login with the
 //                              return path preserved when signed out).
 //
 // SessionProvider wraps everything: it registers the api.ts token/401 seams and
-// restores a persisted token before the guards run. The design gallery still
-// mounts under it (so restore() runs) but is NOT wrapped in RequireAuth.
+// restores a persisted token before the guards run.
 export function App() {
   const agentPin = readAgentPin();
   if (agentPin) {
@@ -161,19 +133,12 @@ export function App() {
     <SessionProvider>
       <ToastProvider>
         <Routes>
-          {DESIGN_GALLERY_ENABLED && DesignGallery && (
-            <Route
-              path="design/*"
-              element={
-                <Suspense fallback={null}>
-                  <DesignGallery />
-                </Suspense>
-              }
-            />
-          )}
           <Route path="login" element={<LoginPage />} />
           {/* OIDC redirect target (ADR 0020) — public, completes Auth-Code+PKCE. */}
           <Route path="auth/callback" element={<AuthCallbackPage />} />
+          {/* MCP consent hand-off from a chat on an agent hostname (ADR 0040 amendment) —
+              public: the ticket the chat posts to it is the credential. */}
+          <Route path="connect" element={<McpConnectPage />} />
           {/* Public shared-run page (m75.4) — no auth, no app-shell chrome */}
           <Route path="shared/runs/:token" element={<SharedRunPage />} />
           {/* Standalone per-agent chatbox (m37) — authenticated (same console login) but
@@ -225,11 +190,10 @@ export function App() {
                 picker → Create. Placed under /agents/new (the agents surface's
                 primary create action). */}
             <Route path="agents/new" element={<CreateAgentPage />} />
-            <Route path="config" element={<ConfigBuilderPage />} />
+            {/* The config builder is the create wizard's agent.yaml entrance. */}
+            <Route path="config" element={<MovedTo to="/agents/new" set={{ mode: "yaml" }} />} />
             <Route path="playground" element={<PlaygroundPage />} />
-            {/* The M14 first-agent wizards (m14.9) — these nav destinations were
-                /soon placeholders; they're now the real connect-provider +
-                add-MCP flows, the first UI of the aha. */}
+            {/* The M14 first-agent wizards (m14.9): connect a provider. */}
             <Route path="providers" element={<ProvidersPage />} />
             <Route path="providers/connect" element={<ConnectProviderPage />} />
             {/* Tenants (M47) — the multi-tenant quota surface (read-only). */}
@@ -237,10 +201,10 @@ export function App() {
             {/* m25 S10: MCP Servers list — the primary MCP surface (Add is in-page) */}
             <Route path="tools/mcp-servers" element={<McpServersPage />} />
             <Route path="tools/add-mcp" element={<AddMcpPage />} />
-            {/* m17.9: MCP approval queue — operator-only, lists pending MCPs */}
-            <Route path="tools/approvals" element={<McpApprovalsPage />} />
-            {/* m17.10: Tool catalog — merged curated + user-added + pending tools */}
-            <Route path="tools/catalog" element={<ToolCatalogPage />} />
+            {/* The MCP approval queue is the Approvals page's MCP tab. */}
+            <Route path="tools/approvals" element={<MovedTo to="/approvals" set={{ tab: "mcp" }} />} />
+            {/* The tool catalog is the MCP servers page's Tools tab. */}
+            <Route path="tools/catalog" element={<MovedTo to="/tools/mcp-servers" set={{ tab: "tools" }} />} />
             {/* m76.1: /tools/mcp-catalog retired — redirect to Gallery (the single
                 discovery surface, which renders its own inline McpCatalogTab). The old
                 standalone mcp-catalog-page was deleted as dead code. */}
@@ -292,16 +256,7 @@ export function App() {
             <Route path="evals" element={<EvalsPage />} />
             {/* m17.12: PromptVersion list + textual diff viewer */}
             <Route path="prompts" element={<PromptsPage />} />
-            {/* Not-yet-built IA destinations (Tools, Traces, … ,
-                Settings) render their milestone placeholder — the full approved
-                nav is walkable without pulling later features forward. */}
-            <Route path="soon/:id" element={<SoonPage />} />
-            <Route
-              path="*"
-              element={
-                <PlaceholderPage title="Not found" milestone="this build" />
-              }
-            />
+            <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Routes>
       </ToastProvider>

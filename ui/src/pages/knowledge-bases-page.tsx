@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { BookOpen, Filter, Upload, Play, Search } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -37,9 +37,12 @@ import {
   api,
   ApiError,
   type KBSummary,
-  type KBDetail,
   type KBSearchHit,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
+import { useCapabilitiesIn } from "@/lib/capabilities";
+import { useNamespace } from "@/lib/namespace";
+import { RES_KNOWLEDGEBASES } from "@/lib/nav";
 
 // KnowledgeBasesPage — the KnowledgeBase CR list surface (m68.13, ADR 0061;
 // re-housed on the editorial system in M151 as archetype A1).
@@ -96,11 +99,6 @@ function formatStamp(ts: string): string {
 // List page
 // ──────────────────────────────────────────────────────────────────────────────
 
-type ListLoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; items: KBSummary[] }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 /** Attention-first order (§6.1 A1): what is blocking sorts above what is fine. */
 const ATTENTION: Record<StatusTone, number> = {
   failed: 0,
@@ -142,37 +140,17 @@ export function KnowledgeBasesPage() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [view, setView] = useState<KBView>("all");
-  const [loadState, setLoadState] = useState<ListLoadState>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
+  // The shell's selection; "" ("All workspaces") lists every namespace the caller works in.
+  const { namespace } = useNamespace();
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
-    api
-      .listKnowledgeBases(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", items: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const fetchKBs = useCallback(
+    (signal: AbortSignal) => api.listKnowledgeBases(namespace, signal).then((res) => res.items),
+    [namespace],
+  );
+  const { state: loadState, reload } = useLoad(fetchKBs);
 
   const all = useMemo(
-    () => (loadState.kind === "ready" ? loadState.items : []),
+    () => (loadState.kind === "ready" ? loadState.data : []),
     [loadState],
   );
 
@@ -240,7 +218,7 @@ export function KnowledgeBasesPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "knowledge bases",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => reload(),
         }
       : null;
 
@@ -422,14 +400,6 @@ export function KnowledgeBasesPage() {
 // Detail page
 // ──────────────────────────────────────────────────────────────────────────────
 
-type DetailLoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; kb: KBDetail }
-  // `forbidden` is carried separately because a permission boundary is a
-  // different STATE from a failure (§7): one is calm and names the role to ask
-  // for, the other offers a retry.
-  | { kind: "error"; message: string; forbidden: boolean };
-
 type UploadState =
   | { kind: "idle" }
   | { kind: "uploading" }
@@ -498,6 +468,16 @@ type SearchState =
 //   query-hit-{i}         — one result hit row (0-indexed)
 //   query-unavailable     — the 501 calm state
 
+/** Why a reader sees no Upload or Ingest: both need update on the knowledge base. */
+function ReadOnlyNote({ testId }: { testId: string }) {
+  return (
+    <p className="text-sm text-secondary-foreground" data-testid={testId}>
+      You can read this knowledge base but not change it: adding documents and starting an
+      ingestion need update on it. Ask whoever runs this workspace for that role.
+    </p>
+  );
+}
+
 export function KBDetailPage() {
   // No `useNavigate` here any more: the way back is the PageHeader breadcrumb,
   // which is a real link (right-clickable, middle-clickable) rather than a
@@ -505,41 +485,23 @@ export function KBDetailPage() {
   // ones where the old back button did not.
   const { ns, name } = useParams<{ ns: string; name: string }>();
 
-  const [loadState, setLoadState] = useState<DetailLoadState>({ kind: "loading" });
   const [uploadState, setUploadState] = useState<UploadState>({ kind: "idle" });
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [ingestState, setIngestState] = useState<IngestState>({ kind: "idle" });
   const [queryText, setQueryText] = useState("");
   const [queryTopK, setQueryTopK] = useState(5);
   const [searchState, setSearchState] = useState<SearchState>({ kind: "idle" });
-  const abortRef = useRef<AbortController | null>(null);
+  // Adding a document and starting an ingestion change the corpus, which takes update on the
+  // KnowledgeBase in its own namespace, the route's, whatever the shell has selected.
+  // Display-only: the API refuses the caller without it (ADR 0011).
+  const { can } = useCapabilitiesIn(ns ?? "");
+  const canWrite = can(RES_KNOWLEDGEBASES, "update");
 
-  const load = useCallback(() => {
-    if (!ns || !name) return;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
-    api
-      .getKnowledgeBase(name, ns, controller.signal)
-      .then((kb) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", kb });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "failed to load KB",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [ns, name]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const fetchKB = useCallback(
+    (signal: AbortSignal) => api.getKnowledgeBase(name ?? "", ns ?? "", signal),
+    [ns, name],
+  );
+  const { state: loadState, reload: load } = useLoad(fetchKB);
 
   async function onUpload() {
     if (!uploadFile || !name || !ns) return;
@@ -650,13 +612,13 @@ export function KBDetailPage() {
           title="The knowledge base didn't load."
           description="Nothing has changed about the corpus itself — only this page failed to read it."
           detail={loadState.message}
-          onRetry={load}
+          onRetry={() => load()}
         />
       </div>
     );
   }
 
-  const { kb } = loadState;
+  const kb = loadState.data;
 
   // The load-bearing distinction on this page. A corpus with no ingestion
   // behind it has no ingestion DATE — that is unknown. Its counts may still be
@@ -742,26 +704,30 @@ export function KBDetailPage() {
                 not searchable until an ingestion chunks, embeds and indexes it —
                 that is the next panel, and it is a separate step on purpose.
               </p>
-              <div className="flex flex-wrap items-center gap-3">
-                <Input
-                  type="file"
-                  data-testid="upload-input"
-                  className="max-w-sm"
-                  onChange={(e) => {
-                    setUploadFile(e.target.files?.[0] ?? null);
-                    setUploadState({ kind: "idle" });
-                  }}
-                  disabled={uploadState.kind === "uploading"}
-                />
-                <Button
-                  data-testid="upload-submit"
-                  onClick={() => void onUpload()}
-                  disabled={!uploadFile || uploadState.kind === "uploading"}
-                >
-                  <Upload className="h-4 w-4" />
-                  {uploadState.kind === "uploading" ? "Uploading…" : "Upload"}
-                </Button>
-              </div>
+              {canWrite ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <Input
+                    type="file"
+                    data-testid="upload-input"
+                    className="max-w-sm"
+                    onChange={(e) => {
+                      setUploadFile(e.target.files?.[0] ?? null);
+                      setUploadState({ kind: "idle" });
+                    }}
+                    disabled={uploadState.kind === "uploading"}
+                  />
+                  <Button
+                    data-testid="upload-submit"
+                    onClick={() => void onUpload()}
+                    disabled={!uploadFile || uploadState.kind === "uploading"}
+                  >
+                    <Upload className="h-4 w-4" />
+                    {uploadState.kind === "uploading" ? "Uploading…" : "Upload"}
+                  </Button>
+                </div>
+              ) : (
+                <ReadOnlyNote testId="kb-upload-read-only" />
+              )}
               {uploadState.kind === "success" && (
                 <p className="text-sm text-success" data-testid="upload-result">
                   Uploaded:{" "}
@@ -808,14 +774,18 @@ export function KBDetailPage() {
                   </QuietNote>
                 </div>
               )}
-              <Button
-                data-testid="ingest-button"
-                onClick={() => void onIngest()}
-                disabled={ingestState.kind === "running"}
-              >
-                <Play className="h-4 w-4" />
-                {ingestState.kind === "running" ? "Starting…" : "Start ingestion"}
-              </Button>
+              {canWrite ? (
+                <Button
+                  data-testid="ingest-button"
+                  onClick={() => void onIngest()}
+                  disabled={ingestState.kind === "running"}
+                >
+                  <Play className="h-4 w-4" />
+                  {ingestState.kind === "running" ? "Starting…" : "Start ingestion"}
+                </Button>
+              ) : (
+                <ReadOnlyNote testId="kb-ingest-read-only" />
+              )}
               {ingestState.kind === "success" && (
                 <p className="text-sm text-success" data-testid="ingest-result">
                   Ingestion run started:{" "}

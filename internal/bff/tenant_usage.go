@@ -26,7 +26,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // TenantUsageReader reads a tenant's LIVE quota consumption from the shared state-layer Valkey (M49, the
@@ -100,7 +100,7 @@ func (s *Server) handleTenantUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Authorize via the caller-scoped Get (a viewer's 403 / a 404 surfaced honestly).
-	var t agentsv1alpha1.Tenant
+	var t agentsv1beta1.Tenant
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name}, &t); err != nil {
 		s.writeGetError(w, err, "tenant")
 		return
@@ -144,7 +144,7 @@ func (s *Server) handleTenantUsageList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "tenant usage is not available (no state-layer configured)")
 		return
 	}
-	var list agentsv1alpha1.TenantList
+	var list agentsv1beta1.TenantList
 	if err := caller.List(r.Context(), &list); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)

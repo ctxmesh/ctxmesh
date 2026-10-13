@@ -88,7 +88,7 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 	# upstream package (controller-runtime API version conflict). Exclude it from
 	# CRD/webhook generation — the KEDA CRD comes from keda-crds.yaml, not here.
 	"$(CONTROLLER_GEN)" rbac:roleName=manager-role crd webhook \
-		paths="{./api/...,./cmd/...,./internal/controller/...,./internal/gateway/...,./internal/telemetry/...,./internal/toolmanifest/...,./internal/toolpush/...}" \
+		paths="{./api/...,./cmd/...,./internal/controller/...,./internal/gateway/...,./internal/telemetry/...,./internal/toolmanifest/...}" \
 		output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
@@ -201,7 +201,6 @@ ui-test: ## Run the UI unit/component tests (vitest run). Bootstraps the toolcha
 ui-build: ## Build the SPA to static assets (ui/dist). The BFF/image serves this output.
 	$(UI_NODE) install
 	$(UI_NODE) run build
-	./hack/ui-no-internal-routes.sh ui/dist
 
 .PHONY: ui-visual
 ui-visual: ## Render every route x 4 widths x 2 themes; assert nothing overflows; write screenshots (M151).
@@ -272,8 +271,12 @@ build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
 
 .PHONY: build-cli
-build-cli: fmt vet ## Build ctxmesh CLI binary (bin/ctxmesh).
-	go build -o bin/ctxmesh ./cmd/ctxmesh
+# CLI_RELEASE is the release a managed agent's image defaults to in `ctxmesh expand`: the newest
+# release tag, which is published. Unstamped, expand refuses a managed agent with no image rather than
+# name an image nobody can pull.
+CLI_RELEASE ?= $(shell git describe --tags --abbrev=0 --match 'v*' 2>/dev/null)
+build-cli: fmt vet ## Build ctxmesh CLI binary (bin/ctxmesh), its managed-agent default pinned to CLI_RELEASE.
+	go build -ldflags "-X github.com/ctxmesh/ctxmesh/internal/expand.ManagedImageVersion=$(CLI_RELEASE)" -o bin/ctxmesh ./cmd/ctxmesh
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
@@ -317,10 +320,6 @@ docker-build-bff: ## Build the BFF image (bff:latest) — builds the Vite SPA (b
 .PHONY: docker-build-statelayer-proxy
 docker-build-statelayer-proxy: ## Build the state-layer proxy image (statelayer-proxy:latest) — server-side tenant isolation (M51, ADR 0050).
 	$(CONTAINER_TOOL) build -t statelayer-proxy:latest -f Dockerfile.statelayer-proxy .
-
-.PHONY: docker-build-discovery
-docker-build-discovery: ## Build the tool-discovery sidecar image (dev.local/agent-discovery:0.1.0) from Dockerfile.discovery.
-	$(CONTAINER_TOOL) build -t dev.local/agent-discovery:0.1.0 -f Dockerfile.discovery .
 
 .PHONY: docker-build-example
 docker-build-example: ## Build the echo-agent example image (echo-agent:latest) from examples/echo-agent/Dockerfile.
@@ -440,8 +439,12 @@ helm-generate: manifests kustomize ## Regenerate the Helm chart templates from c
 	KUSTOMIZE="$(KUSTOMIZE)" ./hack/gen-helm-chart.sh
 
 .PHONY: crd-version-parity
-crd-version-parity: manifests ## Guard: multi-version CRDs keep matching top-level CEL validations (conversion is None; audit FUNC-8).
+crd-version-parity: manifests ## Guard: every CRD serves exactly one version, its storage version, the same for all (ADR 0100).
 	./hack/check-crd-version-parity.sh config/crd/bases
+
+.PHONY: crd-frozen
+crd-frozen: manifests ## Guard: the frozen CRDs (AgentTeam, Workflow) match hack/crd-freeze.sum (ADR 0152).
+	./hack/check-crd-frozen.sh config/crd/bases
 
 .PHONY: rbac-least-privilege
 rbac-least-privilege: manifests ## Assert the SHIPPED roles grant no verb wildcards and no cluster-scoped Secret writes (M149).
@@ -459,9 +462,32 @@ flow-completability: ## Assert every caller-scoped BFF write is completable by a
 sdk-contract: ## Assert the SDKs track the product — every launcher route reachable, both languages at parity, one version (M155). Static.
 	./hack/sdk-contract.sh
 
+.PHONY: sdk-fakes
+sdk-fakes: ## Regenerate every SDK's test fake from sdk/launcher-routes.json.
+	go run ./hack/gen-sdk-fakes
+
+.PHONY: sdk-fakes-verify
+sdk-fakes-verify: ## Fail, naming the file, if a committed SDK fake is stale against sdk/launcher-routes.json.
+	go run ./hack/gen-sdk-fakes -check
+
+# The suite proves the contract three ways: its goldens against the launcher's real handlers, every
+# SDK's fake against the contract, and every SDK, through its public API, against a real launcher.
+# A missing toolchain fails the run naming it; nothing here skips.
+.PHONY: sdk-conformance
+sdk-conformance: py-venv sdk-ts-build ## Prove the SDK contract: goldens vs the real handlers, fake drift, and all six SDKs against a real launcher.
+	./hack/gen-launcher-routes.sh --check
+	go test ./test/sdkconformance/... -count=1
+	go test ./cmd/launcher -run '^TestSDKContractGoldens$$' -count=1
+	go run ./hack/gen-sdk-fakes -check
+	go run ./hack/sdk-conformance -python "$(abspath $(SDK_VENV_PY))" -node "$$($(SDK_TS_NODE) exec sh -c 'command -v node')"
+
 .PHONY: sdk-readme-truth
 sdk-readme-truth: ## Assert every SDK README links the repo and pins a version that resolves (M175). Add --live to ask the registries.
 	./hack/sdk-readme-truth.sh
+
+.PHONY: shipped-truth
+shipped-truth: ## Assert the source claims shipped milestones made still hold, one table row each. Static; the docs-site rows need CTXMESH_SITE or ../ctxmesh.github.io.
+	./hack/shipped-truth.sh
 
 .PHONY: bump-version
 bump-version: ## Assert every verbatim-shipped version and README pin matches CHANGELOG (M175). Pass a version to WRITE them: ./hack/bump-version.sh 0.1.0-beta.4
@@ -474,6 +500,10 @@ release-truth-sdks: ## Ask all 7 published artifacts what version they actually 
 .PHONY: release-truth
 release-truth: ## Assert the release publishes every artifact an install needs, at a version (M154). Static, no cluster.
 	./hack/release-truth.sh
+
+.PHONY: bff-route-callers
+bff-route-callers: ## Assert every BFF /api route has a caller in the console, an SDK or the platform, or a reasoned allowlist entry (m184.38). Needs the docs checkout.
+	./hack/bff-route-callers.sh
 
 .PHONY: provider-parity
 provider-parity: ## Assert the console offers exactly the providers the BFF supports (M153). Static, no cluster.
@@ -490,6 +520,10 @@ chart-resources-tunable: ## Assert no container's resources are baked into a tem
 .PHONY: install-truth
 install-truth: ## Assert the chart provisions what it consumes (M148). Render-only, no cluster.
 	./hack/install-truth.sh
+
+.PHONY: edge-truth
+edge-truth: ## Lint the platform-edge chart and assert its agents route is sandboxed (ADR 0040). Render-only, no cluster.
+	./hack/edge-truth.sh
 
 .PHONY: helm-verify
 helm-verify: manifests kustomize ## Prove the Helm chart does not drift from `kustomize build config/default` (no-drift gate).

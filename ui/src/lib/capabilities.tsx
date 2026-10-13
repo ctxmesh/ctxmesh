@@ -73,6 +73,16 @@ export interface CapabilitiesContextValue {
    * corrected; also raises the banner until it resolves.
    */
   reprobe: () => void;
+  /**
+   * canIn(namespace, resource, verb) — can() for a namespace other than the working one: the
+   * namespace a resource lives in, which a detail route or an "All workspaces" row may name.
+   * Same optimistic-on-unknown rule; "" means the working namespace. ensure() starts the probe.
+   */
+  canIn: (namespace: string, resource: string, verb: string) => boolean;
+  /** ensure(namespace) — probe that namespace once (cached, deduplicated). */
+  ensure: (namespace: string) => void;
+  /** reprobeIn(namespace) — drop that namespace's cached answer and probe it again. */
+  reprobeIn: (namespace: string) => void;
 }
 
 const CapabilitiesContext =
@@ -151,13 +161,59 @@ export function CapabilitiesProvider({
     fetchCaps(namespace, true);
   }, [namespace, fetchCaps]);
 
+  // Other namespaces' answers, for a resource that lives outside the working namespace. Kept
+  // apart from `state` so probing an item's namespace never disturbs the shell's own map; the
+  // shared cacheRef means switching the shell there later is instant.
+  const [others, setOthers] = React.useState<Record<string, CapState>>({});
+  const inFlight = React.useRef<Set<string>>(new Set());
+  const probeOther = React.useCallback((ns: string, force: boolean) => {
+    if (ns === "" || inFlight.current.has(ns)) return;
+    const cached = cacheRef.current.get(ns);
+    if (cached && !force) {
+      setOthers((m) => (m[ns]?.kind === "ready" ? m : { ...m, [ns]: { kind: "ready", ...cached } }));
+      return;
+    }
+    inFlight.current.add(ns);
+    setOthers((m) => ({ ...m, [ns]: { kind: "loading" } }));
+    api
+      .capabilities(ns)
+      .then((res) => {
+        const entry = { allowed: res.allowed, flows: res.flows ?? {} };
+        cacheRef.current.set(ns, entry);
+        setOthers((m) => ({ ...m, [ns]: { kind: "ready", ...entry } }));
+      })
+      .catch((err: unknown) => {
+        setOthers((m) => ({
+          ...m,
+          [ns]: { kind: "error", message: err instanceof Error ? err.message : "request failed" },
+        }));
+      })
+      .finally(() => inFlight.current.delete(ns));
+  }, []);
+  const ensure = React.useCallback(
+    (ns: string) => {
+      if (ns !== namespace) probeOther(ns, false);
+    },
+    [namespace, probeOther],
+  );
+  const reprobeIn = React.useCallback(
+    (ns: string) => {
+      if (ns === "" || ns === namespace) {
+        reprobe();
+        return;
+      }
+      cacheRef.current.delete(ns);
+      probeOther(ns, true);
+    },
+    [namespace, reprobe, probeOther],
+  );
+
   const value = React.useMemo<CapabilitiesContextValue>(() => {
-    const can = (resource: string, verb: string): boolean => {
-      if (state.kind !== "ready") return true; // loading / failed → optimistic.
-      const verbs = state.allowed[resource];
-      if (!verbs || !(verb in verbs)) return true; // unprobed cell → optimistic.
-      return verbs[verb];
-    };
+    const can = (resource: string, verb: string): boolean => allows(state, resource, verb);
+    const canIn = (ns: string, resource: string, verb: string): boolean =>
+      ns === "" || ns === namespace
+        ? can(resource, verb)
+        : allows(others[ns] ?? { kind: "loading" }, resource, verb);
     // Fails CLOSED, deliberately the opposite of can(). See canFlow's doc above.
     const canFlow = (name: string): boolean =>
       state.kind === "ready" && state.flows[name] === true;
@@ -168,14 +224,26 @@ export function CapabilitiesProvider({
       loading: state.kind === "loading",
       probeError: state.kind === "error" ? state.message : null,
       reprobe,
+      canIn,
+      ensure,
+      reprobeIn,
     };
-  }, [state, reprobe]);
+  }, [state, reprobe, namespace, others, ensure, reprobeIn]);
 
   return (
     <CapabilitiesContext.Provider value={value}>
       {children}
     </CapabilitiesContext.Provider>
   );
+}
+
+// allows reads one cell of a probe outcome: a definite false denies; anything unknown (loading,
+// failed, unprobed) is optimistic, because display gating is never the security boundary.
+function allows(state: CapState, resource: string, verb: string): boolean {
+  if (state.kind !== "ready") return true;
+  const verbs = state.allowed[resource];
+  if (!verbs || !(verb in verbs)) return true;
+  return verbs[verb];
 }
 
 // useCapabilities reads the RBAC chrome context. Outside a provider it returns a
@@ -195,7 +263,33 @@ const FALLBACK: CapabilitiesContextValue = {
   loading: false,
   probeError: null,
   reprobe: () => {},
+  canIn: () => true,
+  ensure: () => {},
+  reprobeIn: () => {},
 };
+
+/**
+ * useCapabilitiesIn(namespace) — can() and reprobe() for the namespace a resource lives in. A
+ * write gate on an item asks about the item's namespace, not the shell's working namespace: under
+ * "All workspaces", or on a detail route, the two differ. "" means the working namespace.
+ */
+export function useCapabilitiesIn(namespace: string): {
+  can: (resource: string, verb: string) => boolean;
+  reprobe: () => void;
+} {
+  const ctx = useCapabilities();
+  const { ensure, canIn, reprobeIn } = ctx;
+  React.useEffect(() => {
+    ensure(namespace);
+  }, [ensure, namespace]);
+  return React.useMemo(
+    () => ({
+      can: (resource: string, verb: string) => canIn(namespace, resource, verb),
+      reprobe: () => reprobeIn(namespace),
+    }),
+    [canIn, reprobeIn, namespace],
+  );
+}
 
 // useCan is the boolean gate for a single (resource, verb) — the ergonomic form
 // for disabling/hiding a button. Same optimistic-on-unknown semantics as can().
@@ -219,5 +313,24 @@ export function Can({
   fallback?: React.ReactNode;
 }): React.ReactElement | null {
   const allowed = useCan(resource, verb);
+  return <>{allowed ? children : fallback}</>;
+}
+
+// CanIn is Can for a resource in another namespace: a control on an "All workspaces" row or an
+// item opened from one, which acts where the item lives, not where the shell is.
+export function CanIn({
+  namespace,
+  resource,
+  verb,
+  children,
+  fallback = null,
+}: {
+  namespace: string;
+  resource: string;
+  verb: string;
+  children: React.ReactNode;
+  fallback?: React.ReactNode;
+}): React.ReactElement | null {
+  const allowed = useCapabilitiesIn(namespace).can(resource, verb);
   return <>{allowed ? children : fallback}</>;
 }

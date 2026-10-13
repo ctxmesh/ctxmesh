@@ -33,9 +33,6 @@ spec:
           when any AgentDeployment metric (errorRate, p95Latency, budget, forecast, regression, runFailureRate)
           breaches its threshold. This is the M70 alerting-plane CRD (ADR 0063 D2). Detection and routing
           only — actuation (auto-rollback) is a separate controller path (ADR 0063 D4, deferred).
-
-          It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook
-          (the KnowledgeBase precedent).
         properties:
           apiVersion:
             description: |-

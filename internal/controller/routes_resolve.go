@@ -37,7 +37,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 const (
@@ -80,7 +80,7 @@ func egressRoutesConfigMapName(agentName string) string {
 // used to get via EGRESS_ROUTES.
 func (r *AgentDeploymentReconciler) reconcileEgressRoutesConfigMap(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	routesJSON string,
 ) (vol *corev1.Volume, mount *corev1.VolumeMount, env []corev1.EnvVar, err error) {
 	cmName := egressRoutesConfigMapName(deploy.Name)

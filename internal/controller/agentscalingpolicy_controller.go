@@ -27,10 +27,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
 	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
 )
 
@@ -43,15 +48,28 @@ const (
 
 // triggerQueueDepth is the trigger value (mirror of the CRD enum) that causes
 // the controller to emit a KEDA ScaledObject. The other triggers are owned by
-// the AgentDeployment reconciler (m7.5) and set only status.backend here.
+// the AgentDeployment reconciler and set only status.backend here.
 const triggerQueueDepth = "queue-depth"
 
-// kedaMetricsAPIScalerType is the KEDA scaler type for a generic metrics-api
-// source. We use it for v1 to keep the controller generic — the concrete URL
-// (Knative Eventing broker queue-depth metric endpoint) is resolved from
-// spec.queueRef and spec.metric. The m7.8 e2e will verify the concrete scaler
-// works end-to-end in-cluster.
-const kedaMetricsAPIScalerType = "metrics-api"
+// The KEDA scaler a queue-depth policy emits, and how it reads the agent's queue.
+const (
+	// kedaNATSJetStreamScalerType is KEDA's native JetStream scaler. It reads a durable consumer's
+	// num_pending + num_ack_pending from the NATS monitoring endpoint: the hops not yet acknowledged.
+	kedaNATSJetStreamScalerType = "nats-jetstream"
+	// queueDepthLagPerReplica is how many waiting hops one replica is sized for: KEDA runs
+	// ceil(waiting / queueDepthLagPerReplica) replicas, within min and max.
+	queueDepthLagPerReplica = "10"
+	// queueDepthActivationLag is the waiting count above which KEDA wakes an agent scaled to zero: one
+	// waiting hop is enough.
+	queueDepthActivationLag = "0"
+)
+
+// Reasons a queue-depth policy is not Ready for a cause the user fixes, not a transient one.
+const (
+	reasonQueueDepthNeedsJetStream   = "QueueDepthNeedsJetStream"
+	reasonQueueDepthNeedsNATSAccount = "QueueDepthNeedsNATSAccount"
+	reasonQueueDepthNeedsEventing    = "QueueDepthNeedsEventing"
+)
 
 // defaultCooldownSeconds is applied when the policy's Cooldown field cannot be
 // parsed or is empty. Matches the CRD kubebuilder default "60s".
@@ -71,6 +89,9 @@ type AgentScalingPolicyReconciler struct {
 	// KEDAAvailable is whether this cluster serves keda.sh (ADR 0141). False skips the ScaledObject
 	// watch and fails an autoscaling policy loudly rather than silently never reconciling it.
 	KEDAAvailable bool
+	// AsyncBackend is the install's async backend. Only the JetStream backend has a queue a queue-depth
+	// policy can scale on.
+	AsyncBackend AsyncBackend
 
 	client.Client
 	Scheme *runtime.Scheme
@@ -86,8 +107,11 @@ type AgentScalingPolicyReconciler struct {
 
 // Reconcile implements the AgentScalingPolicy reconciliation loop.
 //
-// For trigger=queue-depth: CreateOrUpdate a KEDA ScaledObject targeting the
-// agent's workload Deployment, sets status.backend="keda-scaledobject".
+// For trigger=queue-depth on the JetStream backend: CreateOrUpdate a KEDA
+// ScaledObject that scales the eventing agent's Deployment on the hops waiting in
+// its JetStream consumer, and set status.backend="keda-scaledobject". Without a
+// queue to read, or for an agent that is not an eventing agent, no ScaledObject
+// exists and the policy says why.
 //
 // For trigger=request-rate or custom-metric: sets status.backend=
 // "knative-autoscaling" only (the ksvc annotations are applied by the
@@ -104,7 +128,7 @@ func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	log := logf.FromContext(ctx)
 
 	// ── Fetch ────────────────────────────────────────────────────────────────
-	var policy agentsv1alpha1.AgentScalingPolicy
+	var policy agentsv1beta1.AgentScalingPolicy
 	if err := r.Get(ctx, req.NamespacedName, &policy); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Deleted — KEDA ScaledObject (if any) is GC'd via owner-ref.
@@ -114,21 +138,30 @@ func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// ── Verify the target AgentDeployment exists ─────────────────────────────
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	agentKey := client.ObjectKey{Name: policy.Spec.AgentRef, Namespace: policy.Namespace}
 	if err := r.Get(ctx, agentKey, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
 			msg := fmt.Sprintf("AgentDeployment %q not found", policy.Spec.AgentRef)
 			log.Info(msg, "policy", req.NamespacedName)
-			return ctrl.Result{}, r.setReadyFalse(ctx, &policy, "AgentNotFound", msg)
+			// A ScaledObject whose agent is gone scales nothing; it is re-created if the agent returns.
+			if dErr := r.deleteOwnedScaledObject(ctx, &policy); dErr != nil {
+				return ctrl.Result{}, dErr
+			}
+			return ctrl.Result{}, r.setBackendAndReady(ctx, &policy, "", metav1.ConditionFalse, "AgentNotFound", msg)
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment %q: %w", policy.Spec.AgentRef, err)
 	}
 
 	// ── Dispatch by trigger type ─────────────────────────────────────────────
-	switch policy.Spec.Trigger {
-	case triggerQueueDepth:
+	if policy.Spec.Trigger == triggerQueueDepth {
 		return ctrl.Result{}, r.reconcileQueueDepth(ctx, &policy, &agent)
+	}
+	// A policy whose trigger changed away from queue-depth must stop scaling the agent on its queue.
+	if err := r.deleteOwnedScaledObject(ctx, &policy); err != nil {
+		return ctrl.Result{}, err
+	}
+	switch policy.Spec.Trigger {
 	case triggerRequestRate, triggerCustomMetric:
 		// Knative autoscaling annotations are applied to the ksvc by the
 		// AgentDeployment reconciler (m7.5). We only own status.backend.
@@ -146,30 +179,43 @@ func (r *AgentScalingPolicyReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 }
 
-// reconcileQueueDepth CreateOrUpdate's the KEDA ScaledObject for a
-// trigger=queue-depth policy and sets status.backend="keda-scaledobject".
+// reconcileQueueDepth converges the KEDA ScaledObject of a trigger=queue-depth
+// policy.
 //
-// ScaleTargetRef names the agent's Deployment `<agent>` (kind=Deployment,
-// apps/v1). Queue-depth scaling is coherent only for an EVENTING-model agent —
-// its workload IS a plain Deployment named `<agent>` (agentdeployment_controller
-// reconcileEventing), so KEDA resolves the HPA cleanly. A serving-model agent has
-// no such Deployment (Knative names its backing Deployment
-// `<ksvc>-<revision>-deployment`), so a queue-depth policy on a serving agent
-// won't resolve and KEDA/KPA would fight — that combination is a user error, not
-// this controller's concern (the m7.8 e2e finding; see specs/eventing-scaling.md
-// "Why eventing is a plain Deployment"). The ScaledObject is owner-referenced to
-// the policy so it is garbage-collected when the policy is deleted.
+// The ScaledObject scales the eventing agent's Deployment, which carries the bare
+// agent name, on the hops waiting in the agent's durable JetStream consumer. It is
+// owner-referenced to the policy, so it is garbage-collected with it.
 //
-// The KEDA trigger is a metrics-api scaler built generically from spec.queueRef
-// and spec.metric, keeping the controller layer generic. The concrete Prometheus
-// or HTTP endpoint wired to the Knative broker's queue depth is a cluster-level
-// concern addressed in m7.8.
+// A ScaledObject that can never fire is never emitted: with no JetStream backend
+// there is no queue to read, and an agent that is not an eventing agent has no
+// Deployment KEDA can scale (Knative scales a serving agent; a job runs to
+// completion). In both cases a ScaledObject the policy emitted earlier is deleted
+// and Ready=False names the fix. The AgentDeployment reconciler then holds the
+// agent at a fixed replica count within the policy's bounds (eventingReplicaPlan).
 func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 	ctx context.Context,
-	policy *agentsv1alpha1.AgentScalingPolicy,
-	agent *agentsv1alpha1.AgentDeployment,
+	policy *agentsv1beta1.AgentScalingPolicy,
+	agent *agentsv1beta1.AgentDeployment,
 ) error {
 	log := logf.FromContext(ctx)
+
+	if reason, why := r.AsyncBackend.queueDepthUnavailable(); reason != "" {
+		return r.refuseQueueDepth(ctx, policy, reason, fmt.Sprintf(
+			"queue-depth scaling reads the hops waiting for agent %q in its JetStream consumer, and %s. "+
+				"No ScaledObject is created; the agent runs a fixed replica count kept between min "+
+				"(at least 1) and max", agent.Name, why))
+	}
+	if agent.Spec.ExecutionModel != execModelEventing {
+		return r.refuseQueueDepth(ctx, policy, reasonQueueDepthNeedsEventing, fmt.Sprintf(
+			"queue-depth scaling scales an eventing agent's Deployment, and agent %q has executionModel %q, "+
+				"which has no Deployment KEDA can scale. Set executionModel: eventing on the agent, or use "+
+				"trigger request-rate for a serving agent", agent.Name, agent.Spec.ExecutionModel))
+	}
+	monitoring, err := r.AsyncBackend.natsMonitoringEndpoint()
+	if err != nil {
+		// queueDepthUnavailable already refused an endpoint that cannot be derived.
+		return fmt.Errorf("deriving the NATS monitoring endpoint: %w", err)
+	}
 
 	cooldown, err := parseCooldownSeconds(policy.Spec.Cooldown)
 	if err != nil {
@@ -180,28 +226,19 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 	min := policy.Spec.Min
 	max := policy.Spec.Max
 
-	// Build the KEDA ScaledObject. The scaleTargetRef names the agent's plain
-	// Deployment `<agent>` (kind=Deployment, apps/v1) — the workload an
-	// eventing-model agent reconciles to. KEDA resolves the HPA from that
-	// Deployment name (m7.8 e2e finding: an eventing agent is a plain
-	// Deployment + Service precisely so this resolves; a ksvc-backed serving
-	// agent has no `<agent>` Deployment).
 	so := &kedatypes.ScaledObject{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      scaledObjectName(policy),
 			Namespace: policy.Namespace,
 		},
 	}
-
-	trigger := buildMetricsAPITrigger(policy)
+	trigger := buildJetStreamTrigger(policy, monitoring, r.AsyncBackend.natsAccount())
 
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, so, func() error {
 		so.Spec = kedatypes.ScaledObjectSpec{
 			ScaleTargetRef: &kedatypes.ScaleTarget{
-				// The eventing agent's plain Deployment carries the bare
-				// AgentDeployment name (agentdeployment_controller
-				// reconcileEventingDeployment names it deploy.Name), so KEDA
-				// resolves the HPA from this Deployment name.
+				// The eventing agent's Deployment carries the bare agent name
+				// (reconcileEventingDeployment).
 				Name:       agent.Name,
 				Kind:       "Deployment",
 				APIVersion: "apps/v1",
@@ -228,64 +265,71 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 	log.Info("ScaledObject converged", "scaledobject", so.Name, "min", min, "max", max, "cooldown", cooldown)
 	return r.setBackendAndReady(ctx, policy, backendKEDAScaledObject,
 		metav1.ConditionTrue, "Ready",
-		fmt.Sprintf("ScaledObject %q converged (min=%d max=%d cooldown=%ds)", so.Name, min, max, cooldown))
+		fmt.Sprintf("ScaledObject %q scales agent %q on the hops waiting in JetStream consumer %q "+
+			"(min=%d max=%d cooldown=%ds)", so.Name, agent.Name, trigger.Metadata["consumer"], min, max, cooldown))
+}
+
+// refuseQueueDepth deletes the policy's ScaledObject and records why the policy cannot scale, clearing
+// status.backend: no backend is in effect.
+func (r *AgentScalingPolicyReconciler) refuseQueueDepth(
+	ctx context.Context,
+	policy *agentsv1beta1.AgentScalingPolicy,
+	reason, message string,
+) error {
+	if err := r.deleteOwnedScaledObject(ctx, policy); err != nil {
+		return err
+	}
+	return r.setBackendAndReady(ctx, policy, "", metav1.ConditionFalse, reason, message)
+}
+
+// deleteOwnedScaledObject deletes the ScaledObject this policy emitted, if there is one. A ScaledObject of
+// the same name that the policy does not control is left alone.
+func (r *AgentScalingPolicyReconciler) deleteOwnedScaledObject(
+	ctx context.Context,
+	policy *agentsv1beta1.AgentScalingPolicy,
+) error {
+	var so kedatypes.ScaledObject
+	key := client.ObjectKey{Namespace: policy.Namespace, Name: scaledObjectName(policy)}
+	if err := r.Get(ctx, key, &so); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("reading ScaledObject %s: %w", key.Name, err)
+	}
+	if !metav1.IsControlledBy(&so, policy) {
+		return nil
+	}
+	uid := so.UID
+	if err := r.Delete(ctx, &so, client.Preconditions{UID: &uid}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("deleting ScaledObject %s: %w", key.Name, err)
+	}
+	return nil
 }
 
 // scaledObjectName returns the KEDA ScaledObject name for a policy: the
 // convention is <policyName> (same namespace, unambiguous via owner-ref).
 // Using the policy name (rather than the agent name) allows multiple policies
 // to target the same agent without name collision.
-func scaledObjectName(policy *agentsv1alpha1.AgentScalingPolicy) string {
+func scaledObjectName(policy *agentsv1beta1.AgentScalingPolicy) string {
 	return policy.Name
 }
 
-// buildMetricsAPITrigger constructs the KEDA ScaleTriggers entry for a
-// queue-depth policy using the generic metrics-api scaler. The scaler metadata
-// is populated from spec.queueRef (broker name/namespace) and spec.metric
-// (class/metric name). When queueRef is nil the broker name defaults to
-// "<agentRef>-broker" (the convention from specs/eventing-scaling.md "Broker
-// per registry"). This keeps the controller layer generic; the concrete
-// Prometheus exporter or HTTP metrics endpoint is wired by the cluster operator
-// (m7.8 e2e).
-func buildMetricsAPITrigger(policy *agentsv1alpha1.AgentScalingPolicy) kedatypes.ScaleTriggers {
-	// Metric source: prefer explicit queueRef, else default to the eventing
-	// agent's own Service (<agentRef>-eventing) — a RESOLVABLE placeholder. The
-	// Knative in-memory channel exposes no queue-depth/backlog metric (m7.8 e2e
-	// finding, specs/eventing-scaling.md "Known limitations"), so in v1 no
-	// endpoint actually serves this metric and KEDA stays scale-inactive by
-	// design; real queue-depth scaling needs a phase-2 queue backend
-	// (Kafka/NATS — native KEDA scalers) or a Prometheus pipeline.
-	metricSvc := eventingServiceName(policy.Spec.AgentRef)
-	metricNS := policy.Namespace
-	if policy.Spec.QueueRef != nil {
-		metricSvc = policy.Spec.QueueRef.Name
-		if policy.Spec.QueueRef.Namespace != "" {
-			metricNS = policy.Spec.QueueRef.Namespace
-		}
-	}
-
-	// Metric name: prefer explicit spec.metric.Metric, else the conventional
-	// queue_depth.
-	metricName := "queue_depth"
-	if policy.Spec.Metric != nil && policy.Spec.Metric.Metric != "" {
-		metricName = policy.Spec.Metric.Metric
-	}
-
-	// The metrics-api scaler reads a JSON numeric value from an HTTP endpoint.
-	// Format: http://<svc>.<ns>.svc.cluster.local/metrics
-	targetURL := fmt.Sprintf(
-		"http://%s.%s.svc.cluster.local/metrics",
-		metricSvc, metricNS,
-	)
-
+// buildJetStreamTrigger is the KEDA nats-jetstream trigger for a queue-depth policy. It reads the durable
+// consumer the BFF's dispatcher delivers the agent's hops from, so its lag is the number of hops waiting
+// for that agent and for no other. spec.queueRef plays no part: the agent's queue is named by the agent.
+func buildJetStreamTrigger(
+	policy *agentsv1beta1.AgentScalingPolicy, monitoringEndpoint, account string,
+) kedatypes.ScaleTriggers {
 	return kedatypes.ScaleTriggers{
-		Type: kedaMetricsAPIScalerType,
+		Type: kedaNATSJetStreamScalerType,
 		Name: "queue-depth",
 		Metadata: map[string]string{
-			"url":           targetURL,
-			"valueLocation": metricName,
-			"targetValue":   "10",
-			"unsafeSsl":     "false",
+			"natsServerMonitoringEndpoint": monitoringEndpoint,
+			"account":                      account,
+			"stream":                       jsname.Stream,
+			"consumer":                     jsname.AgentDurable(policy.Namespace, policy.Spec.AgentRef),
+			"lagThreshold":                 queueDepthLagPerReplica,
+			"activationLagThreshold":       queueDepthActivationLag,
 		},
 	}
 }
@@ -311,7 +355,7 @@ func parseCooldownSeconds(cooldown string) (int32, error) {
 // setBackendAndReady writes status.backend and the Ready condition atomically.
 func (r *AgentScalingPolicyReconciler) setBackendAndReady(
 	ctx context.Context,
-	policy *agentsv1alpha1.AgentScalingPolicy,
+	policy *agentsv1beta1.AgentScalingPolicy,
 	backend string,
 	condStatus metav1.ConditionStatus,
 	reason, message string,
@@ -345,7 +389,7 @@ func (r *AgentScalingPolicyReconciler) setBackendAndReady(
 // or the agent is missing.
 func (r *AgentScalingPolicyReconciler) setReadyFalse(
 	ctx context.Context,
-	policy *agentsv1alpha1.AgentScalingPolicy,
+	policy *agentsv1beta1.AgentScalingPolicy,
 	reason, message string,
 ) error {
 	return r.setBackendAndReady(ctx, policy, policy.Status.Backend, metav1.ConditionFalse, reason, message)
@@ -353,17 +397,36 @@ func (r *AgentScalingPolicyReconciler) setReadyFalse(
 
 // SetupWithManager registers the AgentScalingPolicyReconciler with the manager,
 // owns the KEDA ScaledObjects it generates (GC on policy delete), and watches
-// AgentScalingPolicy objects.
+// AgentScalingPolicy objects and the agents they target: a policy's outcome
+// depends on its agent existing and on the agent's execution model.
 func (r *AgentScalingPolicyReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// KEDA is OPTIONAL (ADR 0141). Owning a kind the cluster does not serve does not stop the
 	// manager, but it stops THIS controller reconciling anything at all — which looks healthy and
 	// is not.
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.AgentScalingPolicy{})
+		For(&agentsv1beta1.AgentScalingPolicy{}).
+		Watches(&agentsv1beta1.AgentDeployment{},
+			handler.EnqueueRequestsFromMapFunc(r.policiesForAgent),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	if r.KEDAAvailable {
 		b = b.Owns(&kedatypes.ScaledObject{})
 	}
 	return b.
 		Named("agentscalingpolicy").
 		Complete(r)
+}
+
+// policiesForAgent maps an AgentDeployment to the policies that target it.
+func (r *AgentScalingPolicyReconciler) policiesForAgent(ctx context.Context, obj client.Object) []reconcile.Request {
+	policies, err := listAgentScalingPolicies(ctx, r.Client, obj.GetNamespace(), obj.GetName())
+	if err != nil {
+		logf.FromContext(ctx).Error(err, "listing the scaling policies of an agent",
+			"agent", obj.GetNamespace()+"/"+obj.GetName())
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(policies))
+	for i := range policies {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&policies[i])})
+	}
+	return reqs
 }

@@ -44,7 +44,7 @@ function span(over: Partial<SpanSummary>): SpanSummary {
 const SPANS: SpanSummary[] = [
   span({ id: "root",     parentId: "",      type: "SPAN",       name: "run: billing-agent",  startMs: 0,   durationMs: 1840, nestingDepth: 0 }),
   span({ id: "gen",      parentId: "root",  type: "GENERATION", name: "generate response",    startMs: 20,  durationMs: 520,  nestingDepth: 1, model: "claude-sonnet-4", tokensIn: 620, tokensOut: 240, costUSD: 0.003, input: '{"q":1}', output: '{"a":2}' }),
-  span({ id: "tool",     parentId: "gen",   type: "SPAN",       name: "tool: get_invoice",   startMs: 560, durationMs: 180,  nestingDepth: 2, tokensIn: 12, tokensOut: 4, costUSD: 0.0001, input: '{"id":4021}', output: '{"status":"shipped"}' }),
+  span({ id: "tool",     parentId: "gen",   type: "TOOL",       name: "get_invoice",         startMs: 560, durationMs: 180,  nestingDepth: 2, input: '{"id":4021}', output: '{"status":"shipped"}' }),
   span({ id: "redacted", parentId: "root",  type: "SPAN",       name: "tool: search_docs",   startMs: 760, durationMs: 320,  nestingDepth: 1, inputRedacted: true, outputRedacted: true }),
   span({ id: "event",    parentId: "root",  type: "EVENT",      name: "trace-metadata",      startMs: 0,   durationMs: 0,    nestingDepth: 1 }),
 ];
@@ -143,6 +143,24 @@ describe("TraceExplorer (m16.6)", () => {
     expect(screen.getByTestId("span-kind-gen")).toHaveTextContent("GENERATION");
     expect(screen.getByTestId("span-kind-tool")).toHaveTextContent("TOOL");
     expect(screen.getByTestId("span-kind-event")).toHaveTextContent("EVENT");
+  });
+
+  it("labels a TOOL observation TOOL whatever its name; the SPAN name heuristic stays for older traces", () => {
+    render(
+      <TraceExplorer
+        spans={[
+          span({ id: "root",   parentId: "",     type: "SPAN", name: "run",              nestingDepth: 0 }),
+          span({ id: "wc",     parentId: "root", type: "TOOL", name: "word-count",       nestingDepth: 1 }),
+          span({ id: "legacy", parentId: "root", type: "SPAN", name: "tool: get_weather", nestingDepth: 1 }),
+          span({ id: "step",   parentId: "root", type: "SPAN", name: "plan",             nestingDepth: 1 }),
+        ]}
+      />,
+    );
+    expect(screen.getByTestId("span-kind-wc")).toHaveTextContent("TOOL");
+    expect(screen.getByTestId("span-kind-legacy")).toHaveTextContent("TOOL");
+    expect(screen.getByTestId("span-kind-step")).toHaveTextContent("SPAN");
+    // A tool call reports no token usage of its own; the cell stays empty.
+    expect(screen.getByTestId("span-tokens-wc")).toHaveTextContent("");
   });
 
   it("renders the empty state when spans is an empty array", () => {

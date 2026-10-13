@@ -16,10 +16,6 @@ limitations under the License.
 
 package v1beta1
 
-// Workflow is a NEW type (M67, ADR 0060) with no v1alpha1 history, so it is born directly in the storage
-// version (v1beta1) as a SINGLE-version CRD — no deprecated spoke, no conversion (the AgentTeam/GuardrailPolicy
-// precedent). The CRD-version-parity guard (hack/check-crd-version-parity.sh) skips single-version CRDs.
-
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -283,6 +279,7 @@ type WorkflowStatus struct {
 // controller VALIDATES it (structure + CEL + the referenced-output⇒outputSchema rule + registry membership)
 // and reports Validated/Invalid on status; it does NO execution. A workflow INSTANCE is a durable Run with a
 // workflowRef (instances-of-record live in Postgres, not etcd), run by the executor-in-the-worker (later tasks).
+// This kind is feature-frozen: it receives fixes, not new fields (ADR 0152).
 type Workflow struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
 )
 
@@ -74,7 +74,7 @@ func TestHandleAgentMemory_ListsAgentWideOnly(t *testing.T) {
 	seedMem(t, store, agentmemory.ScopeAgent, "", "the team prefers metric units")
 	seedMem(t, store, agentmemory.ScopeAgentUser, "hash-alice", "alice's private secret")
 
-	agent := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "asst", Namespace: "prod"}}
+	agent := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "asst", Namespace: "prod"}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	s := memoryConsoleServer(t, &fakeCallerClientFactory{client: c}, store)
 
@@ -114,7 +114,7 @@ func TestHandleAgentMemory_MissingAgentIs404(t *testing.T) {
 
 // No store wired ⇒ an honest 501, never a 500.
 func TestHandleAgentMemory_NoStoreIs501(t *testing.T) {
-	agent := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "asst", Namespace: "prod"}}
+	agent := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "asst", Namespace: "prod"}}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).Build()
 	s := memoryConsoleServer(t, &fakeCallerClientFactory{client: c}, nil)
 	rec, _ := getAgentMemory(t, s)

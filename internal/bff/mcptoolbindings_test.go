@@ -24,11 +24,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authnv1 "k8s.io/api/authentication/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -36,7 +41,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // mtbNS is the namespace used in MCPToolBinding tests.
@@ -45,15 +52,15 @@ const mtbNS = "team-bindings"
 // --- fixture helpers --------------------------------------------------------
 
 // mockMCPToolBinding builds a minimal MCPToolBinding (sidecar mode).
-func mockMCPToolBinding(name, ns, agentRef, toolName string) *agentsv1alpha1.MCPToolBinding {
-	return &agentsv1alpha1.MCPToolBinding{
+func mockMCPToolBinding(name, ns, agentRef, toolName string) *agentsv1beta1.MCPToolBinding {
+	return &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    agentRef,
 			RegistryRef: "default-registry",
 			ToolName:    toolName,
 			Mode:        "sidecar",
-			Server: agentsv1alpha1.ToolServer{
+			Server: agentsv1beta1.ToolServer{
 				Image: "ghcr.io/example/mcp-search:latest",
 			},
 		},
@@ -63,7 +70,7 @@ func mockMCPToolBinding(name, ns, agentRef, toolName string) *agentsv1alpha1.MCP
 // withReadyCondition sets Ready=True on an MCPToolBinding, simulating that the
 // controller has registered, pin-matched, rendered, and hot-updated the tool.
 // Ready=True IS the hot-update propagation signal.
-func withReadyCondition(b *agentsv1alpha1.MCPToolBinding) *agentsv1alpha1.MCPToolBinding {
+func withReadyCondition(b *agentsv1beta1.MCPToolBinding) *agentsv1beta1.MCPToolBinding {
 	b.Status.Conditions = []metav1.Condition{
 		{
 			Type:               "Ready",
@@ -78,7 +85,7 @@ func withReadyCondition(b *agentsv1alpha1.MCPToolBinding) *agentsv1alpha1.MCPToo
 
 // withFailedCondition sets Ready=False with a specific reason, simulating a
 // binding that failed controller reconciliation.
-func withFailedCondition(b *agentsv1alpha1.MCPToolBinding, reason string) *agentsv1alpha1.MCPToolBinding {
+func withFailedCondition(b *agentsv1beta1.MCPToolBinding, reason string) *agentsv1beta1.MCPToolBinding {
 	b.Status.Conditions = []metav1.Condition{
 		{
 			Type:               "Ready",
@@ -124,6 +131,20 @@ func getMCPToolBinding(t *testing.T, s *Server, name string) (*MCPToolBindingDet
 	return nil, rec.Code, rec.Body.String()
 }
 
+func getBindingIn(t *testing.T, s *Server, ns, name string) (*MCPToolBindingDetail, int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/mcptoolbindings/"+ns+"/"+name, nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return nil, rec.Code, rec.Body.String()
+	}
+	var detail MCPToolBindingDetail
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &detail))
+	return &detail, rec.Code, rec.Body.String()
+}
+
 func createMCPToolBinding(t *testing.T, s *Server, reqBody MCPToolBindingCreateRequest) (*MCPToolBindingDetail, int, string) {
 	t.Helper()
 	b, err := json.Marshal(reqBody)
@@ -164,6 +185,45 @@ func deleteMCPToolBinding(t *testing.T, s *Server, name string) *httptest.Respon
 	req.Header.Set("Authorization", "Bearer caller-token")
 	s.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// mtbUser is who the explicit-spec binding tests bind as.
+const mtbUser = "binder@example.com"
+
+// asUser answers the SelfSubjectReview as mtbUser and hands every other create to next.Create, or to
+// the fake store when next has none.
+func asUser(next interceptor.Funcs) interceptor.Funcs {
+	create := next.Create
+	next.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if ssr, ok := obj.(*authnv1.SelfSubjectReview); ok {
+			ssr.Status.UserInfo = authnv1.UserInfo{Username: mtbUser}
+			return nil
+		}
+		if create != nil {
+			return create(ctx, c, obj, opts...)
+		}
+		return c.Create(ctx, obj, opts...)
+	}
+	return next
+}
+
+// explicitBindingServer serves the binding routes with a team MCP server "my-registry" in mtbNS that
+// provides every tool these tests bind, and every authorization allowed.
+func explicitBindingServer(t *testing.T, factory CallerClientFactory) *Server {
+	t.Helper()
+	s := newCallerServer(t, factory)
+	store := toolregistry.NewMemStore()
+	_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: mtbNS, Name: "my-registry",
+		Tools: []toolregistry.ToolEntry{
+			{Name: "search", Image: "img:v1"}, {Name: "search-updated", Image: "img:v1"}, {Name: "web-search", Image: "ghcr.io/example/search:v1"},
+		},
+		Labels: map[string]string{labelManagedBy: managedByMCP, labelMCPVisibility: visibilityTeam},
+	})
+	require.NoError(t, err)
+	s.toolRegistryStore = store
+	s.authorizer = &recordingAuthorizer{}
+	return s
 }
 
 // =============================================================================
@@ -257,7 +317,7 @@ func TestListMCPToolBindingsNamespaceScoping(t *testing.T) {
 
 // TestListMCPToolBindingsLimitAndCursor proves limit/cursor paging works.
 func TestListMCPToolBindingsLimitAndCursor(t *testing.T) {
-	all := []*agentsv1alpha1.MCPToolBinding{
+	all := []*agentsv1beta1.MCPToolBinding{
 		mockMCPToolBinding("b-000", mtbNS, "agent-a", "search"),
 		mockMCPToolBinding("b-001", mtbNS, "agent-b", "search"),
 		mockMCPToolBinding("b-002", mtbNS, "agent-c", "search"),
@@ -281,7 +341,7 @@ func TestListMCPToolBindingsLimitAndCursor(t *testing.T) {
 			if lo.Limit > 0 && start+int(lo.Limit) < end {
 				end = start + int(lo.Limit)
 			}
-			bList, ok := list.(*agentsv1alpha1.MCPToolBindingList)
+			bList, ok := list.(*agentsv1beta1.MCPToolBindingList)
 			if !ok {
 				return fmt.Errorf("unexpected list type %T", list)
 			}
@@ -417,14 +477,14 @@ func TestGetMCPToolBindingPendingWhenConditionAbsent(t *testing.T) {
 // TestGetMCPToolBindingReturnsFullSpec proves the detail DTO includes all spec
 // fields (agentRef, registryRef, toolName, mode, server).
 func TestGetMCPToolBindingReturnsFullSpec(t *testing.T) {
-	b := &agentsv1alpha1.MCPToolBinding{
+	b := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-binding", Namespace: mtbNS},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    "my-agent",
 			RegistryRef: "my-registry",
 			ToolName:    "web-search",
 			Mode:        "sidecar",
-			Server:      agentsv1alpha1.ToolServer{Image: "ghcr.io/example/search:v1"},
+			Server:      agentsv1beta1.ToolServer{Image: "ghcr.io/example/search:v1"},
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(b).Build()
@@ -476,8 +536,8 @@ func TestGetMCPToolBindingForbiddenIs403(t *testing.T) {
 // TestCreateMCPToolBindingSucceeds proves a valid binding create returns 201 with
 // propagationStatus="pending" (controller hasn't reconciled yet — HONEST).
 func TestCreateMCPToolBindingSucceeds(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithInterceptorFuncs(asUser(interceptor.Funcs{})).Build()
+	s := explicitBindingServer(t, &fakeCallerClientFactory{client: c})
 
 	req := MCPToolBindingCreateRequest{
 		Name:        "new-binding",
@@ -503,7 +563,7 @@ func TestCreateMCPToolBindingSucceeds(t *testing.T) {
 	assert.False(t, detail.Ready)
 
 	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.MCPToolBinding
+	var got agentsv1beta1.MCPToolBinding
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: mtbNS, Name: "new-binding"}, &got))
 	assert.Equal(t, "my-agent", got.Spec.AgentRef)
 	assert.Equal(t, "web-search", got.Spec.ToolName)
@@ -527,30 +587,227 @@ func TestCreateMCPToolBindingMissingAgentRefIs400(t *testing.T) {
 	assert.Contains(t, body, "agentRef")
 }
 
-// TestCreateMCPToolBindingMissingModeIs400 proves a missing mode yields 400.
-func TestCreateMCPToolBindingMissingModeIs400(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+// The bind round trip, both ways. This file's contract test writes the catalog the wizard is
+// opened from (GET /api/tools) and the BFF's answers to the bind; the console's tool-catalog test
+// renders that catalog, drives the wizard, and writes the request it sends, which this test posts
+// to the real handler. Regenerate this side with
+//
+//	UPDATE_FIXTURES=1 go test ./internal/bff -run TestCreateMCPToolBinding_ConsoleRequest
+var (
+	bindCatalogFixture   = filepath.Join("..", "..", "ui", "src", "test", "contract", "bind-tool.catalog.json")
+	bindRequestFixture   = filepath.Join("..", "..", "ui", "src", "test", "contract", "bind-tool.request.json")
+	bindResponsesFixture = filepath.Join("..", "..", "ui", "src", "test", "contract", "bind-tool.responses.json")
+)
 
-	req := MCPToolBindingCreateRequest{
-		Name:        "bad-binding",
-		Namespace:   mtbNS,
-		AgentRef:    "agent-a",
-		RegistryRef: "my-registry",
-		ToolName:    "search",
-		// Mode missing
-		Server: ToolServerDTO{Image: "img:v1"},
+// matchesFixture compares got with the committed fixture at path, rewriting it first under
+// UPDATE_FIXTURES=1.
+func matchesFixture(t *testing.T, path string, got []byte) {
+	t.Helper()
+	if os.Getenv("UPDATE_FIXTURES") == "1" {
+		require.NoError(t, os.WriteFile(path, got, 0o644))
 	}
-	_, code, body := createMCPToolBinding(t, s, req)
-	assert.Equal(t, http.StatusBadRequest, code, "body: %s", body)
-	assert.Contains(t, body, "mode")
+	want, err := os.ReadFile(path)
+	require.NoError(t, err, "the committed fixture is missing; regenerate it with UPDATE_FIXTURES=1")
+	assert.Equal(t, string(want), string(got), "%s changed; regenerate it (UPDATE_FIXTURES=1)", path)
+}
+
+const searchMCPURL = "http://search-mcp.default.svc.cluster.local/mcp"
+
+// bindServer is a server whose caller is username, with the namespace's MCP servers in store
+// and every authorization allowed (recorded).
+func bindServer(t *testing.T, username string, store toolregistry.Store) (*Server, client.WithWatch, *recordingAuthorizer) {
+	t.Helper()
+	c := identityClient(t, username)
+	s := NewServer(Options{
+		CallerClients: &fakeCallerClientFactory{client: c},
+		Scheme:        testScheme(t),
+		Auth:          AllowAll{},
+		MCPEnabled:    true,
+		ProviderHTTP:  &http.Client{},
+		Version:       "test",
+		Log:           logr.Discard(),
+	})
+	s.toolRegistryStore = store
+	auth := &recordingAuthorizer{}
+	s.authorizer = auth
+	return s, c, auth
+}
+
+func postBinding(t *testing.T, s *Server, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/mcptoolbindings", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestCreateMCPToolBinding_ConsoleRequest posts the bind wizard's own request to the real handler:
+// the binding is created on the MCP server the tool came from, at the URL that server pins, and
+// the detail the wizard then polls says whether it has propagated, as spec 90 reads it.
+func TestCreateMCPToolBinding_ConsoleRequest(t *testing.T) {
+	store := toolregistry.NewMemStore()
+	_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: "default", Name: "search-mcp",
+		Tools:  []toolregistry.ToolEntry{{Name: "code-search", URL: searchMCPURL}},
+		Labels: map[string]string{labelManagedBy: managedByMCP, labelMCPVisibility: visibilityTeam},
+	})
+	require.NoError(t, err)
+	s, c, auth := bindServer(t, aliceUser, store)
+
+	// The catalog the wizard is opened from, as the handler serves it for the workspace.
+	catalog := httptest.NewRecorder()
+	catalogReq := httptest.NewRequest(http.MethodGet, "/api/tools?namespace=default", nil)
+	catalogReq.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(catalog, catalogReq)
+	require.Equal(t, http.StatusOK, catalog.Code, catalog.Body.String())
+	var pretty bytes.Buffer
+	require.NoError(t, json.Indent(&pretty, catalog.Body.Bytes(), "", "  "))
+	matchesFixture(t, bindCatalogFixture, pretty.Bytes())
+
+	raw, err := os.ReadFile(bindRequestFixture)
+	require.NoError(t, err, "the console's bind request fixture is written by ui/src/pages/tool-catalog.test.tsx")
+	rec := postBinding(t, s, raw)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	created := rec.Body.Bytes()
+	assert.Equal(t, authz.Action{Verb: authz.VerbCreate, Group: agentsAPIGroup, Resource: resourceMCPToolBindings, Namespace: "default"},
+		auth.last, "the bind is authorized before the namespace's MCP servers are read")
+
+	var got agentsv1beta1.MCPToolBinding
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "my-agent-code-search"}, &got))
+	assert.Equal(t, agentsv1beta1.MCPToolBindingSpec{
+		AgentRef: "my-agent", RegistryRef: "search-mcp", ToolName: "code-search",
+		Mode: "remote", Server: agentsv1beta1.ToolServer{URL: searchMCPURL},
+	}, got.Spec)
+
+	got.Status.Conditions = []metav1.Condition{{
+		Type: "Ready", Status: metav1.ConditionTrue, Reason: "ToolHotUpdated", Message: "pushed to discovery",
+		LastTransitionTime: metav1.NewTime(time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)),
+	}}
+	require.NoError(t, c.Update(context.Background(), &got))
+	detail, code, body := getBindingIn(t, s, "default", "my-agent-code-search")
+	require.Equal(t, http.StatusOK, code, body)
+	assert.True(t, detail.Ready)
+	assert.Equal(t, propagationStatePropagated, detail.PropagationStatus)
+	assert.Equal(t, "my-agent", detail.AgentRef)
+
+	var responses struct {
+		Created    json.RawMessage `json:"created"`
+		Propagated json.RawMessage `json:"propagated"`
+	}
+	responses.Created, responses.Propagated = json.RawMessage(created), json.RawMessage(body)
+	out, err := json.MarshalIndent(responses, "", "  ")
+	require.NoError(t, err)
+	out = append(out, '\n')
+	matchesFixture(t, bindResponsesFixture, out)
+}
+
+// TestCreateMCPToolBinding_OldConsoleRequestIsRefused pins the defect: the wizard used to send the
+// agent as an object, which the handler cannot decode.
+func TestCreateMCPToolBinding_OldConsoleRequestIsRefused(t *testing.T) {
+	s, _, _ := bindServer(t, aliceUser, toolregistry.NewMemStore())
+	rec := postBinding(t, s, []byte(`{"name":"b","namespace":"default","agentRef":{"namespace":"default","name":"my-agent"},"toolName":"code-search"}`))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+// TestCreateMCPToolBinding_FillsFromItsServer: a request naming only the agent and the tool is
+// bound to the first MCP server, by name, that the caller may use and that provides the tool;
+// another user's private server is never one of them, and naming a server picks it.
+func TestCreateMCPToolBinding_FillsFromItsServer(t *testing.T) {
+	cases := []struct {
+		name, user, registry  string
+		wantRegistry, wantURL string
+	}{
+		{"the owner of a private server gets it first", aliceUser, "", alicePrivateRegistry, alicePrivateURL},
+		{"anyone else gets the team server", "bob@example.com", "", teamEchoRegistry, teamEchoURL},
+		{"a named server is the one bound", aliceUser, teamEchoRegistry, teamEchoRegistry, teamEchoURL},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c, _ := bindServer(t, tc.user, echoRegistries(t, mtbNS))
+			body, err := json.Marshal(MCPToolBindingCreateRequest{
+				Name: "b", Namespace: mtbNS, AgentRef: "agent-a", RegistryRef: tc.registry, ToolName: "echo",
+			})
+			require.NoError(t, err)
+			rec := postBinding(t, s, body)
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			var got agentsv1beta1.MCPToolBinding
+			require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: mtbNS, Name: "b"}, &got))
+			assert.Equal(t, tc.wantRegistry, got.Spec.RegistryRef)
+			assert.Equal(t, "remote", got.Spec.Mode)
+			assert.Equal(t, tc.wantURL, got.Spec.Server.URL)
+		})
+	}
+}
+
+// TestCreateMCPToolBinding_RefusesWhatItCannotResolve: a tool no usable server provides, another
+// user's private server named outright, no store, and a caller who may not bind are each refused
+// with nothing created; the last before any server is read.
+func TestCreateMCPToolBinding_RefusesWhatItCannotResolve(t *testing.T) {
+	cases := []struct {
+		name     string
+		user     string
+		req      MCPToolBindingCreateRequest
+		noStore  bool
+		authzErr error
+		want     int
+		wantMsg  string
+	}{
+		{
+			"an unknown tool", aliceUser,
+			MCPToolBindingCreateRequest{ToolName: "nope"},
+			false, nil,
+			http.StatusBadRequest, `tool "nope" is not provided by any MCP server you can use`,
+		},
+		{
+			"another user's private server", "bob@example.com",
+			MCPToolBindingCreateRequest{ToolName: "echo", RegistryRef: alicePrivateRegistry},
+			false, nil,
+			http.StatusBadRequest, `is not provided by an MCP server "a-alice-private" you can use`,
+		},
+		{
+			"no control-plane store", aliceUser,
+			MCPToolBindingCreateRequest{ToolName: "echo"},
+			true, nil,
+			http.StatusNotImplemented, msgToolRegistryStoreRequired,
+		},
+		{
+			"a caller who may not bind", aliceUser,
+			MCPToolBindingCreateRequest{ToolName: "echo"},
+			false, authz.ErrForbidden,
+			http.StatusForbidden, "you do not have permission to bind tools",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var store toolregistry.Store
+			if !tc.noStore {
+				store = echoRegistries(t, mtbNS)
+			}
+			s, c, auth := bindServer(t, tc.user, store)
+			auth.err = tc.authzErr
+			tc.req.Name, tc.req.Namespace, tc.req.AgentRef = "b", mtbNS, "agent-a"
+			body, err := json.Marshal(tc.req)
+			require.NoError(t, err)
+			rec := postBinding(t, s, body)
+			assert.Equal(t, tc.want, rec.Code, rec.Body.String())
+			var refusal struct {
+				Error string `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &refusal))
+			assert.Contains(t, refusal.Error, tc.wantMsg)
+			var list agentsv1beta1.MCPToolBindingList
+			require.NoError(t, c.List(context.Background(), &list))
+			assert.Empty(t, list.Items)
+		})
+	}
 }
 
 // TestCreateMCPToolBindingAlreadyExistsIs409 proves a duplicate create yields 409.
 func TestCreateMCPToolBindingAlreadyExistsIs409(t *testing.T) {
 	existing := mockMCPToolBinding("my-binding", mtbNS, "agent-a", "search")
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).WithInterceptorFuncs(asUser(interceptor.Funcs{})).Build()
+	s := explicitBindingServer(t, &fakeCallerClientFactory{client: c})
 
 	req := MCPToolBindingCreateRequest{
 		Name:        "my-binding",
@@ -570,14 +827,14 @@ func TestCreateMCPToolBindingAlreadyExistsIs409(t *testing.T) {
 // Invalid surfaces as 4xx (422).
 func TestCreateMCPToolBindingAPIServerRejectionSurfaces4xx(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
+		WithInterceptorFuncs(asUser(interceptor.Funcs{
 			Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
 				return apierrors.NewInvalid(
 					schema.GroupKind{Group: agentsAPIGroup, Kind: mcpToolBindingKind},
 					obj.GetName(), nil)
 			},
-		}).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+		})).Build()
+	s := explicitBindingServer(t, &fakeCallerClientFactory{client: c})
 
 	req := MCPToolBindingCreateRequest{
 		Name:        "bad-binding",
@@ -595,15 +852,15 @@ func TestCreateMCPToolBindingAPIServerRejectionSurfaces4xx(t *testing.T) {
 // TestCreateMCPToolBindingForbiddenIs403 proves a viewer's create returns 403.
 func TestCreateMCPToolBindingForbiddenIs403(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
-		WithInterceptorFuncs(interceptor.Funcs{
+		WithInterceptorFuncs(asUser(interceptor.Funcs{
 			Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: agentsAPIGroup, Resource: "mcptoolbindings"},
 					obj.GetName(), errors.New("viewer cannot create"))
 			},
-		}).Build()
+		})).Build()
 	factory := &fakeCallerClientFactory{client: c}
-	s := newCallerServer(t, factory)
+	s := explicitBindingServer(t, factory)
 
 	req := MCPToolBindingCreateRequest{
 		Name:        "no-perm",
@@ -656,8 +913,8 @@ func TestCreateMCPToolBindingWithoutTokenIs401(t *testing.T) {
 // (ForceOwnership) and the change is visible in the fake store.
 func TestUpdateMCPToolBindingEditsSpec(t *testing.T) {
 	existing := mockMCPToolBinding("my-binding", mtbNS, "agent-a", "search")
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).WithInterceptorFuncs(asUser(interceptor.Funcs{})).Build()
+	s := explicitBindingServer(t, &fakeCallerClientFactory{client: c})
 
 	req := MCPToolBindingUpdateRequest{
 		AgentRef:    "agent-b", // changed
@@ -695,8 +952,8 @@ func TestUpdateMCPToolBindingRenameGuardIs400(t *testing.T) {
 // TestUpdateMCPToolBindingAbsentNameInBodyIsOK proves omitting Name is fine.
 func TestUpdateMCPToolBindingAbsentNameInBodyIsOK(t *testing.T) {
 	existing := mockMCPToolBinding("my-binding", mtbNS, "agent-a", "search")
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).WithInterceptorFuncs(asUser(interceptor.Funcs{})).Build()
+	s := explicitBindingServer(t, &fakeCallerClientFactory{client: c})
 
 	req := MCPToolBindingUpdateRequest{
 		// Name is empty — URL is authoritative.
@@ -716,15 +973,15 @@ func TestUpdateMCPToolBindingAbsentNameInBodyIsOK(t *testing.T) {
 func TestUpdateMCPToolBindingForbiddenIs403(t *testing.T) {
 	existing := mockMCPToolBinding("my-binding", mtbNS, "agent-a", "search")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).
-		WithInterceptorFuncs(interceptor.Funcs{
+		WithInterceptorFuncs(asUser(interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return apierrors.NewForbidden(
 					schema.GroupResource{Group: agentsAPIGroup, Resource: "mcptoolbindings"},
 					obj.GetName(), errors.New("viewer cannot update"))
 			},
-		}).Build()
+		})).Build()
 	factory := &fakeCallerClientFactory{client: c}
-	s := newCallerServer(t, factory)
+	s := explicitBindingServer(t, factory)
 
 	req := MCPToolBindingUpdateRequest{
 		AgentRef:    "agent-a",
@@ -743,14 +1000,14 @@ func TestUpdateMCPToolBindingForbiddenIs403(t *testing.T) {
 func TestUpdateMCPToolBindingInvalidWriteSurfaces422(t *testing.T) {
 	existing := mockMCPToolBinding("my-binding", mtbNS, "agent-a", "search")
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(existing).
-		WithInterceptorFuncs(interceptor.Funcs{
+		WithInterceptorFuncs(asUser(interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, obj client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return apierrors.NewInvalid(
 					schema.GroupKind{Group: agentsAPIGroup, Kind: mcpToolBindingKind},
 					obj.GetName(), nil)
 			},
-		}).Build()
-	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+		})).Build()
+	s := explicitBindingServer(t, &fakeCallerClientFactory{client: c})
 
 	req := MCPToolBindingUpdateRequest{
 		AgentRef:    "agent-a",
@@ -799,7 +1056,7 @@ func TestDeleteMCPToolBindingRemovesObject(t *testing.T) {
 	rec := deleteMCPToolBinding(t, s, "my-binding")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.MCPToolBinding
+	var got agentsv1beta1.MCPToolBinding
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: mtbNS, Name: "my-binding"}, &got)
 	require.True(t, apierrors.IsNotFound(err), "MCPToolBinding must be gone after a successful DELETE")
 }
@@ -892,4 +1149,78 @@ func TestPropagationStatusFromConditionsThreeStates(t *testing.T) {
 	}
 	assert.Equal(t, propagationStatePending, propagationStatusFromConditions(readyUnknown),
 		"Ready=Unknown must return pending, not propagated")
+}
+
+// TestMCPToolBinding_AnExplicitServerIsCheckedLikeAFilledOne: naming registryRef, mode and server
+// outright gets no further than leaving them for the BFF to fill in. Another user's private server is
+// refused with the very same response either way, a personal server shared with the team binds only
+// for its owner, an update cannot move a binding onto either, and a server the caller may use still
+// binds.
+func TestMCPToolBinding_AnExplicitServerIsCheckedLikeAFilledOne(t *testing.T) {
+	const sharedPersonal, sharedPersonalURL = "b-alice-shared", "https://alice-shared.example/mcp"
+	newServer := func(t *testing.T) (*Server, client.WithWatch) {
+		t.Helper()
+		store := echoRegistries(t, mtbNS)
+		_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{
+			Namespace: mtbNS, Name: sharedPersonal,
+			Tools: []toolregistry.ToolEntry{{Name: "echo", URL: sharedPersonalURL}},
+			Labels: map[string]string{
+				labelManagedBy: managedByMCP, labelMCPScope: scopePersonal, labelMCPOwner: userGrantHash(aliceUser),
+				labelMCPVisibility: visibilityTeam,
+			},
+		})
+		require.NoError(t, err)
+		existing := mockMCPToolBinding("bob-echo", mtbNS, "agent-a", "echo")
+		existing.Spec.RegistryRef, existing.Spec.Mode = teamEchoRegistry, "remote"
+		existing.Spec.Server = agentsv1beta1.ToolServer{URL: teamEchoURL}
+		s, c, _ := bindServer(t, "bob@example.com", store)
+		require.NoError(t, c.Create(context.Background(), existing))
+		return s, c
+	}
+	post := func(t *testing.T, s *Server, req MCPToolBindingCreateRequest) *httptest.ResponseRecorder {
+		t.Helper()
+		req.Name, req.Namespace, req.AgentRef, req.ToolName = "b", mtbNS, "agent-a", "echo"
+		body, err := json.Marshal(req)
+		require.NoError(t, err)
+		return postBinding(t, s, body)
+	}
+	explicit := func(registry, url string) MCPToolBindingCreateRequest {
+		return MCPToolBindingCreateRequest{RegistryRef: registry, Mode: "remote", Server: ToolServerDTO{URL: url}}
+	}
+
+	for _, tc := range []struct {
+		name, registry, url string
+		want                int
+	}{
+		{"another user's private server", alicePrivateRegistry, alicePrivateURL, http.StatusBadRequest},
+		{"another user's personal server shared with the team", sharedPersonal, sharedPersonalURL, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, c := newServer(t)
+			filled := post(t, s, MCPToolBindingCreateRequest{RegistryRef: tc.registry})
+			given := post(t, s, explicit(tc.registry, tc.url))
+			assert.Equal(t, tc.want, filled.Code, filled.Body.String())
+			assert.Equal(t, filled.Code, given.Code, "an explicit server is refused like a filled-in one")
+			assert.Equal(t, filled.Body.String(), given.Body.String())
+
+			_, code, body := putMCPToolBinding(t, s, "bob-echo", MCPToolBindingUpdateRequest{
+				AgentRef: "agent-a", RegistryRef: tc.registry, ToolName: "echo", Mode: "remote", Server: ToolServerDTO{URL: tc.url},
+			})
+			assert.Equal(t, tc.want, code, "an update cannot move a binding onto it: %s", body)
+
+			var list agentsv1beta1.MCPToolBindingList
+			require.NoError(t, c.List(context.Background(), &list))
+			require.Len(t, list.Items, 1, "nothing was created")
+			assert.Equal(t, teamEchoRegistry, list.Items[0].Spec.RegistryRef, "nothing was moved")
+		})
+	}
+
+	t.Run("a server the caller may use still binds", func(t *testing.T) {
+		s, c := newServer(t)
+		rec := post(t, s, explicit(teamEchoRegistry, teamEchoURL))
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var got agentsv1beta1.MCPToolBinding
+		require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: mtbNS, Name: "b"}, &got))
+		assert.Equal(t, teamEchoRegistry, got.Spec.RegistryRef)
+	})
 }

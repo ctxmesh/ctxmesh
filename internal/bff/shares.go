@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -32,9 +33,9 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
@@ -140,34 +141,28 @@ type ShareSummary struct {
 }
 
 // registerShareRoutes mounts the caller-scoped mint/revoke/list surface for share links (M75, m75.1,
-// ADR 0069 §1) on the authed mux. Like registerRunRoutes it requires the caller-scoped cluster path (the
-// mint authorizes the caller against the run's agent through their own client, ADR 0011). Absent the
-// cluster path or the store → honest 501. (The UNAUTHENTICATED public read is m75.2, mounted elsewhere.)
+// ADR 0069 §1) on the authed mux. Like registerRunRoutes it needs the caller-scoped cluster path (the
+// mint authorizes the caller against the run's agent through their own client, ADR 0011); a missing
+// store is a 501 from the handler. (The UNAUTHENTICATED public read is mounted elsewhere.)
 func (s *Server) registerShareRoutes(authed *http.ServeMux) {
-	if s.callerClients != nil {
-		authed.HandleFunc("POST /api/runs/{id}/shares", s.handleCreateShare)
-		authed.HandleFunc("GET /api/runs/{id}/shares", s.handleListShares)
-		authed.HandleFunc("DELETE /api/runs/{id}/shares/{shareId}", s.handleRevokeShare)
-		// V13 (M112): the caller-scoped "my active shares" view — the caller's shares across ALL runs.
-		authed.HandleFunc("GET /api/my/shares", s.handleMyShares)
-		return
-	}
-	authed.Handle("POST /api/runs/{id}/shares", notImplemented("run shares"))
-	authed.Handle("GET /api/runs/{id}/shares", notImplemented("run shares"))
-	authed.Handle("DELETE /api/runs/{id}/shares/{shareId}", notImplemented("run shares"))
-	authed.Handle("GET /api/my/shares", notImplemented("run shares"))
+	d := s.routeDeps()
+	authed.Handle("POST /api/runs/{id}/shares", requires(s.handleCreateShare, d.cluster))
+	authed.Handle("GET /api/runs/{id}/shares", requires(s.handleListShares, d.cluster))
+	authed.Handle("DELETE /api/runs/{id}/shares/{shareId}", requires(s.handleRevokeShare, d.cluster))
+	// V13 (M112): the caller-scoped "my active shares" view — the caller's shares across ALL runs.
+	authed.Handle("GET /api/my/shares", requires(s.handleMyShares, d.cluster))
 }
 
 // authorizeRunAccess is the caller-scoped authorization gate for a single run (ADR 0011). Every user-facing
-// run read/mutate — GET a run, cancel it, stream its events, view its trace detail / feedback, and mint /
-// list / revoke a public share of it — MUST prove the caller can access that run first, on the caller's OWN
+// run read/mutate — GET a run, cancel it, stream its events, and mint / list / revoke a public share of it —
+// MUST prove the caller can access that run first, on the caller's OWN
 // token (never the BFF SA, which has rules:[]). This is strictly stronger than "presence of a bearer" (the
 // edge auth alone never validates the token; only a real K8s API call on the caller token does — see
 // auth.go BearerAuthenticator). It returns the resolved run + ok. runID may be a run.ID or a traceId (the
 // trace-detail page identifies a run by traceId); both resolve here.
 //
 // allowOwner selects the policy:
-//   - true (run READS/cancel/events/trace/feedback): the run's CREATOR (CallerUsername, resolved via a
+//   - true (run READS/cancel/events): the run's CREATOR (CallerUsername, resolved via a
 //     token-validating SelfSubjectReview) is authorized to read their own run even without current RBAC on
 //     the backing resource; a non-creator falls to the RBAC gate (operator-investigation).
 //   - false (share MINT/list/revoke): creator-match is NOT sufficient — delegating PUBLIC access requires
@@ -175,32 +170,46 @@ func (s *Server) registerShareRoutes(authed *http.ServeMux) {
 //     run they did not personally create; a former creator who lost access may not). Only the RBAC gate runs.
 //
 // A forbidden/absent backing resource → 403/404 (uniform with resolveAgent, no oracle on whether the run or
-// the backing resource is the missing one).
+// the backing resource is the missing one). Reads keyed by a trace id use authorizeTraceRead, which applies
+// this gate when a run maps the trace.
 func (s *Server) authorizeRunAccess(w http.ResponseWriter, r *http.Request, caller client.Client, runID string, allowOwner bool) (*run.Run, bool) {
-	// Resolve the run by its internal ID first; if not found, fall back to traceId. The
-	// trace-detail page (/traces/:id) identifies a run by traceId, which is DISTINCT from
-	// run.ID, so the Share button on that page passes a traceId — not the internal ID. We
-	// resolve by either so the mint works in both contexts. The stored shared_runs.run_id is
-	// ALWAYS the real run.ID (rn.ID below), never the traceId.
-	rn, err := s.runStore.Get(runID)
+	rn, err := s.findRun(runID)
 	if err != nil {
-		if !errors.Is(err, run.ErrNotFound) {
-			s.log.Error(err, "authorize run access: run store read failed", "id", runID)
-			writeError(w, http.StatusInternalServerError, "failed to read run")
-			return nil, false
-		}
-		// Not found by run.ID — try traceId fallback.
-		rn, err = s.runStore.GetByTraceID(runID)
-		if err != nil {
-			s.log.Error(err, "authorize run access: run store trace-id lookup failed", "traceId", runID)
-			writeError(w, http.StatusInternalServerError, "failed to read run")
-			return nil, false
-		}
-		if rn == nil {
-			writeError(w, http.StatusNotFound, "run not found")
-			return nil, false
-		}
+		s.log.Error(err, "authorize run access: run store lookup failed", "id", runID)
+		writeError(w, http.StatusInternalServerError, "failed to read run")
+		return nil, false
 	}
+	if rn == nil {
+		writeError(w, http.StatusNotFound, "run not found")
+		return nil, false
+	}
+	if !s.authorizeResolvedRun(w, r, caller, rn, allowOwner) {
+		return nil, false
+	}
+	return rn, true
+}
+
+// findRun resolves an id that is either a run id or a trace id; (nil, nil) when no run maps it. The
+// trace page (/traces/:id) identifies a run by its trace id, which is distinct from run.ID, so its
+// Share button passes a trace id. Callers that persist a reference must use the returned rn.ID.
+func (s *Server) findRun(id string) (*run.Run, error) {
+	rn, err := s.runStore.Get(id)
+	if err == nil {
+		return rn, nil
+	}
+	if !errors.Is(err, run.ErrNotFound) {
+		return nil, fmt.Errorf("read run by id: %w", err)
+	}
+	rn, err = s.runStore.GetByTraceID(id)
+	if err != nil {
+		return nil, fmt.Errorf("read run by trace id: %w", err)
+	}
+	return rn, nil
+}
+
+// authorizeResolvedRun is authorizeRunAccess for a run already resolved: it writes the error response
+// and returns false on denial.
+func (s *Server) authorizeResolvedRun(w http.ResponseWriter, r *http.Request, caller client.Client, rn *run.Run, allowOwner bool) bool {
 	// M137/EU1b (ADR 0107 Q3): a verified END-USER is authorized ONLY by ownership — NEVER a K8s client
 	// (structural separation: an end-user bearer must never reach a SelfSubjectReview/TokenReview).
 	// Classify against the RUN's namespace/tenant, before touching the (lazy, still-inert) caller client:
@@ -208,10 +217,10 @@ func (s *Server) authorizeRunAccess(w http.ResponseWriter, r *http.Request, call
 	// oracle). A console token is not a valid end-user here, so it falls through to the K8s path below.
 	if principal, _, isEndUser, _ := s.resolveEndUserPrincipal(r.Context(), r, rn.Namespace); isEndUser {
 		if allowOwner && rn.CallerUsername != "" && rn.CallerUsername == principal {
-			return rn, true
+			return true
 		}
 		writeError(w, http.StatusNotFound, "run not found")
-		return nil, false
+		return false
 	}
 
 	// Caller-scoped authz (ADR 0011) — two gates, both on the CALLER's own token (never the BFF SA):
@@ -231,29 +240,49 @@ func (s *Server) authorizeRunAccess(w http.ResponseWriter, r *http.Request, call
 	if allowOwner {
 		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
 			if rn.CallerUsername != "" && rn.CallerUsername == username {
-				return rn, true
+				return true
 			}
 		} else if apierrors.IsUnauthorized(uErr) {
 			writeError(w, http.StatusUnauthorized, "unauthorized: token rejected by the API server")
-			return nil, false
+			return false
 		}
 	}
-	if !s.callerCanReadRunBacking(w, r, caller, rn) {
-		return nil, false
-	}
-	return rn, true
+	return s.callerCanReadRunBacking(w, r, caller, rn)
 }
 
 // callerCanReadRunBacking authorizes a NON-creator caller to read a run through their OWN RBAC on the run's
-// backing resource (ADR 0011): the Workflow CR for a workflow instance, otherwise the run's AgentDeployment.
-// An inline (CR-less) workflow run has no backing CR, so a non-creator is denied (404 — no oracle, uniform
-// with a missing run). It writes the error response and returns false on denial/absence.
+// backing resource (ADR 0011): the Workflow CR for a workflow instance, the datasets of its namespace for a
+// dataset export and the KnowledgeBase for an ingestion (whose Agent field is only the dataset's or the
+// KnowledgeBase's name), otherwise the run's AgentDeployment. An inline (CR-less) workflow run has no
+// backing CR, so a non-creator is denied (404 — no oracle, uniform with a missing run). It writes the error
+// response and returns false on denial/absence.
 func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request, caller client.Client, rn *run.Run) bool {
 	var (
 		obj  client.Object
 		name = rn.Agent
 	)
 	switch {
+	case rn.IsDatasetExportJob():
+		// The permission that starts an export (datasets.go) also reads and cancels one.
+		if cErr := s.authzRefusal(
+			s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resEvalSuites, rn.Namespace, ""),
+			"access this run",
+		); cErr != nil {
+			writeError(w, cErr.status, cErr.msg)
+			return false
+		}
+		return true
+	case rn.IsIngestionJob():
+		// Another person's ingestion, or a scheduled one, is the corpus's: following or cancelling it
+		// takes update on that KnowledgeBase.
+		if cErr := s.authzRefusal(
+			s.authorizeStore(r.Context(), caller, authz.VerbUpdate, resKnowledgeBases, rn.Namespace, rn.IngestionRef),
+			"access this run",
+		); cErr != nil {
+			writeError(w, cErr.status, cErr.msg)
+			return false
+		}
+		return true
 	case rn.WorkflowRef != "":
 		// A workflow instance: authorize against the Workflow CR (rn.Agent is the CR name, but be explicit).
 		obj = &agentsv1beta1.Workflow{}
@@ -264,7 +293,7 @@ func (s *Server) callerCanReadRunBacking(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusNotFound, "run not found")
 		return false
 	default:
-		obj = &agentsv1alpha1.AgentDeployment{}
+		obj = &agentsv1beta1.AgentDeployment{}
 	}
 	if gErr := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: rn.Namespace}, obj); gErr != nil {
 		switch {

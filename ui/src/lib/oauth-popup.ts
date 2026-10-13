@@ -12,6 +12,18 @@
 
 export const MCP_OAUTH_MESSAGE = "ctxmesh:mcp-oauth";
 
+// Consent begun in a chatbox on an agent hostname (ADR 0040 amendment) goes through the console's
+// /connect page: the page announces itself to its opener with READY (no payload), and the chatbox
+// answers with the single-use ticket, addressed to the console origin only. The ticket travels only
+// by message, never in a URL, so a link cannot carry one.
+export const MCP_CONSENT_READY = "ctxmesh:mcp-consent-ready";
+export const MCP_CONSENT_TICKET = "ctxmesh:mcp-consent-ticket";
+
+export interface McpConsentTicketMessage {
+  type: typeof MCP_CONSENT_TICKET;
+  ticket: string;
+}
+
 export interface McpOAuthPopupMessage {
   type: typeof MCP_OAUTH_MESSAGE;
   // The connected server name (empty on error).

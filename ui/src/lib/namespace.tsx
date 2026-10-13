@@ -48,6 +48,11 @@ export interface NamespaceContextValue {
 
 const NamespaceContext = React.createContext<NamespaceContextValue | null>(null);
 
+// firstWorkspace is the first namespace that is not platform-owned, or undefined if every one is.
+function firstWorkspace(namespaces: NamespaceSummary[]): NamespaceSummary | undefined {
+  return namespaces.find((ns) => !ns.platform);
+}
+
 const NS_KEY = "ctxmesh.namespace";
 
 export function NamespaceProvider({ children }: { children: React.ReactNode }) {
@@ -116,18 +121,28 @@ export function NamespaceProvider({ children }: { children: React.ReactNode }) {
     // keeps it — that is what persisting "" above is for — and a caller with no namespace at all
     // stays "", which the shell renders as manual entry rather than inventing a "default" they
     // may not hold.
+    //
+    // Never a platform namespace. A cluster-wide caller's list holds the control plane's own
+    // namespace and kube-*/knative-*, sorted among the workspaces, so the first entry was often
+    // the control-plane namespace: "No agents in ctxmesh", and Connect a provider wrote the key
+    // into it. Only a cluster-wide list carries the flag, and that caller can read "All
+    // workspaces", so it is the fallback when nothing else remains. A caller bound per
+    // namespace gets no flags and keeps the first namespace.
     if (list.kind === "ready" && list.namespaces.length > 0) {
-      setNamespaceState(list.namespaces[0].name);
+      setNamespaceState(firstWorkspace(list.namespaces)?.name ?? "");
     }
     setScopeDecided(true);
   }, [scopeDecided, list]);
 
   // The concrete namespace writes land in. An explicit selection wins; otherwise the first
-  // namespace the caller can actually use. Resolving to a hardcoded "default" would be wrong
-  // in the same way the empty probe was — asserting a namespace the caller may not hold.
+  // namespace the caller can actually use, preferring a workspace over a platform namespace.
+  // Resolving to a hardcoded "default" would be wrong in the same way the empty probe was —
+  // asserting a namespace the caller may not hold.
   const workingNamespace = React.useMemo(() => {
     if (namespace !== "") return namespace;
-    if (list.kind === "ready" && list.namespaces.length > 0) return list.namespaces[0].name;
+    if (list.kind === "ready" && list.namespaces.length > 0) {
+      return (firstWorkspace(list.namespaces) ?? list.namespaces[0]).name;
+    }
     return "";
   }, [namespace, list]);
 

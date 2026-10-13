@@ -65,6 +65,32 @@ func TestEnsureDataset_Idempotent(t *testing.T) {
 	})
 }
 
+func TestGetDataset_ReadsWithoutCreating(t *testing.T) {
+	eachStore(t, func(t *testing.T, s Store) {
+		ctx := context.Background()
+		_, err := s.GetDataset(ctx, "default", "absent")
+		require.ErrorIs(t, err, controlplane.ErrNotFound)
+		_, err = s.GetDataset(ctx, "default", "absent")
+		require.ErrorIs(t, err, controlplane.ErrNotFound, "a read must not have created the dataset")
+		all, err := s.ListDatasets(ctx, "default")
+		require.NoError(t, err)
+		assert.Empty(t, all)
+
+		made, err := s.EnsureDataset(ctx, "default", "support-qa")
+		require.NoError(t, err)
+		got, err := s.GetDataset(ctx, "default", "support-qa")
+		require.NoError(t, err)
+		assert.Equal(t, made.ID, got.ID)
+		_, err = s.GetDataset(ctx, "other", "support-qa")
+		assert.ErrorIs(t, err, controlplane.ErrNotFound, "a dataset is found only in its own namespace")
+
+		_, err = s.GetDataset(ctx, "", "support-qa")
+		assert.ErrorIs(t, err, controlplane.ErrInvalid)
+		_, err = s.GetDataset(ctx, "default", " ")
+		assert.ErrorIs(t, err, controlplane.ErrInvalid)
+	})
+}
+
 func TestEnsureDataset_Invalid(t *testing.T) {
 	eachStore(t, func(t *testing.T, s Store) {
 		ctx := context.Background()

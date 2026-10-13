@@ -189,8 +189,9 @@ test("route inventory covers every route in App.tsx", async () => {
   const src = fs.readFileSync(path.resolve("src/App.tsx"), "utf8");
   const declared = Array.from(src.matchAll(/<Route\s+(?:[^>]*?\s)?path="([^"]+)"/g)).map((m) => m[1]);
   const missing = declared.filter((p) => {
-    if (p === "*" || p.startsWith("design")) return false; // catch-all + flagged gallery
-    if (p === "tools/mcp-catalog") return false; // a <Navigate> redirect, not a surface
+    if (p === "*") return false; // the catch-all
+    // Redirects, not surfaces: each lands on a page the inventory covers.
+    if (["tools/mcp-catalog", "tools/catalog", "tools/approvals", "config"].includes(p)) return false;
     const literal = "/" + p.replace(/:[^/]+/g, "");
     return !ROUTES.some((r: RouteCase) => {
       const rp = r.path.replace(/\/[^/]*$/, "/");

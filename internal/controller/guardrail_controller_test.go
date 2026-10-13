@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -33,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -53,7 +54,7 @@ func ksvcEnvMap(t *testing.T, name, namespace string) (map[string]corev1.EnvVar,
 // readyCondition returns the Ready condition off the AgentDeployment status, or nil.
 func readyCondition(t *testing.T, name, namespace string) *metav1.Condition {
 	t.Helper()
-	var d agentsv1alpha1.AgentDeployment
+	var d agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &d))
 	return apimeta.FindStatusCondition(d.Status.Conditions, conditionReady)
 }
@@ -102,9 +103,9 @@ func TestReconcile_GuardrailValidRef(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -159,7 +160,7 @@ func TestReconcile_GuardrailValidRef(t *testing.T) {
 	// This is the interposition trigger — preserved, now keyed on the mounted file's presence.
 	assert.Equal(t, budgetProxyURL, env["MODEL_GATEWAY_URL"].Value,
 		"a guarded agent must route MODEL_GATEWAY_URL through the launcher proxy")
-	assert.Equal(t, litellmGatewayURL, env["GATEWAY_UPSTREAM_URL"].Value,
+	assert.Equal(t, defaultPlatform.gatewayURL(), env["GATEWAY_UPSTREAM_URL"].Value,
 		"the real LiteLLM address travels as GATEWAY_UPSTREAM_URL")
 
 	// The revision name still carries the combined-digest suffix (presence of the ref folds in).
@@ -189,9 +190,9 @@ func TestReconcile_GuardrailDanglingRefFailsClosed(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: "does-not-exist",
 		},
@@ -230,9 +231,9 @@ func TestReconcile_GuardrailInvalidRefFailsClosed(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -272,9 +273,9 @@ func TestReconcile_GuardrailPolicyEditNoRoll(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -332,9 +333,9 @@ func TestReconcile_GuardedAgentGetsBFFURL(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, policy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -350,7 +351,7 @@ func TestReconcile_GuardedAgentGetsBFFURL(t *testing.T) {
 	// BFF_INTERNAL_URL must be injected for a guarded non-delegate agent (m66.15).
 	bffEnv, ok := env["BFF_INTERNAL_URL"]
 	require.True(t, ok, "BFF_INTERNAL_URL must be injected for a guarded agent (m66.15 audit sink reachability)")
-	assert.Equal(t, bffInternalURL, bffEnv.Value,
+	assert.Equal(t, defaultPlatform.bffInternalURL(), bffEnv.Value,
 		"BFF_INTERNAL_URL must equal the operator's in-cluster BFF address")
 	assert.Nil(t, bffEnv.ValueFrom,
 		"BFF_INTERNAL_URL must be static (Knative rejects valueFrom)")
@@ -377,13 +378,13 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 	mkRegistryMesh(t, regName, namespace, regName, regName)
 
 	// Supervisor agent: both guarded AND a registry member (label matches the registry selector).
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": regName},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:              "ghcr.io/ctxmesh/example-agent:latest",
 			GuardrailPolicyRef: policyN,
 		},
@@ -393,13 +394,13 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
 
 	// Create a worker for the AgentTeam roster; it must be a registry member too.
-	worker := &agentsv1alpha1.AgentDeployment{
+	worker := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "bff-sup-worker",
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": regName},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 		},
 	}
@@ -426,32 +427,47 @@ func TestReconcile_GuardedSupervisorGetsBFFURLOnce(t *testing.T) {
 		"BFF_INTERNAL_URL must appear exactly once for a guarded supervisor (no duplicate env — K8s/Knative rejects it)")
 }
 
-// TestReconcile_UnguardedAgentNoBFFURL proves the regression guard: an unguarded
-// (no guardrailPolicyRef), non-delegate agent must NOT get BFF_INTERNAL_URL (m66.15 — no
-// behavior change for the unguarded path).
-func TestReconcile_UnguardedAgentNoBFFURL(t *testing.T) {
-	const (
-		name      = "unguarded-no-bff"
-		namespace = "default"
-	)
-
-	deploy := &agentsv1alpha1.AgentDeployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
-			Image: "ghcr.io/ctxmesh/example-agent:latest",
+// TestReconcile_EveryAgentGetsBFFURL: an unguarded, non-delegate agent gets BFF_INTERNAL_URL too.
+//
+// Every launcher binds its run capability at the BFF before the agent sees it (ADR 0124, m184.5), and a
+// launcher without the BFF's address hands its agent a bearer capability anyone could bind first. So every
+// agent has it, exactly once, and it is the platform's: a spec.env value would bind the capability at an
+// address the author picks, so it is dropped and reported like any platform variable (platform_env.go).
+func TestReconcile_EveryAgentGetsBFFURL(t *testing.T) {
+	const namespace = "default"
+	for _, tc := range []struct {
+		name    string
+		userEnv []corev1.EnvVar
+		want    string
+	}{
+		{name: "unguarded-gets-bff", want: defaultPlatform.bffInternalURL()},
+		{
+			name: "unguarded-own-bff", userEnv: []corev1.EnvVar{{Name: "BFF_INTERNAL_URL", Value: "http://own:9090"}},
+			want: defaultPlatform.bffInternalURL(),
 		},
+	} {
+		deploy := &agentsv1beta1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: namespace},
+			Spec: agentsv1beta1.AgentDeploymentSpec{
+				Image: "ghcr.io/ctxmesh/example-agent:latest",
+				Env:   tc.userEnv,
+			},
+		}
+		require.NoError(t, k8sClient.Create(testCtx, deploy))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+
+		reconcileNN(t, newReconciler(), tc.name, namespace)
+
+		var ksvc servingv1.Service
+		require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: tc.name, Namespace: namespace}, &ksvc))
+		var values []string
+		for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == "BFF_INTERNAL_URL" {
+				values = append(values, e.Value)
+			}
+		}
+		assert.Equal(t, []string{tc.want}, values, "%s: BFF_INTERNAL_URL exactly once, the platform's", tc.name)
 	}
-	require.NoError(t, k8sClient.Create(testCtx, deploy))
-	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
-	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-
-	reconcileNN(t, newReconciler(), name, namespace)
-
-	env, _ := ksvcEnvMap(t, name, namespace)
-
-	_, ok := env["BFF_INTERNAL_URL"]
-	assert.False(t, ok,
-		"BFF_INTERNAL_URL must NOT be injected for an unguarded non-delegate agent (regression guard)")
 }
 
 // TestGuardrailPolicyController_ValidatesAndHashes exercises the minimal GuardrailPolicy status
@@ -495,4 +511,66 @@ func TestGuardrailPolicyController_ValidatesAndHashes(t *testing.T) {
 	require.NotNil(t, badCond, "Validated condition must be set for an invalid policy")
 	assert.Equal(t, metav1.ConditionFalse, badCond.Status, "an invalid policy is Validated=False")
 	assert.Equal(t, reasonGuardrailInvalidPattern, badCond.Reason)
+}
+
+// A guarded agent carries its own identity toward the BFF (m184.7): a projected token with the BFF's
+// audience, mounted read-only into the agent container, its path in BFF_POD_TOKEN_PATH. An unguarded
+// agent has none.
+func TestReconcile_GuardedAgentGetsABFFPodToken(t *testing.T) {
+	const namespace = "default"
+	policy := newGuardrailPolicy("pod-token-policy", namespace, "ignore.*instructions")
+	require.NoError(t, k8sClient.Create(testCtx, policy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, policy) })
+
+	for _, tc := range []struct {
+		name    string
+		guarded bool
+	}{{"guarded-pod-token", true}, {"unguarded-pod-token", false}} {
+		deploy := &agentsv1beta1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: tc.name, Namespace: namespace},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		}
+		if tc.guarded {
+			deploy.Spec.GuardrailPolicyRef = policy.Name
+		}
+		require.NoError(t, k8sClient.Create(testCtx, deploy))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+		reconcileNN(t, newReconciler(), tc.name, namespace)
+
+		var ksvc servingv1.Service
+		require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: tc.name, Namespace: namespace}, &ksvc))
+		var vol *corev1.Volume
+		for i := range ksvc.Spec.Template.Spec.Volumes {
+			if ksvc.Spec.Template.Spec.Volumes[i].Name == bffPodTokenVolume {
+				vol = &ksvc.Spec.Template.Spec.Volumes[i]
+			}
+		}
+		user := ksvc.Spec.Template.Spec.Containers[0]
+		mounted, envSet := false, false
+		for _, m := range user.VolumeMounts {
+			if m.Name == bffPodTokenVolume {
+				mounted = true
+				assert.True(t, m.ReadOnly, "%s: the token is mounted read-only", tc.name)
+			}
+		}
+		for _, e := range user.Env {
+			if e.Name == envBFFPodTokenPath {
+				envSet = true
+				assert.Equal(t, bffPodTokenMountPath+"/token", e.Value)
+			}
+		}
+		if !tc.guarded {
+			assert.Nil(t, vol, "an unguarded agent gets no BFF pod token")
+			assert.False(t, mounted || envSet, "an unguarded agent gets no BFF pod token")
+			continue
+		}
+		require.NotNil(t, vol, "a guarded agent gets the BFF pod token volume")
+		require.NotNil(t, vol.Projected)
+		require.Len(t, vol.Projected.Sources, 1)
+		sat := vol.Projected.Sources[0].ServiceAccountToken
+		require.NotNil(t, sat)
+		assert.Equal(t, runcap.BFFPodAudience, sat.Audience, "the audience the BFF reviews")
+		assert.True(t, mounted, "the token is mounted into the agent container")
+		assert.True(t, envSet, "the launcher is told where the token is")
+	}
 }

@@ -1,0 +1,22 @@
+{
+  "agent": "researcher",
+  "createdAt": "2026-10-12T09:00:00Z",
+  "id": "sub-8e73d278ca2ffccb17dabcf43d43500d",
+  "input": {
+    "input": "find sources"
+  },
+  "namespace": "prod",
+  "parentRunId": "run-supervisor",
+  "requiresAction": {
+    "kind": "consent_required",
+    "message": "connect your account to continue",
+    "servers": [
+      "search-mcp"
+    ]
+  },
+  "rootRunId": "run-supervisor",
+  "spawnDepth": 1,
+  "status": "requires_action",
+  "traceId": "trace-supervisor",
+  "updatedAt": "2026-10-12T09:00:01Z"
+}

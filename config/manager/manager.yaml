@@ -135,15 +135,13 @@ spec:
           # each literal with a `.Values.controllerManager.*` template so a real install can point the
           # injected sidecar images at its registry (they ImagePullBackOff off dev.local otherwise —
           # OPS-1) and enable OBO egress-sidecar injection (ADR 0030). A working OBO install needs the
-          # whole oboEgress block set; the credential namespace MUST match bff.mcp.credentialNamespace.
+          # whole oboEgress block set.
           - name: COLLECTOR_IMAGE
-            value: ""
-          - name: DISCOVERY_IMAGE
             value: ""
           - name: MCP_OBO_EGRESS_ENABLED
             value: "false"
-          # EGRESS_SIDECAR_IMAGE is NOT empty, unlike COLLECTOR_IMAGE and DISCOVERY_IMAGE above:
-          # the controller falls back to dev.local constants for those two, and the egress sidecar
+          # EGRESS_SIDECAR_IMAGE is NOT empty, unlike COLLECTOR_IMAGE above: the controller falls
+          # back to a dev.local constant for the collector, and the egress sidecar
           # has NO fallback, so an empty value makes Knative reject every tool-having agent's
           # Service with `missing field(s): ... containers[N].image`. This is the kustomize DEV
           # posture, naming the image the harness builds and kind-loads; hack/gen_helm_chart.py
@@ -162,16 +160,25 @@ spec:
                 optional: true
           - name: MCP_CAPABILITY_AUDIENCE
             value: ""
-          - name: MCP_CREDENTIAL_NAMESPACE
-            value: ctxmesh
           - name: TOKEN_SERVICE_URL
             value: http://ctxmesh-token-service.ctxmesh.svc:8443
           # OPS-2 — dev-data-plane gate. "true" here (== the kustomize dev posture) makes the
           # controller inject the DEV-ONLY object-store + Langfuse feedback creds into agent pods;
           # gen_helm_chart templates it to {{ .Values.devDataPlane.enabled }}, so a
           # `profile: production` render (devDataPlane off) sets it "false" and NO dev creds are
-          # injected. Its value must track the bundled dev Valkey/MinIO gate (same values key).
+          # injected. Its value must track the bundled dev Valkey/object-store gate (same values key).
           - name: DEV_DATA_PLANE
+            value: "true"
+          # Whether the bundled object store is deployed. "false" withholds the object-store env
+          # while DEV_DATA_PLANE stays on, so record mode and blob offload see no store rather than
+          # a Service that does not exist. The chart templates it from devDataPlane.objectstore.enabled.
+          - name: DEV_OBJECT_STORE
+            value: "true"
+          # AMP_REQUIRE_ATTESTATION (ADR 0153) — DEFAULT-ON. A registry member admits /invoke only from an
+          # attested AMP caller, its own async consumer, or a run capability naming it. "false" is the
+          # rollout's accept posture: members also admit what they admitted before. The chart templates it
+          # from controllerManager.amp.requireAttestation.
+          - name: AMP_REQUIRE_ATTESTATION
             value: "true"
           # ENABLE_TENANT_LABEL_WEBHOOK (M134, ADR 0102) — DEFAULT-ON. The fail-closed tenant-label
           # ValidatingWebhook forbids a non-controller principal from repointing a namespace's tenant
@@ -208,6 +215,21 @@ spec:
           # with retrieval silently off. values.yaml has carried a
           # `knowledgeSettleWindow` key since M143 that reached no container.
           - name: KNOWLEDGE_SETTLE_WINDOW
+            value: ""
+          # The async backend, from the same chart values the BFF reads (bff.asyncBackend,
+          # bff.natsURL). The controller never connects to the broker: a queue-depth
+          # AgentScalingPolicy names, in its ScaledObject, where KEDA reads the agent's
+          # queue, and without the JetStream backend there is none to name.
+          - name: ASYNC_BACKEND
+            value: ""
+          - name: NATS_URL
+            value: ""
+          # The NATS account the stream lives in, for KEDA's scaler: empty ⇒ $G, the
+          # account of a server with none configured. With a credentials file the
+          # stream is in a named account, and a queue-depth policy refuses to guess it.
+          - name: NATS_ACCOUNT
+            value: ""
+          - name: NATS_CREDENTIALS_FILE
             value: ""
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared

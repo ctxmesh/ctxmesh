@@ -434,6 +434,7 @@ func newTestConsumerWithOffload(off *offloader, invokeStatus int, invokeErr erro
 			mu.Unlock()
 			return invokeStatus, invokeErr
 		},
+		guard: acceptingDeliveryGuard(),
 	}
 	return c, &lastPayload
 }
@@ -494,6 +495,19 @@ func TestConsume_DanglingRef_Nacks(t *testing.T) {
 	}
 	if len(*lastPayload) != 0 {
 		t.Error("the agent must NOT be invoked when rehydrate fails")
+	}
+
+	// The failure released the message id: once the object is readable, the broker's retry
+	// is processed rather than acked as a duplicate.
+	store.mu.Lock()
+	store.getErr = nil
+	store.objects["deadbeef"] = []byte(`{"task":"big"}`)
+	store.mu.Unlock()
+	rr = httptest.NewRecorder()
+	c.consume(rr, cloudEventRequest(t, env))
+	if rr.Code != http.StatusNoContent || string(*lastPayload) != `{"task":"big"}` {
+		t.Errorf("retry after the object became readable: status = %d, payload %q; want 204 and the object",
+			rr.Code, *lastPayload)
 	}
 }
 

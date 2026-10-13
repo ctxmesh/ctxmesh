@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { PlaygroundPage } from "@/pages/playground-page";
@@ -17,6 +17,7 @@ interface Captured {
   url: string;
   method: string;
   body: string;
+  query: string;
 }
 
 // sseBody wraps SSE frame strings in a ReadableStream-like body (getReader) so the
@@ -53,9 +54,18 @@ function recordingFetch(opts: {
   expand?: (body: string) => { ok: boolean; status?: number; text: string };
   create?: (body: string) => { ok: boolean; status?: number; json: unknown };
   traceUrl?: string;
+  // The deployed agents the picker lists (GET /api/agents), and the detail of each by
+  // "<ns>/<name>" (GET /api/agents/{ns}/{name}) — the chat reads it before it opens. An
+  // agent with no detail here answers 404.
+  agents?: { name: string; namespace: string }[];
+  agentDetails?: Record<string, unknown>;
+  // Successive answers to GET /api/agents/{ns}/{name}, by "<ns>/<name>": a detail object, or an
+  // HTTP status to fail with. The last answer repeats. Takes precedence over agentDetails.
+  agentDetailReads?: Record<string, (object | number)[]>;
 }) {
   const run = opts.run ?? {};
   const calls: Captured[] = [];
+  const detailReads: Record<string, number> = {};
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL, init?: RequestInit) => {
@@ -63,7 +73,7 @@ function recordingFetch(opts: {
       const path = url.split("?")[0];
       const method = init?.method ?? "GET";
       const body = typeof init?.body === "string" ? init.body : "";
-      calls.push({ url: path, method, body });
+      calls.push({ url: path, method, body, query: url.split("?")[1] ?? "" });
 
       // POST /api/runs — create a run (streaming path, m32.8).
       if (path === "/api/runs" && method === "POST") {
@@ -135,7 +145,38 @@ function recordingFetch(opts: {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ agents: [] }),
+          json: async () => ({ agents: opts.agents ?? [] }),
+        } as Response);
+      }
+      const detailMatch = /^\/api\/agents\/([^/]+)\/([^/]+)$/.exec(path);
+      if (detailMatch && method === "GET") {
+        const key = `${detailMatch[1]}/${detailMatch[2]}`;
+        const reads = opts.agentDetailReads?.[key];
+        if (reads) {
+          const n = detailReads[key] ?? 0;
+          detailReads[key] = n + 1;
+          const answer = reads[Math.min(n, reads.length - 1)];
+          if (typeof answer === "number") {
+            return Promise.resolve({
+              ok: false,
+              status: answer,
+              json: async () => ({ error: `stubbed ${answer}` }),
+              text: async () => JSON.stringify({ error: `stubbed ${answer}` }),
+            } as Response);
+          }
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => answer,
+            text: async () => JSON.stringify(answer),
+          } as Response);
+        }
+        const detail = opts.agentDetails?.[key];
+        return Promise.resolve({
+          ok: detail !== undefined,
+          status: detail !== undefined ? 200 : 404,
+          json: async () => detail ?? { error: "agent not found" },
+          text: async () => JSON.stringify(detail ?? { error: "agent not found" }),
         } as Response);
       }
       if (path === "/api/namespaces") {
@@ -192,7 +233,9 @@ function fillNamespace(name: string) {
 
 // PlaygroundPage uses <Link> (react-router-dom); wrap in MemoryRouter so tests
 // don't need the full app router (the pattern mirrors agents-page.test.tsx).
-function renderPage(initialEntry = "/playground") {
+// The page opens in plain-text chat (m184.16); the workbench tests below exercise the
+// JSON-request mode, so they open it directly with ?mode=json.
+function renderPage(initialEntry = "/playground?mode=json") {
   return render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <PlaygroundPage />
@@ -209,7 +252,7 @@ describe("PlaygroundPage", () => {
     const calls = recordingFetch({ run: {} });
 
     // create→run / the checklist "Run" step deep-link here — the identity is pre-filled.
-    renderPage("/playground?agent=deployed-agent&ns=prod");
+    renderPage("/playground?agent=deployed-agent&ns=prod&mode=json");
     fill("Message (JSON)", '{"prompt":"hi"}');
     fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
 
@@ -375,11 +418,11 @@ describe("PlaygroundPage", () => {
     });
   });
 
-  it("exports the definition to a CRD via expand → apply (the config-builder path)", async () => {
+  it("exports the definition to a CRD via expand → apply (the create-agent path)", async () => {
     const calls = recordingFetch({
       expand: () => ({
         ok: true,
-        text: "apiVersion: agents.ctxmesh.ai/v1alpha1\nkind: AgentDeployment\nmetadata:\n  name: echo-agent\n",
+        text: "apiVersion: agents.ctxmesh.ai/v1beta1\nkind: AgentDeployment\nmetadata:\n  name: echo-agent\n",
       }),
       create: () => ({
         ok: true,
@@ -797,9 +840,9 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
     );
   }
 
-  function renderGated() {
+  function renderGated(initialEntry = "/playground") {
     return render(
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <NamespaceProvider>
           <CapabilitiesProvider>
             <PlaygroundPage />
@@ -820,9 +863,29 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
     expect(screen.queryByRole("button", { name: /Apply to cluster/ })).toBeNull();
   });
 
+  it("gives a viewer in chat mode the read-only note where the chat would be, and no mode toggle", async () => {
+    installFetch(false);
+    renderGated();
+    const note = await screen.findByTestId("run-readonly-note");
+    expect(screen.getByTestId("playground-chat-mode")).toContainElement(note);
+    expect(screen.getAllByTestId("run-readonly-note")).toHaveLength(1);
+    expect(screen.queryByTestId("playground-mode-chat")).toBeNull();
+    expect(screen.queryByTestId("playground-mode-json")).toBeNull();
+  });
+
+  it("gives a viewer on a JSON request the read-only note where the Run button would be", async () => {
+    installFetch(false);
+    renderGated("/playground?mode=json");
+    const note = await screen.findByTestId("run-readonly-note");
+    expect(screen.getByTestId("playground-chat-mode")).not.toContainElement(note);
+    expect(screen.getAllByTestId("run-readonly-note")).toHaveLength(1);
+  });
+
   it("shows Run + Apply for an operator (create allowed)", async () => {
     installFetch(true);
     renderGated();
+    // Chat is the default; the Run button belongs to the JSON request.
+    fireEvent.click(await screen.findByTestId("playground-mode-json"));
     await waitFor(() =>
       expect(screen.getByRole("button", { name: /Run agent/ })).toBeInTheDocument(),
     );
@@ -836,5 +899,445 @@ describe("PlaygroundPage — RBAC-gated Run/Apply", () => {
       expect(screen.getByRole("button", { name: /Apply to cluster/ })).toBeInTheDocument(),
     );
     expect(screen.queryByTestId("run-readonly-note")).toBeNull();
+  });
+});
+
+// ── m184.16: the first run speaks plain text ────────────────────────────────
+// The page opens in chat: pick an agent, type a sentence, read the answer. The JSON request
+// stays one click away for an agent whose input is structured.
+describe("PlaygroundPage — plain-text chat by default (m184.16)", () => {
+  const readyDetail = (ns: string, name: string, conditions: unknown[] = []) => ({
+    name,
+    namespace: ns,
+    image: "img:1",
+    executionModel: "serving",
+    role: "",
+    promptRef: "",
+    modelRoute: "",
+    scaling: { min: 0, max: 3 },
+    phase: "Ready",
+    ready: true,
+    url: `http://${name}.${ns}.svc.cluster.local`,
+    latestVersion: `${name}-v1`,
+    conditions: [
+      { type: "Ready", status: "True", reason: "Deployed", message: "", lastTransitionTime: "" },
+      ...conditions,
+    ],
+    bindings: [],
+    versions: [],
+    dependencies: [],
+  });
+
+  const finished = {
+    id: "run-1",
+    status: "succeeded",
+    traceId: "trace-xyz",
+    createdAt: "2026-10-11T10:00:00.000Z",
+    updatedAt: "2026-10-11T10:00:01.250Z",
+    messages: [{ role: "assistant", content: '{"answer":"MOCK_OK"}' }],
+  };
+
+  afterEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("opens in chat, sends a typed sentence as plain text, and renders the answer", async () => {
+    const calls = recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "prod" }],
+      agentDetails: { "prod/echo": readyDetail("prod", "echo") },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    // No JSON to write: the message field is the chat composer.
+    expect(screen.queryByLabelText("Message (JSON)")).toBeNull();
+    expect(screen.getByTestId("playground-mode-chat")).toHaveAttribute("aria-pressed", "true");
+
+    const composer = await screen.findByTestId("chat-input");
+    fireEvent.change(composer, { target: { value: "hello there" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+
+    const answer = await screen.findByTestId("chat-turn-agent");
+    await waitFor(() => expect(answer).toHaveTextContent("MOCK_OK"));
+    expect(screen.getByTestId("chat-turn-user")).toHaveTextContent("hello there");
+
+    // The sentence went out as {"input": "<text>"}, to the picked agent in its namespace.
+    const createCall = calls.find((c) => c.url === "/api/runs" && c.method === "POST");
+    expect(JSON.parse(createCall!.body)).toMatchObject({
+      agent: "echo",
+      namespace: "prod",
+      input: { input: "hello there" },
+    });
+
+    // The record keeps the trace link and how long the run took.
+    expect(await screen.findByTestId("view-full-trace")).toHaveAttribute("href", "/traces/trace-xyz");
+    expect(screen.getByTestId("trace-id")).toHaveTextContent("trace-xyz");
+    expect(screen.getByTestId("run-took")).toHaveTextContent("1.25s");
+    // Home's "Run your agent" step checks off for this workspace.
+    expect(window.localStorage.getItem("ctxmesh.firstRun.ranAgent:prod")).toBe("1");
+  });
+
+  it("keeps the JSON request one click away, and it still posts the object verbatim", async () => {
+    const calls = recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "prod" }],
+      agentDetails: { "prod/echo": readyDetail("prod", "echo") },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    fireEvent.click(screen.getByTestId("playground-mode-json"));
+    // The chat is hidden, not unmounted, so a conversation survives the switch (see below).
+    expect(screen.getByTestId("playground-chat-mode")).not.toBeVisible();
+    fill("Message (JSON)", '{"prompt":"hi","limit":3}');
+    fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+    expect(await screen.findByText(/Traced run complete/)).toBeInTheDocument();
+    const createCall = calls.find((c) => c.url === "/api/runs" && c.method === "POST");
+    expect(JSON.parse(createCall!.body).input).toEqual({ prompt: "hi", limit: 3 });
+    expect(screen.getByTestId("view-full-trace")).toHaveAttribute("href", "/traces/trace-xyz");
+    expect(screen.getByTestId("run-took")).toHaveTextContent("1.25s");
+  });
+
+  it("keeps the conversation when switching to a JSON request and back", async () => {
+    recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "prod" }],
+      agentDetails: { "prod/echo": readyDetail("prod", "echo") },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    fireEvent.change(await screen.findByTestId("chat-input"), { target: { value: "hello there" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK"));
+
+    fireEvent.click(screen.getByTestId("playground-mode-json"));
+    expect(screen.getByTestId("playground-chat-mode")).not.toBeVisible();
+    expect(screen.getByTestId("playground-json-mode")).toBeVisible();
+    expect(screen.getByLabelText("Message (JSON)")).toBeVisible();
+
+    fireEvent.click(screen.getByTestId("playground-mode-chat"));
+    expect(screen.getByTestId("playground-chat-mode")).toBeVisible();
+    expect(screen.getByTestId("playground-json-mode")).not.toBeVisible();
+    expect(screen.getByTestId("chat-turn-user")).toHaveTextContent("hello there");
+    expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK");
+  });
+
+  it("holds Send while the agent's model route is still loading (ADR 0151)", async () => {
+    recordingFetch({
+      agentDetails: {
+        "prod/echo": readyDetail("prod", "echo", [
+          {
+            type: "ModelRouteReady",
+            status: "False",
+            reason: "NotYetServed",
+            message: "ModelRoute chat: not served yet",
+            lastTransitionTime: "",
+          },
+        ]),
+      },
+    });
+
+    renderPage("/playground?agent=echo&ns=prod");
+    const composer = await screen.findByTestId("chat-input");
+    fireEvent.change(composer, { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeDisabled();
+    expect(screen.getByTestId("chat-route-note")).toHaveTextContent(/loading this agent's model/);
+  });
+
+  it("runs an agent picked from an all-workspaces list in its own namespace", async () => {
+    const calls = recordingFetch({
+      run: { detail: finished },
+      agents: [{ name: "echo", namespace: "team-b" }],
+      agentDetails: { "team-b/echo": readyDetail("team-b", "echo") },
+    });
+
+    renderPage("/playground");
+    await waitFor(() =>
+      expect(screen.getByLabelText("Agent").querySelectorAll("option").length).toBeGreaterThan(1),
+    );
+    fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "echo" } });
+    const composer = await screen.findByTestId("chat-input");
+    fireEvent.change(composer, { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+
+    await screen.findByTestId("chat-turn-agent");
+    const createCall = await waitFor(() => {
+      const c = calls.find((x) => x.url === "/api/runs" && x.method === "POST");
+      expect(c).toBeDefined();
+      return c!;
+    });
+    expect(JSON.parse(createCall.body).namespace).toBe("team-b");
+  });
+
+  // Picking another agent used to leave the previous agent's detail in place until the new read
+  // landed, so for that moment Send was offered (or held) on the strength of the wrong agent.
+  it("treats a newly picked agent as loading until its own detail is read", async () => {
+    recordingFetch({
+      agents: [
+        { name: "served", namespace: "prod" },
+        { name: "loading", namespace: "prod" },
+      ],
+      agentDetails: {
+        "prod/served": readyDetail("prod", "served"),
+        "prod/loading": readyDetail("prod", "loading", [
+          {
+            type: "ModelRouteReady",
+            status: "False",
+            reason: "NotYetServed",
+            message: "ModelRoute chat: not served yet",
+            lastTransitionTime: "",
+          },
+        ]),
+      },
+    });
+
+    renderPage("/playground?agent=served&ns=prod");
+    fireEvent.change(await screen.findByTestId("chat-input"), { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByLabelText("Agent").querySelectorAll("option").length).toBeGreaterThan(2),
+    );
+
+    fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "loading" } });
+    // In the same render as the pick: no composer, so no Send carried over from "served".
+    expect(screen.queryByTestId("chat-send")).toBeNull();
+    expect(screen.getByTestId("playground-chat-loading")).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByTestId("chat-input"), { target: { value: "hello" } });
+    expect(screen.getByTestId("chat-send")).toBeDisabled();
+    expect(screen.getByTestId("chat-route-note")).toHaveTextContent(/loading this agent's model/);
+  });
+
+  // Under All workspaces one name can exist in several namespaces. The picker used to show it once
+  // and run it in whichever namespace the list returned first.
+  describe("one name in two workspaces", () => {
+    const twins = [
+      { name: "echo", namespace: "team-a" },
+      { name: "echo", namespace: "team-b" },
+    ];
+    const agentOptionValues = () =>
+      Array.from(screen.getByLabelText("Agent").querySelectorAll("option")).map((o) => [
+        o.getAttribute("value"),
+        o.textContent,
+      ]);
+
+    it("offers each as namespace/name, and the chat runs in the one picked", async () => {
+      const calls = recordingFetch({
+        run: { detail: finished },
+        agents: twins,
+        agentDetails: {
+          "team-a/echo": readyDetail("team-a", "echo"),
+          "team-b/echo": readyDetail("team-b", "echo"),
+        },
+      });
+
+      renderPage("/playground");
+      await waitFor(() =>
+        expect(agentOptionValues()).toEqual(
+          expect.arrayContaining([
+            ["team-a/echo", "team-a/echo"],
+            ["team-b/echo", "team-b/echo"],
+          ]),
+        ),
+      );
+      expect(agentOptionValues().some(([v]) => v === "echo")).toBe(false);
+
+      fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "team-b/echo" } });
+      expect(screen.getByLabelText("Agent")).toHaveValue("team-b/echo");
+      const composer = await screen.findByTestId("chat-input");
+      fireEvent.change(composer, { target: { value: "hi" } });
+      fireEvent.click(screen.getByTestId("chat-send"));
+
+      const createCall = await waitFor(() => {
+        const c = calls.find((x) => x.url === "/api/runs" && x.method === "POST");
+        expect(c).toBeDefined();
+        return c!;
+      });
+      expect(JSON.parse(createCall.body)).toMatchObject({ agent: "echo", namespace: "team-b" });
+      expect(calls.some((c) => c.url === "/api/agents/team-b/echo")).toBe(true);
+      expect(calls.some((c) => c.url === "/api/agents/team-a/echo")).toBe(false);
+    });
+
+    it("runs the JSON request and connects in the one picked", async () => {
+      const popup = { closed: false } as Window;
+      vi.stubGlobal("open", vi.fn(() => popup));
+      const calls = recordingFetch({
+        agents: twins,
+        run: {
+          detail: {
+            id: "run-1",
+            status: "requires_action",
+            traceId: "trace-xyz",
+            messages: [{ role: "assistant", content: "please connect your account" }],
+            requiresAction: { kind: "consent_required", servers: ["crm"] },
+          },
+        },
+      });
+
+      renderPage("/playground?mode=json");
+      await waitFor(() =>
+        expect(agentOptionValues().some(([v]) => v === "team-a/echo")).toBe(true),
+      );
+      fireEvent.change(screen.getByLabelText("Agent"), { target: { value: "team-a/echo" } });
+      fill("Message (JSON)", '{"prompt":"hi"}');
+      fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+
+      const createCall = await waitFor(() => {
+        const c = calls.find((x) => x.url === "/api/runs" && x.method === "POST");
+        expect(c).toBeDefined();
+        return c!;
+      });
+      expect(JSON.parse(createCall.body)).toMatchObject({ agent: "echo", namespace: "team-a" });
+
+      fireEvent.click(await screen.findByTestId("connect-crm"));
+      const grant = await waitFor(() => {
+        const c = calls.find((x) => x.url === "/api/mcp/oauth/grant");
+        expect(c).toBeDefined();
+        return c!;
+      });
+      expect(JSON.parse(grant.body).namespace).toBe("team-a");
+    });
+
+    it("does not guess which one a bare name means", async () => {
+      const calls = recordingFetch({ agents: twins });
+
+      renderPage("/playground?agent=echo");
+      expect(await screen.findByTestId("playground-chat-ambiguous")).toHaveTextContent(
+        "team-a/echo, team-b/echo",
+      );
+      expect(calls.some((c) => /^\/api\/agents\/[^/]+\/echo$/.test(c.url))).toBe(false);
+
+      fireEvent.click(screen.getByTestId("playground-mode-json"));
+      fireEvent.click(screen.getByRole("button", { name: /Run agent/ }));
+      await waitFor(() =>
+        expect(
+          screen.getAllByRole("alert").some((a) => /echo exists in team-a, team-b/.test(a.textContent ?? "")),
+        ).toBe(true),
+      );
+      expect(calls.some((c) => c.url === "/api/runs")).toBe(false);
+    });
+  });
+
+  // The page re-reads an agent that has not settled. One failed re-read used to replace the chat
+  // with an error card, discarding the conversation and the composer, and the re-reads never ended.
+  describe("re-reading an agent until it settles", () => {
+    const loadingRoute = {
+      type: "ModelRouteReady",
+      status: "False",
+      reason: "NotYetServed",
+      message: "ModelRoute chat: not served yet",
+      lastTransitionTime: "",
+    };
+    const starting = { ...readyDetail("prod", "echo"), ready: false, phase: "Pending" };
+    const advance = (ms: number) =>
+      act(async () => {
+        await vi.advanceTimersByTimeAsync(ms);
+      });
+    const detailReads = (calls: Captured[]) =>
+      calls.filter((c) => c.url === "/api/agents/prod/echo" && c.method === "GET").length;
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("keeps the composer and the transcript when a re-read fails", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const calls = recordingFetch({
+        run: { detail: finished },
+        agentDetailReads: { "prod/echo": [starting, 500, starting] },
+      });
+
+      renderPage("/playground?agent=echo&ns=prod");
+      const composer = await screen.findByTestId("chat-input");
+      fireEvent.change(composer, { target: { value: "hello there" } });
+      fireEvent.click(screen.getByTestId("chat-send"));
+      await waitFor(() => expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK"));
+      expect(detailReads(calls)).toBe(1);
+
+      await advance(4_000);
+      await waitFor(() => expect(detailReads(calls)).toBe(2));
+
+      expect(screen.queryByTestId("playground-chat-error")).toBeNull();
+      expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+      expect(screen.getByTestId("chat-turn-user")).toHaveTextContent("hello there");
+      expect(screen.getByTestId("chat-turn-agent")).toHaveTextContent("MOCK_OK");
+
+      // And it tries again, waiting longer than the settle poll after a failure.
+      await advance(4_000);
+      expect(detailReads(calls)).toBe(2);
+      await advance(4_000);
+      await waitFor(() => expect(detailReads(calls)).toBe(3));
+    });
+
+    it("still lifts the model-loading hold once a read after a failed one succeeds", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const calls = recordingFetch({
+        agentDetailReads: {
+          "prod/echo": [readyDetail("prod", "echo", [loadingRoute]), 500, readyDetail("prod", "echo")],
+        },
+      });
+
+      renderPage("/playground?agent=echo&ns=prod");
+      const composer = await screen.findByTestId("chat-input");
+      fireEvent.change(composer, { target: { value: "hello" } });
+      expect(screen.getByTestId("chat-send")).toBeDisabled();
+
+      await advance(4_000);
+      await waitFor(() => expect(detailReads(calls)).toBe(2));
+      expect(screen.queryByTestId("playground-chat-error")).toBeNull();
+      expect(screen.getByTestId("chat-send")).toBeDisabled();
+
+      await advance(8_000);
+      await waitFor(() => expect(screen.getByTestId("chat-send")).toBeEnabled());
+      expect(screen.queryByTestId("chat-route-note")).toBeNull();
+      expect(detailReads(calls)).toBe(3);
+    });
+
+    it("stops after ten minutes without settling, and Check again starts over", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const reads: (object | number)[] = Array.from({ length: 151 }, () =>
+        readyDetail("prod", "echo", [loadingRoute]),
+      );
+      reads.push(readyDetail("prod", "echo"));
+      const calls = recordingFetch({ agentDetailReads: { "prod/echo": reads } });
+
+      renderPage("/playground?agent=echo&ns=prod");
+      await screen.findByTestId("chat-input");
+      // The chat never asks the BFF to resolve the agent's references.
+      expect(calls.find((c) => c.url === "/api/agents/prod/echo")?.query).toBe("dependencies=0");
+
+      await advance(10 * 60_000);
+      await waitFor(() => expect(screen.getByTestId("playground-settle-stopped")).toBeInTheDocument());
+      // One read, then one every four seconds for ten minutes, and then none.
+      expect(detailReads(calls)).toBe(151);
+      await advance(60_000);
+      expect(detailReads(calls)).toBe(151);
+      expect(screen.getByTestId("chat-send")).toBeDisabled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+      await waitFor(() => expect(detailReads(calls)).toBe(152));
+      await waitFor(() => expect(screen.queryByTestId("playground-settle-stopped")).toBeNull());
+      fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hello" } });
+      expect(screen.getByTestId("chat-send")).toBeEnabled();
+    });
+
+    it("shows the error card when the first read fails", async () => {
+      recordingFetch({ agentDetailReads: { "prod/echo": [500] } });
+      renderPage("/playground?agent=echo&ns=prod");
+      expect(await screen.findByTestId("playground-chat-error")).toHaveTextContent("echo could not be read");
+      expect(screen.queryByTestId("chat-input")).toBeNull();
+    });
+  });
+
+  it("says what to do before an agent is picked, and when the named agent does not exist", async () => {
+    recordingFetch({});
+    renderPage("/playground");
+    expect(await screen.findByTestId("playground-chat-empty")).toHaveTextContent("Pick an agent");
+
+    fillAgent("ghost");
+    expect(await screen.findByTestId("playground-chat-missing")).toHaveTextContent(
+      "No agent named ghost in default.",
+    );
+    expect(screen.queryByTestId("chat-input")).toBeNull();
   });
 });

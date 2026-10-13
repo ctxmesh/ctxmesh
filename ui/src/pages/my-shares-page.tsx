@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Filter, Share2 } from "lucide-react";
 
@@ -23,7 +23,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDateTime, formatRelativeTime } from "@/lib/format";
-import { api, ApiError, type MySharesItem } from "@/lib/api";
+import { api, type MySharesItem } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // MySharesPage — the caller's share links, on the editorial ACTIVITY-FEED
 // archetype (V13; M151 §6.1 A1 composition, §4.4 activity-feed budget:
@@ -255,48 +256,17 @@ function RowActions({
   );
 }
 
-type LoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; items: MySharesItem[] }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 const LEDE =
   "Every link you have handed out, newest first. A live link works for anyone holding it until you revoke it or it expires.";
 
 export function MySharesPage() {
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
   const [view, setView] = useState<ViewId>("all");
   // Track which share IDs are in the process of being revoked (optimistic disable).
   const [revoking, setRevoking] = useState<Set<string>>(new Set());
-  const abortRef = useRef<AbortController | null>(null);
   const { toast } = useToast();
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
-
-    api
-      .listMyShares(controller.signal)
-      .then((items) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const fetchShares = useCallback((signal: AbortSignal) => api.listMyShares(signal), []);
+  const { state: loadState, reload } = useLoad(fetchShares);
 
   // handleRevoke calls the existing per-run revoke endpoint and refreshes the list.
   function handleRevoke(item: MySharesItem) {
@@ -305,7 +275,7 @@ export function MySharesPage() {
       .revokeRunShare(item.runId, item.id)
       .then(() => {
         toast({ variant: "success", title: "Share revoked" });
-        load();
+        reload();
       })
       .catch((err: unknown) => {
         // Surface the failure (V16 P3: a silent .catch left the user thinking the link was revoked when it
@@ -324,7 +294,7 @@ export function MySharesPage() {
   }
 
   const items = useMemo(
-    () => (loadState.kind === "ready" ? loadState.items : []),
+    () => (loadState.kind === "ready" ? loadState.data : []),
     [loadState],
   );
 
@@ -361,7 +331,7 @@ export function MySharesPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "shares",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => reload(),
         }
       : null;
 

@@ -34,7 +34,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 )
@@ -43,9 +42,9 @@ const (
 	// tenantLabel marks every resource + namespace a Tenant stamps, so the
 	// controller can prune them (a cluster-scoped Tenant cannot ownerRef-GC its
 	// namespaced output — K8s disallows cluster→namespaced owner GC). The value is
-	// the shared api/v1alpha1.TenantLabel — one source of truth with the
+	// the shared api/v1beta1.TenantLabel — one source of truth with the
 	// state-layer proxy's tenant resolver (ADR 0050 Amд 2 Correction 2a).
-	tenantLabel = agentsv1alpha1.TenantLabel
+	tenantLabel = agentsv1beta1.TenantLabel
 	// tenantFinalizer guards cross-namespace cleanup on Tenant delete.
 	tenantFinalizer = "agents.ctxmesh.ai/tenant-cleanup"
 	// tenantQuotaName is the fixed name of the ResourceQuota stamped per namespace.
@@ -72,13 +71,18 @@ const (
 // cheap, always-on guardrail; the complementary spoofable-namespace-label ValidatingWebhook (so only the
 // Tenant controller can set the tenant label) is the bigger half, carded to m52.
 var protectedSystemNamespaces = map[string]bool{
-	kubeSystemNamespace:        true, // cluster DNS (CoreDNS) + control-plane comms — a default-deny here is a cluster outage
-	"kube-public":              true,
-	"kube-node-lease":          true,
-	agentEngineSystemNamespace: true, // the platform: controllers, BFF, state-layer, model gateway
-	kourierSystemNamespace:     true, // Knative ingress
-	"knative-serving":          true, // Knative control plane (agent data plane depends on it)
-	langfuseNamespace:          true, // telemetry plane
+	kubeSystemNamespace:    true, // cluster DNS (CoreDNS) + control-plane comms — a default-deny here is a cluster outage
+	"kube-public":          true,
+	"kube-node-lease":      true,
+	kourierSystemNamespace: true, // Knative ingress
+	"knative-serving":      true, // Knative control plane (agent data plane depends on it)
+	langfuseNamespace:      true, // telemetry plane
+}
+
+// protectedNamespace reports whether a Tenant must never claim ns: a system namespace, or the one the
+// platform (controllers, BFF, state layer, model gateway) is installed into.
+func (r *TenantReconciler) protectedNamespace(ns string) bool {
+	return protectedSystemNamespaces[ns] || ns == newPlatformServices(r.PlatformNamespace).namespace
 }
 
 // TenantReconciler reconciles a Tenant (ADR 0046, M47). A Tenant groups namespaces
@@ -94,6 +98,10 @@ type TenantReconciler struct {
 	// the BFF reading namespaces (forbidden by ADR 0011). Optional/typed-nil-safe: nil ⇒ the mirror is
 	// skipped (envtests without a control-plane DB), mirroring how the other optional stores are treated.
 	NamespaceTenant namespacetenant.Store
+
+	// PlatformNamespace is the namespace the platform is installed into: never claimable by a Tenant,
+	// and admitted by its members' egress policy. Empty means DefaultPlatformNamespace.
+	PlatformNamespace string
 }
 
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=tenants,verbs=get;list;watch;update;patch
@@ -107,7 +115,7 @@ type TenantReconciler struct {
 // Reconcile converges the Tenant's member namespaces: it stamps/updates a
 // ResourceQuota on each owned namespace and prunes any it no longer owns.
 func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var tenant agentsv1alpha1.Tenant
+	var tenant agentsv1beta1.Tenant
 	if err := r.Get(ctx, req.NamespacedName, &tenant); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -197,10 +205,10 @@ func (r *TenantReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 // resolveOwnership splits the tenant's requested namespaces into the ones it owns
 // and the ones another tenant already claims (contested, skipped).
-func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv1alpha1.Tenant) (owned, contested, denied []string, err error) {
+func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv1beta1.Tenant) (owned, contested, denied []string, err error) {
 	// Which OTHER tenants merely LIST each namespace in spec (a spec-only claim, not yet
 	// stamped). This alone must NOT contest a namespace another tenant already OWNS.
-	var all agentsv1alpha1.TenantList
+	var all agentsv1beta1.TenantList
 	if err := r.List(ctx, &all); err != nil {
 		return nil, nil, nil, err
 	}
@@ -223,7 +231,7 @@ func (r *TenantReconciler) resolveOwnership(ctx context.Context, tenant *agentsv
 		// System-namespace denylist (audit P1-3): a protected system/platform namespace is NEVER claimed
 		// or stamped — stamping a default-deny NetworkPolicy on it would break the cluster/platform. Route
 		// it to `denied` (a status condition) BEFORE any ownership logic, regardless of labels/listers.
-		if protectedSystemNamespaces[ns] {
+		if r.protectedNamespace(ns) {
 			denied = append(denied, ns)
 			continue
 		}
@@ -268,7 +276,7 @@ func (r *TenantReconciler) namespaceTenantLabel(ctx context.Context, ns string) 
 }
 
 // stampNamespace labels the namespace for this tenant and converges its ResourceQuota.
-func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1alpha1.Tenant, ns string) error {
+func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1beta1.Tenant, ns string) error {
 	var namespace corev1.Namespace
 	if err := r.Get(ctx, client.ObjectKey{Name: ns}, &namespace); err != nil {
 		// A requested namespace that does not exist is not fatal — skip it; the
@@ -309,10 +317,10 @@ func (r *TenantReconciler) stampNamespace(ctx context.Context, tenant *agentsv1a
 // reconcileNetworkPolicy stamps (or removes) the opt-in cross-tenant-deny NetworkPolicy on a member
 // namespace. When spec.networkIsolation is off it ensures none exists. The policy is SERVING-SAFE: it
 // default-denies but explicitly allows same-tenant namespaces + the knative/kourier data plane + the
-// platform egress (DNS, langfuse, gateway/valkey/minio) — the exact allowlist the AgentRegistry NP uses,
+// platform egress (DNS, langfuse, gateway/valkey/objectstore) — the exact allowlist the AgentRegistry NP uses,
 // scoped by the tenant namespace-label instead of the registry-id pod-label. A missing allowance would
 // sever /invoke (an m5.7-class landmine — proven live in m47.8, not envtest which has no CNI).
-func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *agentsv1alpha1.Tenant, ns string) error {
+func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *agentsv1beta1.Tenant, ns string) error {
 	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: tenantNetworkPolicyName, Namespace: ns}}
 	// ADR 0073 secure-default: networkIsolation is a *bool with +kubebuilder:default=true, so a
 	// field-absent (nil) tenant is served as TRUE (isolate). Only an EXPLICIT false — a deliberate,
@@ -369,7 +377,7 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					To:    []networkingv1.NetworkPolicyPeer{platformNS(langfuseNamespace)},
 					Ports: []networkingv1.NetworkPolicyPort{{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(langfusePort)}},
 				},
-				{ // platform backends in ctxmesh: gateway :4000, minio :9000, state-layer PROXY
+				{ // platform backends in ctxmesh: gateway :4000, object store :9000, state-layer PROXY
 					// :8080 (memory/quota/dedup/control/spawn — the pod-authed, per-tenant choke
 					// point) and token-service :8443 (long-term-memory OBO). Omitting :8080 makes a
 					// member's quota fail closed (402) post-cutover.
@@ -380,12 +388,15 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 					// to be dropped from the registry-member NP too, since NP rules are additive and
 					// a supervisor is a registry member. The remaining layer is the
 					// statelayer-ingress NP, which admits :6379 only from the proxy/BFF namespace.
-					To: []networkingv1.NetworkPolicyPeer{platformNS(agentEngineSystemNamespace)},
+					To: []networkingv1.NetworkPolicyPeer{platformNS(newPlatformServices(r.PlatformNamespace).namespace)},
 					Ports: []networkingv1.NetworkPolicyPort{
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(modelGatewayPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(objectStorePort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(statelayerProxyPort)},
 						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(tokenServicePort)},
+						// Every agent's launcher binds its run capability at the BFF before the agent
+						// sees it (ADR 0124); the BFF's internal edges authenticate on that capability.
+						{Protocol: protoPtr(corev1.ProtocolTCP), Port: intstrPtr(bffPort)},
 					},
 				},
 				{ // intra-tenant AMP (+ peerTenants east-west) + the knative data plane it egresses through
@@ -414,7 +425,7 @@ func (r *TenantReconciler) reconcileNetworkPolicy(ctx context.Context, tenant *a
 // scheduler-guaranteed allocation, so capping them is the correct, standard meaning of a
 // tenant compute quota. (Also capping/defaulting limits — via a per-namespace LimitRange —
 // is a follow-on hardening, not needed to make the quota work.)
-func computeHard(q *agentsv1alpha1.TenantComputeQuota) corev1.ResourceList {
+func computeHard(q *agentsv1beta1.TenantComputeQuota) corev1.ResourceList {
 	if q == nil {
 		return nil
 	}
@@ -492,7 +503,7 @@ func (r *TenantReconciler) syncMembershipMirror(ctx context.Context, tenantName 
 // mirror: a store error is logged, never rolls back the K8s converge; the next reconcile re-drives it.
 // A nil spec writes a DISABLED config (Enabled=false) so a later removal of the field propagates and is
 // never left stale.
-func (r *TenantReconciler) syncEndUserIdentityMirror(ctx context.Context, tenantName string, spec *agentsv1alpha1.TenantEndUserIdentity) {
+func (r *TenantReconciler) syncEndUserIdentityMirror(ctx context.Context, tenantName string, spec *agentsv1beta1.TenantEndUserIdentity) {
 	if r.NamespaceTenant == nil {
 		return
 	}
@@ -533,7 +544,7 @@ func (r *TenantReconciler) aggregateCorpusBytes(ctx context.Context, owned []str
 
 // updateStatus writes memberNamespaces + the Ready / NamespaceConflict / StorageSoftCapExceeded
 // conditions and updates the corpus-bytes gauge + totalCorpusBytes status field.
-func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1alpha1.Tenant, owned, contested, denied []string, totalCorpusBytes int64) error {
+func (r *TenantReconciler) updateStatus(ctx context.Context, tenant *agentsv1beta1.Tenant, owned, contested, denied []string, totalCorpusBytes int64) error {
 	tenant.Status.MemberNamespaces = int32(len(owned))
 	tenant.Status.TotalCorpusBytes = totalCorpusBytes
 
@@ -688,7 +699,7 @@ func (r *TenantReconciler) syncStorageState(ctx context.Context, tenantName stri
 // Tenant(s) whose member namespace list includes that namespace. The tenant controller must
 // re-reconcile when a KnowledgeBase.status.sizeBytes changes so the soft-cap check stays current.
 func mapObjectNSToTenants(ctx context.Context, mgr ctrl.Manager, objNS string) []reconcile.Request {
-	var list agentsv1alpha1.TenantList
+	var list agentsv1beta1.TenantList
 	if err := mgr.GetClient().List(ctx, &list); err != nil {
 		return nil
 	}
@@ -716,7 +727,7 @@ func (r *TenantReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			return mapObjectNSToTenants(ctx, mgr, obj.GetNamespace())
 		})
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.Tenant{}).
+		For(&agentsv1beta1.Tenant{}).
 		Watches(&corev1.Namespace{}, mapNamespaceToTenants).
 		Watches(&agentsv1beta1.KnowledgeBase{}, mapKBToTenants).
 		Named("tenant").

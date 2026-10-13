@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 )
 
@@ -126,7 +126,7 @@ func TestCreateRun_AgentFailureIsFailed(t *testing.T) {
 }
 
 // recordCapableAgent is a ready agent marked spec.record=true (record-capable).
-func recordCapableAgent(name, namespace, url string) *agentsv1alpha1.AgentDeployment {
+func recordCapableAgent(name, namespace, url string) *agentsv1beta1.AgentDeployment {
 	a := readyAgent(name, namespace, url)
 	a.Spec.Record = true
 	return a
@@ -258,7 +258,7 @@ func TestResumeRun_Unauthorized403(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(agent).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*agentsv1alpha1.AgentDeployment); ok {
+				if _, ok := obj.(*agentsv1beta1.AgentDeployment); ok {
 					return apierrors.NewForbidden(
 						k8sschema.GroupResource{Group: "agents.ctxmesh.ai", Resource: "agentdeployments"},
 						key.Name, errors.New("forbidden"))
@@ -489,11 +489,10 @@ func TestCreateRun_StreamsTokens(t *testing.T) {
 	assert.Contains(t, body, "event: token")
 	assert.Contains(t, body, "Hel")
 	assert.Contains(t, body, "lo")
-	// The step frames were republished as EventStep, their Data the verbatim step-metadata JSON
-	// (JSON-escaped inside the run Event's `data` field on the wire).
-	assert.Contains(t, body, "event: step")
-	assert.Contains(t, body, `\"kind\":\"model\"`)
-	assert.Contains(t, body, `\"tool\":\"echo_tool\"`)
+	// The step frames were republished as EventStep, the frame's payload the verbatim step-metadata
+	// JSON (the payload itself, not wrapped in the run Event).
+	assert.Contains(t, body, "event: step\ndata: "+stepModel+"\n\n")
+	assert.Contains(t, body, "event: step\ndata: "+stepTool+"\n\n")
 	assert.Contains(t, body, "event: message")
 	assert.Contains(t, body, "event: state")
 	assert.Contains(t, body, string(run.StatusSucceeded))
@@ -502,16 +501,16 @@ func TestCreateRun_StreamsTokens(t *testing.T) {
 // agentWithSchema builds a ready "typed" AgentDeployment whose spec.runtime.outputSchema is set to
 // the given raw JSON Schema, so the create path can pin it onto the run (m65.3). Only the schema
 // varies across tests; the identity is fixed.
-func agentWithSchema(schema string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func agentWithSchema(schema string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "typed", Namespace: "prod"},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "echo:1",
-			Runtime: &agentsv1alpha1.RuntimeSpec{
+			Runtime: &agentsv1beta1.RuntimeSpec{
 				OutputSchema: &k8sruntime.RawExtension{Raw: []byte(schema)},
 			},
 		},
-		Status: agentsv1alpha1.AgentDeploymentStatus{URL: "http://typed.prod.svc.cluster.local"},
+		Status: agentsv1beta1.AgentDeploymentStatus{URL: "http://typed.prod.svc.cluster.local"},
 	}
 }
 

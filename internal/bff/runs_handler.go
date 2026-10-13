@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -72,24 +73,17 @@ type CreateRunResponse struct {
 }
 
 // registerRunRoutes mounts the run-oriented execution contract (ADR 0034, M31) on the authed mux:
-// create a durable run + read its status. It requires the caller-scoped cluster path (the run
-// resolves + invokes the agent as the caller, like /invoke); the streaming SSE endpoint is m31.3.
+// create a durable run, read it, stream its events, resume or cancel it. It needs the caller-scoped
+// cluster path (the run resolves + invokes the agent as the caller, like /invoke).
 func (s *Server) registerRunRoutes(authed *http.ServeMux) {
-	if s.adapters.Invoke != nil && s.callerClients != nil {
-		authed.HandleFunc("POST /api/runs", s.handleCreateRun)
-		authed.HandleFunc("GET /api/runs/{id}", s.handleGetRun)
-		authed.HandleFunc("GET /api/runs/{id}/tree", s.handleRunTree)
-		authed.HandleFunc("GET /api/runs/{id}/events", s.handleRunEvents)
-		authed.HandleFunc("GET /api/runs/{id}/fixture", s.handleGetRunFixture)
-		authed.HandleFunc("POST /api/runs/{id}/resume", s.handleResumeRun)
-		authed.HandleFunc("POST /api/runs/{id}/cancel", s.handleCancelRun)
-		return
-	}
-	authed.Handle("POST /api/runs", notImplemented("runs"))
-	authed.Handle("GET /api/runs/{id}", notImplemented("runs"))
-	authed.Handle("GET /api/runs/{id}/events", notImplemented("runs"))
-	authed.Handle("POST /api/runs/{id}/resume", notImplemented("runs"))
-	authed.Handle("POST /api/runs/{id}/cancel", notImplemented("runs"))
+	d := s.routeDeps()
+	authed.Handle("POST /api/runs", requires(s.handleCreateRun, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}", requires(s.handleGetRun, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}/tree", requires(s.handleRunTree, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}/events", requires(s.handleRunEvents, d.invoke, d.cluster))
+	authed.Handle("GET /api/runs/{id}/fixture", requires(s.handleGetRunFixture, d.invoke, d.cluster))
+	authed.Handle("POST /api/runs/{id}/resume", requires(s.handleResumeRun, d.invoke, d.cluster))
+	authed.Handle("POST /api/runs/{id}/cancel", requires(s.handleCancelRun, d.invoke, d.cluster))
 }
 
 // handleResumeRun serves POST /api/runs/{id}/resume — re-enter `running` from `requires_action`
@@ -143,10 +137,10 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Declarative approver enforcement (M139, ADR 0111 §4): if the run's agent has an ApprovalPolicy with
-	// a non-empty approver set, an APPROVE (we are past the deny branch) is allowed only when the caller is
-	// a designated approver — AND-ed with the RBAC that authorizeRunAccess already enforced. Fail-closed.
-	if isApproval && !s.enforceApprovalPolicyApprovers(w, r, caller, rn) {
+	// Approver enforcement (ADR 0152 §2): if the run's agent declares spec.runtime.toolPolicy.approvers,
+	// an APPROVE (we are past the deny branch) is allowed only when the caller is a designated approver —
+	// AND-ed with the RBAC that authorizeRunAccess already enforced. Fail-closed.
+	if isApproval && !s.enforceToolPolicyApprovers(w, r, caller, rn) {
 		return
 	}
 
@@ -162,8 +156,9 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 	// approval-voucher protocol (ADR 0074 §3, m82.4) binds a voucher to the runcap's `run` claim, and
 	// the egress sidecar checks voucher.run == runcap.run — so both must carry the SAME id, which only
 	// works if the id is a value the BFF knows here (rn.ID). This mirrors the durable worker path,
-	// which already pins to rn.ID.
-	r = s.attachRunCapabilityForRun(r, caller, rn.Agent, rn.Namespace, rn.ID)
+	// which already pins to rn.ID — and mints in rn.Boundary, which for a sub-run is its parent's, so a
+	// consent given for the agent the person is talking to is found after the resume too.
+	r = s.attachRunCapabilityForRun(r, caller, rn.Agent, rn.Namespace, rn.Boundary, rn.ID)
 
 	// On approval, re-invoke with the approved key granted so the agent's pause_for_approval(key)
 	// proceeds instead of pausing again (the consent path re-invokes the same input unchanged — the
@@ -198,9 +193,9 @@ func (s *Server) handleResumeRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	execCtx := contextWithApprovalVoucher(
-		contextWithRunCapability(
+		withRunCapabilityOf(
 			contextWithConversationID(context.Background(), conversationIDFromContext(r.Context())),
-			runCapabilityFromContext(r.Context()),
+			r.Context(),
 		),
 		voucher,
 	)
@@ -490,7 +485,7 @@ func (s *Server) executeRun(ctx context.Context, runID, endpoint string, input [
 	// re-queues the supervisor, which the worker re-invokes carrying the checkpoint in the body (m108.3).
 	// A malformed marker is an honest `failed` — never a silent block and never a swallowed success.
 	if dw := parseDelegateWaiting(resp); dw != nil {
-		if sErr := s.suspendOnDelegate(started, dw, traceID, now); sErr != nil {
+		if sErr := s.suspendOnDelegate(ctx, started, dw, traceID, now); sErr != nil {
 			s.log.Error(sErr, "run: could not suspend supervisor on delegate", "run", runID)
 			if uErr := s.terminalTransitionFenced(ctx, runID, func(rn *run.Run) error {
 				rn.TraceID = traceID
@@ -861,7 +856,10 @@ func nodesFromCursor(cursorJSON, specSnapshot string) ([]WorkflowNodeStatus, str
 // handleRunEvents serves GET /api/runs/{id}/events — the run's live event stream as SSE (ADR
 // 0034). It resumes from a `Last-Event-ID` header (or `?fromSeq=`) so a reconnect replays only
 // missed events, then streams live until the run is terminal (the stream closes) or the client
-// disconnects. Each frame is `id:<seq>`, `event:<kind>`, `data:<json event>`.
+// disconnects. Each frame is `id: <seq>`, `event: <kind>`, then the event's Data itself as the
+// payload, one `data: ` line per line of it (sseFrame): a token's text, a state's new status, a
+// step's metadata JSON or label. Every client (the console, the SDKs) reads the payload, so the
+// frame carries nothing else; sdk/run-events.golden.sse pins the bytes.
 func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -882,7 +880,12 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	events, cancel, err := s.runStore.Subscribe(rn.ID, lastEventID(r))
 	if err != nil {
-		writeError(w, http.StatusNotFound, "run not found")
+		if errors.Is(err, run.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "run not found")
+			return
+		}
+		s.log.Error(err, "run events: subscribing failed", "run", rn.ID)
+		writeError(w, http.StatusInternalServerError, "failed to read the run's events")
 		return
 	}
 	defer cancel()
@@ -905,17 +908,19 @@ func (s *Server) handleRunEvents(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return // client disconnected
 		case <-heartbeat.C:
-			_, _ = fmt.Fprint(w, ": heartbeat\n\n") // SSE comment — ignored by parsers, resets the read deadline
+			// SSE comment — ignored by parsers, resets the read deadline. A failed write means
+			// the client is gone.
+			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		case ev, open := <-events:
 			if !open {
 				return // run terminal + backlog drained
 			}
-			data, mErr := json.Marshal(ev)
-			if mErr != nil {
-				continue
+			if _, err := io.WriteString(w, sseFrame(strconv.Itoa(ev.Seq), string(ev.Kind), ev.Data)); err != nil {
+				return
 			}
-			_, _ = fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", ev.Seq, ev.Kind, data)
 			flusher.Flush()
 		}
 	}

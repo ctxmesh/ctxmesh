@@ -6,6 +6,7 @@ import { DatasetsPage, DatasetDetailPage } from "@/pages/datasets-page";
 import { TracePage } from "@/pages/trace-page";
 import { ToastProvider } from "@/components/kit";
 import type { DatasetSummary, DatasetCase, SpanSummary } from "@/lib/api";
+import { NamespaceProvider } from "@/lib/namespace";
 
 // DatasetsPage + DatasetDetailPage (m69.3, ADR 0062 Fork 5) — human-labeling dataset surfaces.
 //
@@ -16,6 +17,18 @@ import type { DatasetSummary, DatasetCase, SpanSummary } from "@/lib/api";
 //   • DatasetDetailPage label form: select + submit → api.appendLabel called
 //   • DatasetDetailPage empty-cases state
 //   • DatasetDetailPage unconfigured on 501
+//   • every dataset call carries the selected workspace; with none, nothing is asked
+//
+// Every page renders inside the real NamespaceProvider with WORKSPACE selected (persisted, as
+// the switcher does), so a call that dropped the namespace would read `default` and fail here.
+
+const WORKSPACE = "team-a";
+const NS_KEY = "ctxmesh.namespace";
+
+function selectWorkspace(ns: string | null) {
+  if (ns === null) localStorage.removeItem(NS_KEY);
+  else localStorage.setItem(NS_KEY, ns);
+}
 
 function ds(over: Partial<DatasetSummary> = {}): DatasetSummary {
   return {
@@ -43,12 +56,25 @@ interface FetchRoutes {
   listDatasets?: { ok: boolean; status?: number; body?: unknown };
   listCases?: { ok: boolean; status?: number; body?: unknown };
   appendLabel?: { ok: boolean; status?: number; body?: unknown };
+  namespaces?: string[];
 }
 
 interface FetchCall {
   url: string;
+  /** The full request URL, query included. */
+  href: string;
   method: string;
   body: string;
+}
+
+// namespacesResponse answers the NamespaceProvider's GET /api/namespaces.
+function namespacesResponse(names: string[]): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ namespaces: names.map((name) => ({ name })) }),
+    text: async () => "",
+  } as Response;
 }
 
 function installFetch(routes: FetchRoutes): { calls: FetchCall[] } {
@@ -60,7 +86,11 @@ function installFetch(routes: FetchRoutes): { calls: FetchCall[] } {
       const path = url.split("?")[0];
       const method = init?.method ?? "GET";
       const body = typeof init?.body === "string" ? init.body : "";
-      calls.push({ url: path, method, body });
+      calls.push({ url: path, href: url, method, body });
+
+      if (path === "/api/namespaces") {
+        return Promise.resolve(namespacesResponse(routes.namespaces ?? [WORKSPACE]));
+      }
 
       // GET /api/datasets → list
       if (path === "/api/datasets" && method === "GET") {
@@ -110,30 +140,37 @@ function installFetch(routes: FetchRoutes): { calls: FetchCall[] } {
   return { calls };
 }
 
-function renderList() {
+function renderList(workspace: string | null = WORKSPACE) {
+  selectWorkspace(workspace);
   return render(
-    <MemoryRouter initialEntries={["/datasets"]}>
-      <Routes>
-        <Route path="/datasets" element={<DatasetsPage />} />
-        <Route path="/datasets/:name" element={<DatasetDetailPage />} />
-      </Routes>
-    </MemoryRouter>,
+    <NamespaceProvider>
+      <MemoryRouter initialEntries={["/datasets"]}>
+        <Routes>
+          <Route path="/datasets" element={<DatasetsPage />} />
+          <Route path="/datasets/:name" element={<DatasetDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </NamespaceProvider>,
   );
 }
 
-function renderDetail(name = "my-dataset") {
+function renderDetail(name = "my-dataset", workspace: string | null = WORKSPACE) {
+  selectWorkspace(workspace);
   return render(
-    <MemoryRouter initialEntries={[`/datasets/${name}`]}>
-      <Routes>
-        <Route path="/datasets" element={<DatasetsPage />} />
-        <Route path="/datasets/:name" element={<DatasetDetailPage />} />
-      </Routes>
-    </MemoryRouter>,
+    <NamespaceProvider>
+      <MemoryRouter initialEntries={[`/datasets/${name}`]}>
+        <Routes>
+          <Route path="/datasets" element={<DatasetsPage />} />
+          <Route path="/datasets/:name" element={<DatasetDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </NamespaceProvider>,
   );
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
+  localStorage.removeItem(NS_KEY);
 });
 
 // ─── DatasetsPage (list) ──────────────────────────────────────────────────────
@@ -343,6 +380,63 @@ describe("DatasetDetailPage", () => {
   });
 });
 
+// ─── The selected workspace (m184.33) ─────────────────────────────────────────
+// The BFF reads `default` when a dataset request names no namespace, so a persona bound only
+// in its own workspace got 403 on this page, and before that read `default`'s datasets.
+
+function namespaceOf(call: FetchCall): string | null {
+  return new URL(call.href, "http://x").searchParams.get("namespace");
+}
+
+describe("Datasets — every call carries the selected workspace", () => {
+  it("lists, opens and labels datasets in the workspace", async () => {
+    const c = kase({ id: "case-7", input: "Hello?" });
+    const { calls } = installFetch({
+      listDatasets: { ok: true, body: { items: [ds({ name: "ws-evals", namespace: WORKSPACE })] } },
+      listCases: { ok: true, body: { datasetId: "ds-1", name: "ws-evals", cases: [c] } },
+      appendLabel: { ok: true, status: 201 },
+    });
+
+    renderList();
+    fireEvent.click(await screen.findByText("ws-evals"));
+    await screen.findByTestId("case-row-case-7");
+    fireEvent.click(screen.getByTestId("label-submit-case-7"));
+    await waitFor(() =>
+      expect(calls.some((x) => x.url.endsWith("/labels") && x.method === "POST")).toBe(true),
+    );
+
+    const datasetCalls = calls.filter((x) => x.url.startsWith("/api/datasets"));
+    expect(datasetCalls.map((x) => `${x.method} ${x.url}`)).toEqual([
+      "GET /api/datasets",
+      "GET /api/datasets/ws-evals/cases",
+      "POST /api/datasets/ws-evals/cases/case-7/labels",
+      // The label reloads the cases.
+      "GET /api/datasets/ws-evals/cases",
+    ]);
+    for (const call of datasetCalls) {
+      expect(namespaceOf(call), `${call.method} ${call.url}`).toBe(WORKSPACE);
+    }
+  });
+
+  it("asks nothing and says so when the caller has no workspace", async () => {
+    const { calls } = installFetch({ namespaces: [] });
+
+    renderList(null);
+    expect(
+      await screen.findByText("Choose a workspace to see its datasets."),
+    ).toBeInTheDocument();
+    expect(calls.filter((x) => x.url.startsWith("/api/datasets"))).toEqual([]);
+  });
+
+  it("the detail page asks nothing without a workspace", async () => {
+    const { calls } = installFetch({ namespaces: [] });
+
+    renderDetail("my-dataset", null);
+    expect(await screen.findByTestId("dataset-detail-no-workspace")).toBeInTheDocument();
+    expect(calls.filter((x) => x.url.startsWith("/api/datasets"))).toEqual([]);
+  });
+});
+
 // ─── TracePage AddToDatasetPanel (m69.3) ──────────────────────────────────────
 
 // installTraceFetch stubs fetch for the TracePage + AddToDatasetPanel combo.
@@ -362,7 +456,7 @@ function installTraceFetch(opts: {
     inputRedacted: false, outputRedacted: false, nestingDepth: 0,
   }];
 
-  const calls: { url: string; method: string; body: string }[] = [];
+  const calls: FetchCall[] = [];
   vi.stubGlobal(
     "fetch",
     vi.fn((input: string | URL, init?: RequestInit) => {
@@ -370,7 +464,11 @@ function installTraceFetch(opts: {
       const path = url.split("?")[0];
       const method = (init?.method ?? "GET").toUpperCase();
       const body = typeof init?.body === "string" ? init.body : "";
-      calls.push({ url: path, method, body });
+      calls.push({ url: path, href: url, method, body });
+
+      if (path === "/api/namespaces") {
+        return Promise.resolve(namespacesResponse([WORKSPACE]));
+      }
 
       if (path.includes("/detail")) {
         return Promise.resolve({
@@ -401,14 +499,17 @@ function installTraceFetch(opts: {
 
 describe("TracePage — AddToDatasetPanel (m69.3)", () => {
   function renderTrace(traceId = "t1") {
+    selectWorkspace(WORKSPACE);
     return render(
-      <ToastProvider>
-        <MemoryRouter initialEntries={[`/traces/${traceId}`]}>
-          <Routes>
-            <Route path="/traces/:id" element={<TracePage />} />
-          </Routes>
-        </MemoryRouter>
-      </ToastProvider>,
+      <NamespaceProvider>
+        <ToastProvider>
+          <MemoryRouter initialEntries={[`/traces/${traceId}`]}>
+            <Routes>
+              <Route path="/traces/:id" element={<TracePage />} />
+            </Routes>
+          </MemoryRouter>
+        </ToastProvider>
+      </NamespaceProvider>,
     );
   }
 
@@ -447,6 +548,9 @@ describe("TracePage — AddToDatasetPanel (m69.3)", () => {
     expect(fromRunCall).toBeDefined();
     const parsed = JSON.parse(fromRunCall!.body) as { traceId: string };
     expect(parsed.traceId).toBe("t1");
+    // The dataset is written in the selected workspace, which the panel names.
+    expect(new URL(fromRunCall!.href, "http://x").searchParams.get("namespace")).toBe(WORKSPACE);
+    expect(screen.getByTestId("add-to-dataset-panel")).toHaveTextContent(`yet, in ${WORKSPACE}.`);
   });
 
   it("shows calm 501 message when dataset store is not configured", async () => {

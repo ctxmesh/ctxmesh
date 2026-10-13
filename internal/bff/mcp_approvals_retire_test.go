@@ -13,14 +13,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // retireApproveServer wires an MCP server in retire mode with a store seeded from a
 // CRD fixture; the fake client `c` still backs the non-TR objects (the egress NP).
-func retireApproveServer(t *testing.T, c client.Client, auth authz.Authorizer, seed *agentsv1alpha1.ToolRegistry) (*Server, toolregistry.Store) {
+func retireApproveServer(t *testing.T, c client.Client, auth authz.Authorizer, seed *agentsv1beta1.ToolRegistry) (*Server, toolregistry.Store) {
 	t.Helper()
 	s, _, _ := newMCPServer(t, c, true)
 	store := toolregistry.NewMemStore()
@@ -46,9 +46,9 @@ func TestApproveMCP_RetireWritesStore(t *testing.T) {
 
 	got, err := store.Get(ctx, "prod", "weather-mcp")
 	require.NoError(t, err)
-	assert.Equal(t, agentsv1alpha1.ApprovalApproved, got.Annotations[annMCPStatus])
+	assert.Equal(t, agentsv1beta1.ApprovalApproved, got.Annotations[annMCPStatus])
 	for _, e := range got.Tools {
-		assert.Equal(t, agentsv1alpha1.ApprovalApproved, e.ApprovalStatus, "approve makes every entry bindable")
+		assert.Equal(t, agentsv1beta1.ApprovalApproved, e.ApprovalStatus, "approve makes every entry bindable")
 	}
 	// The egress NetworkPolicy WAS opened (still a K8s object).
 	var np networkingv1.NetworkPolicy
@@ -70,7 +70,7 @@ func TestApproveMCP_RetireForbiddenNoEgress(t *testing.T) {
 
 	got, err := store.Get(ctx, "prod", "weather-mcp")
 	require.NoError(t, err)
-	assert.Equal(t, agentsv1alpha1.ApprovalPending, got.Annotations[annMCPStatus], "denied approve leaves the row pending")
+	assert.Equal(t, agentsv1beta1.ApprovalPending, got.Annotations[annMCPStatus], "denied approve leaves the row pending")
 	var np networkingv1.NetworkPolicy
 	assert.True(t, apierrors.IsNotFound(c.Get(ctx, client.ObjectKey{Name: "weather-mcp" + networkPolicyMCPSuffix, Namespace: "prod"}, &np)),
 		"a denied approve opens NO egress")

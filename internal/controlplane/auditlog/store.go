@@ -70,6 +70,9 @@ type Query struct {
 	To           time.Time // occurred_at <= To (zero = unbounded)
 	PageSize     int       // <=0 → DefaultPageSize; capped at MaxPageSize
 	Cursor       string    // opaque keyset cursor ("" = first page)
+	// Namespaces, when non-nil, keeps only entries in these namespaces (an empty slice keeps
+	// none). A cluster-scoped entry has no namespace and so needs the cluster-wide read.
+	Namespaces []string
 }
 
 // Page is a page of newest-first entries + the opaque cursor for the next (older) page ("" = last page).

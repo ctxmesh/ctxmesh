@@ -20,6 +20,7 @@ package controller
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,8 +33,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
@@ -43,10 +45,7 @@ import (
 var testRegStore = toolregistry.NewMemStore()
 
 // newBindingReconciler builds an MCPToolBindingReconciler on the envtest client,
-// with the ToolRegistry reader backed by the in-memory store (no CRD). The Pusher
-// is left nil — the push path is NOT exercised in envtest (no kubelet schedules
-// pods, so pushToReadyPods lists zero ready pods and never dials). The live push is
-// proven by the m4.7 e2e slice instead.
+// with the ToolRegistry reader backed by the in-memory store (no CRD).
 func newBindingReconciler() *MCPToolBindingReconciler {
 	return &MCPToolBindingReconciler{
 		Client:   k8sClient,
@@ -64,11 +63,11 @@ func reconcileBinding(t *testing.T, r *MCPToolBindingReconciler, name, namespace
 	require.NoError(t, err, "binding reconcile must not error")
 }
 
-func mkAgent(t *testing.T, name, namespace string) *agentsv1alpha1.AgentDeployment {
+func mkAgent(t *testing.T, name, namespace string) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	a := &agentsv1alpha1.AgentDeployment{
+	a := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -80,7 +79,7 @@ func mkAgent(t *testing.T, name, namespace string) *agentsv1alpha1.AgentDeployme
 	return a
 }
 
-func mkRegistry(t *testing.T, name, namespace string, tools ...agentsv1alpha1.ToolEntry) {
+func mkRegistry(t *testing.T, name, namespace string, tools ...agentsv1beta1.ToolEntry) {
 	t.Helper()
 	storeTools := make([]toolregistry.ToolEntry, len(tools))
 	for i, te := range tools {
@@ -98,9 +97,9 @@ func mkRegistry(t *testing.T, name, namespace string, tools ...agentsv1alpha1.To
 	t.Cleanup(func() { _ = testRegStore.Delete(testCtx, namespace, name) })
 }
 
-func mkBinding(t *testing.T, name, namespace string, spec agentsv1alpha1.MCPToolBindingSpec) *agentsv1alpha1.MCPToolBinding {
+func mkBinding(t *testing.T, name, namespace string, spec agentsv1beta1.MCPToolBindingSpec) *agentsv1beta1.MCPToolBinding {
 	t.Helper()
-	b := &agentsv1alpha1.MCPToolBinding{
+	b := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       spec,
 	}
@@ -110,7 +109,7 @@ func mkBinding(t *testing.T, name, namespace string, spec agentsv1alpha1.MCPTool
 		// cleanup time a bare Delete would leave the object terminating forever
 		// and leak it into later tests. Strip finalizers after the delete.
 		_ = k8sClient.Delete(testCtx, b)
-		var cur agentsv1alpha1.MCPToolBinding
+		var cur agentsv1beta1.MCPToolBinding
 		if err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(b), &cur); err == nil && len(cur.Finalizers) > 0 {
 			cur.Finalizers = nil
 			_ = k8sClient.Update(testCtx, &cur)
@@ -136,6 +135,14 @@ func containerByName(containers []corev1.Container, name string) (corev1.Contain
 	return corev1.Container{}, false
 }
 
+func containerNames(containers []corev1.Container) []string {
+	names := make([]string, 0, len(containers))
+	for _, c := range containers {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
 func volumeByName(vols []corev1.Volume, name string) (corev1.Volume, bool) {
 	for _, v := range vols {
 		if v.Name == name {
@@ -146,7 +153,7 @@ func volumeByName(vols []corev1.Volume, name string) (corev1.Volume, bool) {
 }
 
 // TestBinding_ValidRemote_InjectionAndConfigMap: a valid remote binding →
-// AgentDeployment renders the discovery sidecar + CM volume + the ALWAYS-ON egress sidecar
+// AgentDeployment mounts the tools CM into the agent container and injects the ALWAYS-ON egress sidecar
 // (M82, ADR 0074 §1 — front-all-tools is now the only manifest mode) into the ksvc, and
 // the binding reconciler writes the <agent>-tools ConfigMap with the tool endpoint fronted
 // THROUGH the egress sidecar (no longer verbatim). Ready=True.
@@ -155,16 +162,16 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	agent := mkAgent(t, "wc-agent-remote", ns)
 	const url = "http://mcp-echo.default.svc.cluster.local/mcp"
 
-	mkRegistry(t, "reg-remote", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: url})
-	binding := mkBinding(t, "wc-remote", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-remote", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: url})
+	binding := mkBinding(t, "wc-remote", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-remote",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: url},
+		Server:      agentsv1beta1.ToolServer{URL: url},
 	})
 
-	// AgentDeployment reconcile → ksvc with the discovery sidecar + volume.
+	// AgentDeployment reconcile → ksvc with the tools volume mounted into the agent container.
 	reconcileNN(t, newReconciler(), agent.Name, ns)
 	// Binding reconcile → status + ConfigMap.
 	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
@@ -172,23 +179,24 @@ func TestBinding_ValidRemote_InjectionAndConfigMap(t *testing.T) {
 	ksvc := getKsvc(t, agent.Name, ns)
 	containers := ksvc.Spec.Template.Spec.Containers
 
-	// user + collector + discovery + egress-sidecar = 4 (M82: the egress sidecar is now injected for
-	// EVERY tool-having agent — front-all is always-on). No sidecar-mode tool container for a remote.
-	require.Len(t, containers, 4, "user + collector + discovery + egress sidecar")
-	_, hasEgress := containerByName(containers, egressSidecarContainerName)
-	require.True(t, hasEgress, "M82: the always-on egress sidecar is injected for a tool-having agent")
-	disc, ok := containerByName(containers, DiscoveryContainerName)
-	require.True(t, ok, "discovery sidecar must be injected")
-	assert.Equal(t, DiscoveryImage, disc.Image, "discovery image")
-	assert.Empty(t, disc.Ports, "discovery sidecar must declare NO container ports (Knative single-port rule)")
-	require.Len(t, disc.VolumeMounts, 1, "discovery mounts the tools CM")
-	assert.Equal(t, toolsMountPath, disc.VolumeMounts[0].MountPath)
-	envMap := map[string]string{}
-	for _, e := range disc.Env {
-		envMap[e.Name] = e.Value
+	// user + collector + egress-sidecar = 3 (M82: the egress sidecar is injected for EVERY
+	// tool-having agent). The launcher in the agent container serves tool discovery, so there is no
+	// discovery container. No sidecar-mode tool container for a remote.
+	require.Len(t, containers, 3, "user + collector + egress sidecar")
+	assert.Equal(t, []string{"user-container", telemetry.CollectorContainerName, egressSidecarContainerName},
+		containerNames(containers))
+	user := containers[0]
+	assert.Contains(t, user.VolumeMounts, corev1.VolumeMount{
+		Name: toolsVolumeName, MountPath: "/etc/agent/tools", ReadOnly: true,
+	}, "the agent container mounts the tools ConfigMap as a whole volume (a subPath mount never updates)")
+	toolsPath, ok := envValue(user, "TOOLS_JSON_PATH")
+	require.True(t, ok, "TOOLS_JSON_PATH tells the launcher and the SDKs where the manifest is")
+	assert.Equal(t, "/etc/agent/tools/tools.json", toolsPath.Value)
+	// A namespace enforcing the restricted Pod Security Standard admits this pod: every container in it
+	// is the platform's, and a pod is judged by its worst container.
+	for _, c := range containers {
+		assert.Empty(t, restrictedViolations(c), "%s fails the restricted profile", c.Name)
 	}
-	assert.Equal(t, "2999", envMap["DISCOVERY_PORT"], "DISCOVERY_PORT env")
-	assert.Equal(t, toolsMountPath+"/tools.json", envMap["TOOLS_JSON_PATH"], "TOOLS_JSON_PATH env")
 
 	// CM volume must be present and reference <agent>-tools.
 	vol, ok := volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
@@ -228,19 +236,19 @@ func TestBinding_AdoptedByAgent_OwnerReferenceSet(t *testing.T) {
 	agent := mkAgent(t, "adopt-agent", ns)
 	const url = "http://mcp-echo.default.svc.cluster.local/mcp"
 
-	mkRegistry(t, "reg-adopt", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: url})
-	binding := mkBinding(t, "adopt-wc", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-adopt", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: url})
+	binding := mkBinding(t, "adopt-wc", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-adopt",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: url},
+		Server:      agentsv1beta1.ToolServer{URL: url},
 	})
 	require.Empty(t, binding.OwnerReferences, "a freshly created binding has no owner")
 
 	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
 
-	var got agentsv1alpha1.MCPToolBinding
+	var got agentsv1beta1.MCPToolBinding
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &got))
 	require.Len(t, got.OwnerReferences, 1, "binding must be owned by its agent after reconcile")
 	ref := got.OwnerReferences[0]
@@ -265,18 +273,18 @@ func TestBinding_AdoptionDeferredUntilAgentExists(t *testing.T) {
 	const ns = "default"
 	const url = "http://wc.svc/mcp"
 
-	mkRegistry(t, "reg-defer", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: url})
-	binding := mkBinding(t, "defer-wc", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-defer", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: url})
+	binding := mkBinding(t, "defer-wc", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    "defer-agent", // does not exist yet
 		RegistryRef: "reg-defer",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: url},
+		Server:      agentsv1beta1.ToolServer{URL: url},
 	})
 
 	// Agent absent: reconcile converges without error and does not fabricate an owner.
 	reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
-	var got agentsv1alpha1.MCPToolBinding
+	var got agentsv1beta1.MCPToolBinding
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &got))
 	assert.Empty(t, got.OwnerReferences, "no owner can be set while the agent does not exist")
 
@@ -289,20 +297,20 @@ func TestBinding_AdoptionDeferredUntilAgentExists(t *testing.T) {
 }
 
 // TestBinding_ValidSidecar_ToolContainerInjected: a valid sidecar binding →
-// AgentDeployment injects the discovery sidecar AND a sidecar-mode tool
+// AgentDeployment mounts the tools CM AND injects a sidecar-mode tool
 // container; the manifest endpoint is the assigned localhost port + /mcp.
 func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 	const ns = "default"
 	agent := mkAgent(t, "wc-agent-side", ns)
 	const image = "dev.local/mcp-echo-server:e2e"
 
-	mkRegistry(t, "reg-side", ns, agentsv1alpha1.ToolEntry{Name: "word-count", Image: image})
-	binding := mkBinding(t, "wc-side", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-side", ns, agentsv1beta1.ToolEntry{Name: "word-count", Image: image})
+	binding := mkBinding(t, "wc-side", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-side",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeSidecar,
-		Server:      agentsv1alpha1.ToolServer{Image: image},
+		Server:      agentsv1beta1.ToolServer{Image: image},
 	})
 
 	reconcileNN(t, newReconciler(), agent.Name, ns)
@@ -310,9 +318,18 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 
 	ksvc := getKsvc(t, agent.Name, ns)
 	containers := ksvc.Spec.Template.Spec.Containers
-	// user + collector + discovery + tool + egress-sidecar = 5 (M82: front-all is always-on, so even
-	// an in-pod sidecar-mode tool is fronted through the injected egress sidecar).
-	require.Len(t, containers, 5, "user + collector + discovery + sidecar tool + egress sidecar")
+	// user + collector + tool + egress-sidecar = 4 (M82: front-all is always-on, so even an in-pod
+	// sidecar-mode tool is fronted through the injected egress sidecar; discovery is the launcher's).
+	require.Len(t, containers, 4, "user + collector + sidecar tool + egress sidecar")
+	// Every container the platform builds into the pod is bounded. The agent's own container takes
+	// spec.resources and a tool container is the binding author's image, so neither is sized here.
+	for _, c := range containers {
+		if c.Name == "user-container" || strings.HasPrefix(c.Name, "tool-") {
+			continue
+		}
+		assert.False(t, c.Resources.Limits.Cpu().IsZero(), "%s has no CPU limit", c.Name)
+		assert.False(t, c.Resources.Limits.Memory().IsZero(), "%s has no memory limit", c.Name)
+	}
 	_, hasEgress := containerByName(containers, egressSidecarContainerName)
 	require.True(t, hasEgress, "M82: the always-on egress sidecar is injected for a tool-having agent")
 
@@ -344,18 +361,18 @@ func TestBinding_ValidSidecar_ToolContainerInjected(t *testing.T) {
 
 // TestBinding_UnregisteredTool_ReadyFalseAndExcluded: a binding whose toolName
 // is not in the registry → Ready=False/UnregisteredTool, excluded from the
-// manifest, and (being the only binding) the agent gets NO discovery sidecar.
+// manifest, and (being the only binding) the agent gets NO tools volume.
 func TestBinding_UnregisteredTool_ReadyFalseAndExcluded(t *testing.T) {
 	const ns = "default"
 	agent := mkAgent(t, "bad-tool-agent", ns)
 
-	mkRegistry(t, "reg-bad", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: "http://x/mcp"})
-	binding := mkBinding(t, "bad-binding", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-bad", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: "http://x/mcp"})
+	binding := mkBinding(t, "bad-binding", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-bad",
 		ToolName:    "not-in-catalog",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: "http://x/mcp"},
+		Server:      agentsv1beta1.ToolServer{URL: "http://x/mcp"},
 	})
 
 	reconcileNN(t, newReconciler(), agent.Name, ns)
@@ -372,10 +389,12 @@ func TestBinding_UnregisteredTool_ReadyFalseAndExcluded(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(cm.Data["tools.json"]), &m))
 	assert.Empty(t, m.Tools, "invalid binding must be excluded from the manifest")
 
-	// No valid bindings → no discovery sidecar; ksvc keeps the bare spec-hash rev.
+	// No valid bindings → no tools mount; ksvc keeps the bare spec-hash rev.
 	ksvc := getKsvc(t, agent.Name, ns)
-	_, has := containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
-	assert.False(t, has, "an agent with no VALID binding must not get the discovery sidecar")
+	_, has := volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
+	assert.False(t, has, "an agent with no VALID binding must not get the tools volume")
+	_, hasPath := envValue(ksvc.Spec.Template.Spec.Containers[0], "TOOLS_JSON_PATH")
+	assert.False(t, hasPath, "nor TOOLS_JSON_PATH, so its launcher starts no :2999 listener")
 	hash, _ := specHash(agent.Spec)
 	assert.Equal(t, agent.Name+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
 		"no valid bindings → revision name is the spec-hash (+ the C7b identity-SA suffix)")
@@ -387,13 +406,13 @@ func TestBinding_RegistryMismatch_ReadyFalse(t *testing.T) {
 	const ns = "default"
 	agent := mkAgent(t, "mismatch-agent", ns)
 
-	mkRegistry(t, "reg-pin", ns, agentsv1alpha1.ToolEntry{Name: "word-count", Image: "dev.local/pinned:e2e"})
-	binding := mkBinding(t, "mismatch-binding", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-pin", ns, agentsv1beta1.ToolEntry{Name: "word-count", Image: "dev.local/pinned:e2e"})
+	binding := mkBinding(t, "mismatch-binding", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-pin",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeSidecar,
-		Server:      agentsv1alpha1.ToolServer{Image: "dev.local/wrong:e2e"},
+		Server:      agentsv1beta1.ToolServer{Image: "dev.local/wrong:e2e"},
 	})
 
 	reconcileNN(t, newReconciler(), agent.Name, ns)
@@ -414,13 +433,13 @@ func TestBinding_RemoteURLUpdate_HotReloadsNoRoll_J7(t *testing.T) {
 	agent := mkAgent(t, "hotpath-agent", ns)
 
 	// Registry with an EMPTY url pin so both v1 and v2 URLs are accepted.
-	mkRegistry(t, "reg-hot", ns, agentsv1alpha1.ToolEntry{Name: "word-count"})
-	binding := mkBinding(t, "hot-binding", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-hot", ns, agentsv1beta1.ToolEntry{Name: "word-count"})
+	binding := mkBinding(t, "hot-binding", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-hot",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: "http://v1.svc/mcp"},
+		Server:      agentsv1beta1.ToolServer{URL: "http://v1.svc/mcp"},
 	})
 
 	reconcileNN(t, newReconciler(), agent.Name, ns)
@@ -489,15 +508,15 @@ func TestBinding_StructuralChange_RevisionNameChanged(t *testing.T) {
 	agent := mkAgent(t, "struct-agent", ns)
 
 	mkRegistry(t, "reg-struct", ns,
-		agentsv1alpha1.ToolEntry{Name: "word-count", URL: "http://wc.svc/mcp"},
-		agentsv1alpha1.ToolEntry{Name: "echo", Image: "dev.local/echo:e2e"},
+		agentsv1beta1.ToolEntry{Name: "word-count", URL: "http://wc.svc/mcp"},
+		agentsv1beta1.ToolEntry{Name: "echo", Image: "dev.local/echo:e2e"},
 	)
-	b1 := mkBinding(t, "struct-b1", ns, agentsv1alpha1.MCPToolBindingSpec{
+	b1 := mkBinding(t, "struct-b1", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-struct",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: "http://wc.svc/mcp"},
+		Server:      agentsv1beta1.ToolServer{URL: "http://wc.svc/mcp"},
 	})
 
 	reconcileNN(t, newReconciler(), agent.Name, ns)
@@ -505,12 +524,12 @@ func TestBinding_StructuralChange_RevisionNameChanged(t *testing.T) {
 	revOne := getKsvc(t, agent.Name, ns).Spec.Template.Name
 
 	// Add a SECOND (sidecar) binding — structural change.
-	b2 := mkBinding(t, "struct-b2", ns, agentsv1alpha1.MCPToolBindingSpec{
+	b2 := mkBinding(t, "struct-b2", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-struct",
 		ToolName:    "echo",
 		Mode:        toolmanifest.ModeSidecar,
-		Server:      agentsv1alpha1.ToolServer{Image: "dev.local/echo:e2e"},
+		Server:      agentsv1beta1.ToolServer{Image: "dev.local/echo:e2e"},
 	})
 
 	reconcileNN(t, newReconciler(), agent.Name, ns)
@@ -543,22 +562,22 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 	agent := mkAgent(t, "del-agent", ns)
 
 	mkRegistry(t, "reg-del", ns,
-		agentsv1alpha1.ToolEntry{Name: "word-count", URL: "http://wc.svc/mcp"},
-		agentsv1alpha1.ToolEntry{Name: "echo", Image: "dev.local/echo:e2e"},
+		agentsv1beta1.ToolEntry{Name: "word-count", URL: "http://wc.svc/mcp"},
+		agentsv1beta1.ToolEntry{Name: "echo", Image: "dev.local/echo:e2e"},
 	)
-	b1 := mkBinding(t, "del-b1", ns, agentsv1alpha1.MCPToolBindingSpec{
+	b1 := mkBinding(t, "del-b1", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-del",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: "http://wc.svc/mcp"},
+		Server:      agentsv1beta1.ToolServer{URL: "http://wc.svc/mcp"},
 	})
-	b2 := mkBinding(t, "del-b2", ns, agentsv1alpha1.MCPToolBindingSpec{
+	b2 := mkBinding(t, "del-b2", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-del",
 		ToolName:    "echo",
 		Mode:        toolmanifest.ModeSidecar,
-		Server:      agentsv1alpha1.ToolServer{Image: "dev.local/echo:e2e"},
+		Server:      agentsv1beta1.ToolServer{Image: "dev.local/echo:e2e"},
 	})
 
 	br := newBindingReconciler()
@@ -575,7 +594,7 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 	require.Len(t, m.Tools, 2, "baseline: both tools in the manifest")
 	revTwo := getKsvc(t, agent.Name, ns).Spec.Template.Name
 
-	var b2Live agentsv1alpha1.MCPToolBinding
+	var b2Live agentsv1beta1.MCPToolBinding
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(b2), &b2Live))
 	require.Contains(t, b2Live.Finalizers, bindingFinalizer,
 		"reconcile must have added the finalizer (deletion convergence depends on it)")
@@ -587,7 +606,7 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 	reconcileBinding(t, br, b2.Name, ns)
 
 	// The binding must now be fully gone (finalizer released).
-	var gone agentsv1alpha1.MCPToolBinding
+	var gone agentsv1beta1.MCPToolBinding
 	err := k8sClient.Get(testCtx, client.ObjectKeyFromObject(b2), &gone)
 	require.True(t, apierrors.IsNotFound(err), "binding must be deleted once the finalizer is released")
 
@@ -605,8 +624,8 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 		"removing a binding (structural change) must change the revision name")
 	_, hasTool := containerByName(ksvc.Spec.Template.Spec.Containers, "tool-"+b2.Name)
 	assert.False(t, hasTool, "the deleted binding's tool container must be gone")
-	_, hasDisc := containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
-	assert.True(t, hasDisc, "discovery sidecar stays while the sibling binding remains")
+	_, hasTools := volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
+	assert.True(t, hasTools, "the tools volume stays while the sibling binding remains")
 
 	// (c) The sibling is untouched: still Ready=True/Bound.
 	assertBindingReady(t, b1.Name, ns, metav1.ConditionTrue, reasonBound)
@@ -626,8 +645,10 @@ func TestBinding_Deletion_ReconvergesAgent(t *testing.T) {
 	require.NoError(t, herr)
 	assert.Equal(t, agent.Name+"-"+hash+bareIdentitySuffix, ksvc.Spec.Template.Name,
 		"revision name reverts to the spec-hash (+ the C7b identity-SA suffix) when no bindings remain")
-	_, hasDisc = containerByName(ksvc.Spec.Template.Spec.Containers, DiscoveryContainerName)
-	assert.False(t, hasDisc, "discovery sidecar must be removed with the last binding")
+	_, hasTools = volumeByName(ksvc.Spec.Template.Spec.Volumes, toolsVolumeName)
+	assert.False(t, hasTools, "the tools volume must be removed with the last binding")
+	assert.NotContains(t, ksvc.Spec.Template.Spec.Containers[0].VolumeMounts, toolsMount(),
+		"and its mount on the agent container")
 }
 
 // TestBinding_AgentDeletedFirst_NoCMLeakAndFinalizerReleases is the m4.5
@@ -644,13 +665,13 @@ func TestBinding_AgentDeletedFirst_NoCMLeakAndFinalizerReleases(t *testing.T) {
 	agent := mkAgent(t, "orphan-agent", ns)
 	const url = "http://wc.svc/mcp"
 
-	mkRegistry(t, "reg-orphan", ns, agentsv1alpha1.ToolEntry{Name: "word-count", URL: url})
-	binding := mkBinding(t, "orphan-binding", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-orphan", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: url})
+	binding := mkBinding(t, "orphan-binding", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-orphan",
 		ToolName:    "word-count",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: url},
+		Server:      agentsv1beta1.ToolServer{URL: url},
 	})
 
 	br := newBindingReconciler()
@@ -681,7 +702,7 @@ func TestBinding_AgentDeletedFirst_NoCMLeakAndFinalizerReleases(t *testing.T) {
 	require.NoError(t, k8sClient.Delete(testCtx, binding))
 	reconcileBinding(t, br, binding.Name, ns)
 
-	var gone agentsv1alpha1.MCPToolBinding
+	var gone agentsv1beta1.MCPToolBinding
 	err = k8sClient.Get(testCtx, client.ObjectKeyFromObject(binding), &gone)
 	require.True(t, apierrors.IsNotFound(err),
 		"finalizer must release cleanly with the agent absent — a retained finalizer wedges namespace deletion")
@@ -694,7 +715,7 @@ func TestBinding_AgentDeletedFirst_NoCMLeakAndFinalizerReleases(t *testing.T) {
 // assertBindingReady fetches the binding and asserts its Ready condition.
 func assertBindingReady(t *testing.T, name, ns string, status metav1.ConditionStatus, reason string) {
 	t.Helper()
-	var b agentsv1alpha1.MCPToolBinding
+	var b agentsv1beta1.MCPToolBinding
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &b))
 	var ready *metav1.Condition
 	for i := range b.Status.Conditions {

@@ -20,8 +20,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
@@ -54,6 +57,8 @@ import (
 type identityCallerFactory struct {
 	backing client.WithWatch
 	extra   interceptor.Funcs
+	// username maps a token to its username; nil means "user:<token>".
+	username func(token string) string
 }
 
 func (f *identityCallerFactory) ForRequest(r *http.Request) (client.Client, error) {
@@ -67,7 +72,11 @@ func (f *identityCallerFactory) ForRequest(r *http.Request) (client.Client, erro
 	base := f.extra.Create
 	funcs.Create = func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 		if ssr, ok := obj.(*authnv1.SelfSubjectReview); ok {
-			ssr.Status = authnv1.SelfSubjectReviewStatus{UserInfo: authnv1.UserInfo{Username: "user:" + token}}
+			name := "user:" + token
+			if f.username != nil {
+				name = f.username(token)
+			}
+			ssr.Status = authnv1.SelfSubjectReviewStatus{UserInfo: authnv1.UserInfo{Username: name}}
 			return nil
 		}
 		if base != nil {
@@ -138,8 +147,8 @@ func seedGrant(server, username, access, refresh, tokenEndpoint string, expiry t
 
 // oauthToolRegistry is a register-managed ToolRegistry marked as an OAuth server, so
 // the resolver's serverIsOAuth check + the consent-begin confirmation pass.
-func oauthToolRegistry(server, url string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func oauthToolRegistry(server, url string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        server,
 			Namespace:   grantNS,
@@ -245,7 +254,7 @@ func TestMCPGrantConsentStoresPerUserGrant(t *testing.T) {
 	oauth.expectChallenge = "" // pass PKCE; assert grant storage
 
 	// The callback is browser-facing → 303 back to the console catalog, not JSON.
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 	q := assertCallbackRedirect(t, crec, "/tools/catalog")
 	assert.Equal(t, server, q.Get("mcp_connected"), "the redirect names the consented server")
 
@@ -302,7 +311,7 @@ func TestMCPGrantConsentDelegatesToGrantStore(t *testing.T) {
 	rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
 	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
 	oauth.expectChallenge = ""
-	crec := callback(t, s, oauth.validCode, pending.State)
+	crec := callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
 	assertCallbackRedirect(t, crec, "/tools/catalog")
 
 	// The delegate received the grant WITH the token material.
@@ -324,7 +333,7 @@ func TestMCPGrantConsentDelegatesToGrantStore(t *testing.T) {
 func TestMCPGrantConsentNonOAuthServerIs4xx(t *testing.T) {
 	oauth := newFakeOAuthServer(t)
 	const server, ns = "plain-mcp", "prod"
-	tr := &agentsv1alpha1.ToolRegistry{
+	tr := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        server,
 			Namespace:   ns,
@@ -353,7 +362,7 @@ func TestMCPGrantConsentUnknownServerIs404(t *testing.T) {
 
 // oauthToolRegistryWithConfig builds an OAuth ToolRegistry carrying the persisted OAuth
 // client config annotations (ADR 0031), so a grant can be begun from just {server, ns}.
-func oauthToolRegistryWithConfig(server, url string, o *fakeOAuthServer) *agentsv1alpha1.ToolRegistry {
+func oauthToolRegistryWithConfig(server, url string, o *fakeOAuthServer) *agentsv1beta1.ToolRegistry {
 	tr := oauthToolRegistry(server, url)
 	tr.Annotations[annMCPOAuthAuthEndpoint] = o.authorizeURL()
 	tr.Annotations[annMCPOAuthTokenEndpoint] = o.tokenURL()
@@ -380,6 +389,133 @@ func TestMCPGrantConsentRecoversConfigFromRegistration(t *testing.T) {
 	require.NotEmpty(t, pending.State)
 	assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL(), "authorize URL from the recovered endpoint")
 	assert.Contains(t, pending.AuthorizationURL, "recovered-client-id", "authorize URL carries the recovered client id")
+}
+
+// TestMCPGrantConsentRefusesChangingRegisteredEndpoints: the callback sends the authorization
+// code and PKCE verifier to the token endpoint. A server whose registration persisted its
+// endpoints keeps them: a consent request naming a different one is refused with 400 naming
+// the field, no flow starts, and the endpoint it named is never contacted.
+func TestMCPGrantConsentRefusesChangingRegisteredEndpoints(t *testing.T) {
+	oauth := newFakeOAuthServer(t)
+	attacker, hits := countingServer(t, oauth.srv.Config.Handler)
+	const server = "registered-mcp"
+
+	for _, tc := range []struct {
+		field string
+		auth  *MCPAuthRequest
+	}{
+		{"auth.tokenEndpoint", &MCPAuthRequest{Type: "oauth", TokenEndpoint: attacker.URL + "/token"}},
+		{"auth.authorizationEndpoint", &MCPAuthRequest{Type: "oauth", AuthorizationEndpoint: attacker.URL + "/authorize"}},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+			wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://registered/mcp", oauth))
+
+			rec, pending := beginGrant(t, s, server, "mallory-token", tc.auth)
+
+			require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), tc.field)
+			assert.Empty(t, pending.State, "no consent flow starts")
+			// Completing the consent with whatever state the response carried cannot reach
+			// the named endpoint either.
+			callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
+			assert.Zero(t, hits.Load(), "the endpoint the request named is never contacted")
+		})
+	}
+
+	// Repeating the registered endpoints is not a change.
+	s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+	wireTRStore(t, s, nil, oauthToolRegistryWithConfig(server, "http://registered/mcp", oauth))
+	rec, pending := beginGrant(t, s, server, "bob-token", &MCPAuthRequest{
+		Type: "oauth", AuthorizationEndpoint: oauth.authorizeURL(), TokenEndpoint: " " + oauth.tokenURL() + " ",
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL())
+}
+
+// TestMCPGrantConsentLegacyServerSuppliedEndpointsNeedUpdate: a server registered before config
+// persistence has no endpoints to protect, and the callback sends the authorization code and the
+// PKCE verifier to whatever token endpoint the flow holds. Supplying them is therefore the same
+// authority as persisting them: a caller who may update the server's registration may name them
+// and the flow uses them; a caller who can only read the server gets the config discovered from
+// the stored server URL, and the endpoints it named are never contacted.
+func TestMCPGrantConsentLegacyServerSuppliedEndpointsNeedUpdate(t *testing.T) {
+	const server = "legacy-supplied-mcp"
+	updateOfServer := func(a authz.Action) bool {
+		return a.Verb == authz.VerbUpdate && a.Resource == resourceToolRegistries && a.Name == server
+	}
+
+	t.Run("a caller who may update the registration supplies them", func(t *testing.T) {
+		oauth := newFakeOAuthServer(t)
+		auth := &actionsAuthorizer{}
+		s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+		wireTRStore(t, s, auth, oauthToolRegistry(server, "http://legacy/mcp"))
+
+		rec, pending := beginGrant(t, s, server, "alice-token", grantAuth(oauth))
+
+		require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+		assert.Contains(t, pending.AuthorizationURL, oauth.authorizeURL(), "the supplied authorization endpoint is used")
+		assert.True(t, slices.ContainsFunc(auth.asked(), updateOfServer), "supplying endpoints asks for update on the server")
+		oauth.expectChallenge = ""
+		assertCallbackRedirect(t, callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...), "/tools/catalog")
+		assert.Equal(t, "authorization_code", oauth.gotGrant, "the code went to the supplied token endpoint")
+	})
+
+	t.Run("a caller who can only read the server cannot point the flow at them", func(t *testing.T) {
+		oauth := newFakeOAuthServer(t)
+		attacker, hits := countingServer(t, oauth.srv.Config.Handler)
+		disco, _ := oauthDiscoveryStub(t, false, false)
+		auth := &actionsAuthorizer{deny: func(a authz.Action) error {
+			if updateOfServer(a) {
+				return authz.ErrForbidden
+			}
+			return nil
+		}}
+		s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+		store := wireTRStore(t, s, auth, oauthToolRegistry(server, disco.URL+"/mcp"))
+
+		rec, pending := beginGrant(t, s, server, "viewer-token", &MCPAuthRequest{
+			Type:                  "oauth",
+			AuthorizationEndpoint: attacker.URL + "/authorize",
+			TokenEndpoint:         attacker.URL + "/token",
+			ClientID:              "attacker-client",
+		})
+
+		require.Equal(t, http.StatusAccepted, rec.Code, "body: %s", rec.Body.String())
+		assert.True(t, strings.HasPrefix(pending.AuthorizationURL, disco.URL+"/authorize"),
+			"the authorization endpoint is discovered from the stored server URL, got %s", pending.AuthorizationURL)
+		assert.NotContains(t, pending.AuthorizationURL, attacker.URL)
+		assert.Contains(t, pending.AuthorizationURL, "dyn-client-123", "the client id is discovered too")
+
+		callback(t, s, oauth.validCode, pending.State, rec.Result().Cookies()...)
+		assert.Zero(t, hits.Load(), "the endpoints the request named are never contacted")
+
+		got, err := store.Get(context.Background(), grantNS, server)
+		require.NoError(t, err)
+		assert.Empty(t, got.Annotations[annMCPOAuthTokenEndpoint], "a reader's consent persists nothing on the registration")
+	})
+
+	t.Run("an authorization check that fails is not an allow", func(t *testing.T) {
+		oauth := newFakeOAuthServer(t)
+		attacker, hits := countingServer(t, oauth.srv.Config.Handler)
+		disco, _ := oauthDiscoveryStub(t, false, false)
+		auth := &actionsAuthorizer{deny: func(a authz.Action) error {
+			if updateOfServer(a) {
+				return errors.New("SelfSubjectAccessReview: connection refused")
+			}
+			return nil
+		}}
+		s, _ := newGrantServer(t, fake.NewClientBuilder().WithScheme(testScheme(t)).Build())
+		wireTRStore(t, s, auth, oauthToolRegistry(server, disco.URL+"/mcp"))
+
+		rec, pending := beginGrant(t, s, server, "alice-token", &MCPAuthRequest{
+			Type: "oauth", AuthorizationEndpoint: attacker.URL + "/authorize", TokenEndpoint: attacker.URL + "/token",
+		})
+
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, "body: %s", rec.Body.String())
+		assert.Empty(t, pending.State, "no consent flow starts")
+		assert.Zero(t, hits.Load())
+	})
 }
 
 // TestMCPGrantConsentLegacyServerDiscoveryFails (m26.1b): a legacy OAuth server with no

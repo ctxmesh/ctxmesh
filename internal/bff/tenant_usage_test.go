@@ -29,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // fakeTenantUsage is a TenantUsageReader double — no live Valkey in unit tests.
@@ -75,7 +75,7 @@ func getTenantUsage(t *testing.T, s *Server, name string) (*TenantUsage, int) {
 func TestTenantUsage(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
 		mockTenant("alpha", []string{"a1"},
-			&agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600, MaxConcurrent: 20}, true),
+			&agentsv1beta1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600, MaxConcurrent: 20}, true),
 	).Build()
 	reader := &fakeTenantUsage{usage: TenantUsage{SpendUSD: 12.5, RPM: 42, InFlight: 3}}
 	s := newUsageServer(t, &fakeCallerClientFactory{client: c}, reader)
@@ -94,8 +94,8 @@ func TestTenantUsage(t *testing.T) {
 // fan-out.
 func TestTenantUsageList(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(
-		mockTenant("alpha", []string{"a1"}, &agentsv1alpha1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600}, true),
-		mockTenant("beta", []string{"b1"}, &agentsv1alpha1.TenantModelQuota{RPM: 300}, true),
+		mockTenant("alpha", []string{"a1"}, &agentsv1beta1.TenantModelQuota{BudgetUSD: "100.00", RPM: 600}, true),
+		mockTenant("beta", []string{"b1"}, &agentsv1beta1.TenantModelQuota{RPM: 300}, true),
 	).Build()
 	reader := &fakeTenantUsage{usage: TenantUsage{SpendUSD: 5, RPM: 10, InFlight: 1}}
 	s := newUsageServer(t, &fakeCallerClientFactory{client: c}, reader)

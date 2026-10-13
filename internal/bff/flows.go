@@ -1,5 +1,14 @@
 package bff
 
+import (
+	"context"
+	"fmt"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+)
+
 // Console FLOWS — a flow is one console action and the COMPLETE set of writes it performs.
 //
 // This exists because the UI used to assemble the permission question itself, resource by
@@ -13,10 +22,6 @@ package bff
 // The fix is not a longer conjunction in the UI. It is moving the question to the only party
 // that knows the answer: the handler that performs the writes. The UI asks "may I run this
 // flow?" and never enumerates resources again, so the two cannot drift.
-//
-// The same drift already existed elsewhere and had gone unnoticed: goldenResources omits
-// `workflows` and `alertpolicies` while nav gated on them, and an unprobed cell reads as
-// optimistic-true — so those gates never gated anything at all.
 
 // flowNeed is one resource the flow writes, and every verb it may need on it.
 type flowNeed struct {
@@ -36,6 +41,9 @@ type flowSpec struct {
 	needs []flowNeed
 }
 
+// flowConnectProvider names the provider-connect flow; the handler authorizes it by name.
+const flowConnectProvider = "connectProvider"
+
 // consoleFlows is the registry the capability probe answers. Adding a write to a handler
 // without adding it here is the drift this file exists to prevent, and hack/flow-completability.sh
 // is the gate that catches it.
@@ -44,7 +52,7 @@ var consoleFlows = []flowSpec{
 		// Connect a model provider (internal/bff/providers.go, createProviderObjects).
 		// Three objects, in this order: Secret (the key), SecretBinding (logical name →
 		// Secret/key), ModelRoute (provider + models + the binding ref).
-		name: "connectProvider",
+		name: flowConnectProvider,
 		needs: []flowNeed{
 			{group: "", resource: resSecrets, verbs: []string{verbCreate}},
 			{group: agentsAPIGroup, resource: resSecretBindings, verbs: []string{verbCreate}},
@@ -52,15 +60,17 @@ var consoleFlows = []flowSpec{
 		},
 	},
 	{
-		// Re-connect / rotate the key. upsertObject creates, then UPDATES when the object
-		// already exists, so the rotate path needs update on the same three objects — not
-		// `secretbindings.update` alone, which is what the console checked while the write
-		// that actually matters is the core Secret.
+		// Rotate the key (handleRotateProviderKey). It reads the ModelRoute and SecretBinding to
+		// recover what connect wrote, then UPDATES all three objects through connect's write path
+		// and never creates one. A custom resource cannot be updated without its resourceVersion,
+		// which the update reads first (get). The Secret is updated without a read: get on a
+		// Secret returns its data, and no shipped persona may hold it (ADR 0136).
+		// TestRotateProviderKey_IssuesExactlyTheFlowVerbs holds the handler to this list.
 		name: "rotateProviderKey",
 		needs: []flowNeed{
 			{group: "", resource: resSecrets, verbs: []string{verbUpdate}},
-			{group: agentsAPIGroup, resource: resSecretBindings, verbs: []string{verbUpdate}},
-			{group: agentsAPIGroup, resource: resModelRoutes, verbs: []string{verbUpdate}},
+			{group: agentsAPIGroup, resource: resSecretBindings, verbs: []string{verbGet, verbUpdate}},
+			{group: agentsAPIGroup, resource: resModelRoutes, verbs: []string{verbGet, verbUpdate}},
 		},
 	},
 }
@@ -112,4 +122,27 @@ func evaluateFlows(allowed map[string]map[string]bool) map[string]bool {
 		out[f.name] = ok
 	}
 	return out
+}
+
+// authorizeFlow asks, as the caller, for every permission the named flow needs in namespace,
+// and returns the first refusal (authz.ErrForbidden) or API error. A handler whose flow starts
+// with an outbound request to a caller-supplied URL calls this first, so a caller who could not
+// complete the writes never gets the BFF to contact anything on their behalf.
+func (s *Server) authorizeFlow(ctx context.Context, caller client.Client, name, namespace string) error {
+	for _, f := range consoleFlows {
+		if f.name != name {
+			continue
+		}
+		for _, n := range f.needs {
+			for _, v := range n.verbs {
+				if err := s.authorizer.Authorize(ctx, caller, authz.Action{
+					Verb: v, Group: n.group, Resource: n.resource, Namespace: namespace,
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return fmt.Errorf("authorize flow: no console flow named %q", name)
 }

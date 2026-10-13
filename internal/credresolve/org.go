@@ -16,15 +16,6 @@ limitations under the License.
 
 package credresolve
 
-import (
-	"context"
-	"strings"
-
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-)
-
 // The ADMIN-SET SHARED ORG credential (ADR 0029 §1/§7) — a single Secret per org-scoped
 // server holding one bearer used by everyone, no per-user consent. It is the org analogue
 // of a per-user grant: same locked-namespace trust domain, but keyed by SERVER only (not
@@ -58,42 +49,4 @@ func OrgSecretLabels(server string) map[string]string {
 // OrgSecretData builds the org-credential Secret data from a shared bearer key.
 func OrgSecretData(bearer string) map[string][]byte {
 	return map[string][]byte{KeyOrgCredential: []byte(bearer)}
-}
-
-// NewOrgCredentialFunc builds the OrgCredential seam for a K8sBackend: it resolves the
-// admin-set shared bearer for an ORG-SCOPED server, else ErrNoCredential (so resolution
-// falls through to personal-consent / public). isOrgScoped reports whether a server is
-// org-scoped (the caller reads the ToolRegistry scope label / route); a nil isOrgScoped or a
-// lookup error yields ErrNoCredential (fail-closed — never resolve an org credential for a
-// non-org server). credNs is the locked credential namespace ("" ⇒ read in the request ns).
-func NewOrgCredentialFunc(
-	reader client.Client,
-	credNs string,
-	isOrgScoped func(ctx context.Context, ns, server string) (bool, error),
-) func(ctx context.Context, ns, server string) (Credential, error) {
-	return func(ctx context.Context, ns, server string) (Credential, error) {
-		if isOrgScoped == nil {
-			return Credential{}, ErrNoCredential
-		}
-		org, err := isOrgScoped(ctx, ns, server)
-		if err != nil || !org {
-			return Credential{}, ErrNoCredential
-		}
-		readNS := credNs
-		if readNS == "" {
-			readNS = ns
-		}
-		var secret corev1.Secret
-		if err := reader.Get(ctx, client.ObjectKey{Name: OrgSecretName(server), Namespace: readNS}, &secret); err != nil {
-			if apierrors.IsNotFound(err) {
-				return Credential{}, ErrNoCredential
-			}
-			return Credential{}, err
-		}
-		bearer := strings.TrimSpace(string(secret.Data[KeyOrgCredential]))
-		if bearer == "" {
-			return Credential{}, ErrNoCredential
-		}
-		return Credential{Kind: KindBearer, Value: bearer}, nil
-	}
 }

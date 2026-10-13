@@ -39,7 +39,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/kedatypes"
 )
@@ -89,9 +88,6 @@ func TestMain(m *testing.M) {
 	testScheme := k8sruntime.NewScheme()
 	if err = scheme.AddToScheme(testScheme); err != nil {
 		panic("failed to add client-go scheme: " + err.Error())
-	}
-	if err = agentsv1alpha1.AddToScheme(testScheme); err != nil {
-		panic("failed to add agents/v1alpha1 scheme: " + err.Error())
 	}
 	if err = agentsv1beta1.AddToScheme(testScheme); err != nil {
 		panic("failed to add agents/v1beta1 scheme: " + err.Error())

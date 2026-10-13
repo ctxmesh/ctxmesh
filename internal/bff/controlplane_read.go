@@ -22,9 +22,10 @@ import (
 	"net/http"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
@@ -51,8 +52,8 @@ const (
 	// resourceWorkflows is the CRD plural resource name GET /api/approvals authorizes against (M112,
 	// V5): plan_approval pauses are raised ONLY by the workflow executor, so every queue row is a
 	// workflow run — the caller's RBAC on `list workflows` in the namespace gates the approval queue as
-	// a PERSONA gate (one SSAR, never per-row). v1alpha1/v1beta1 share the group `agents.ctxmesh.ai`
-	// and an SSAR keys on group+resource (not version), so authorizeStore's group is correct here.
+	// a PERSONA gate (one SSAR, never per-row). An SSAR keys on group+resource (not version), so
+	// authorizeStore's group is correct here.
 	resourceWorkflows = "workflows"
 )
 
@@ -66,7 +67,7 @@ const (
 func (s *Server) authorizeStore(ctx context.Context, caller client.Client, verb, resource, namespace, name string) error {
 	return s.authorizer.Authorize(ctx, caller, authz.Action{
 		Verb:      verb,
-		Group:     agentsv1alpha1.GroupVersion.Group,
+		Group:     agentsv1beta1.GroupVersion.Group,
 		Resource:  resource,
 		Namespace: namespace,
 		Name:      name,
@@ -83,6 +84,25 @@ func (s *Server) writeAuthzError(w http.ResponseWriter, err error, action string
 	}
 	s.log.Error(err, "control-plane authorization failed", "action", action)
 	writeError(w, http.StatusInternalServerError, "authorization check failed")
+}
+
+// authzRefusal maps a failed pre-flight authorization to the response a handler returns
+// before it does anything else — in particular before any outbound request to a URL the
+// caller supplied. A denial is 403; a token the API server rejects is 401 (a garbage bearer
+// fails the SelfSubjectAccessReview itself, it is not a denial); anything else is a 500 and
+// never an allow. nil in, nil out.
+func (s *Server) authzRefusal(err error, action string) *createError {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, authz.ErrForbidden), apierrors.IsForbidden(err):
+		return &createError{status: http.StatusForbidden, msg: "you do not have permission to " + action}
+	case apierrors.IsUnauthorized(err):
+		return &createError{status: http.StatusUnauthorized, msg: msgTokenRejected}
+	default:
+		s.log.Error(err, "pre-flight authorization failed", "action", action)
+		return &createError{status: http.StatusInternalServerError, msg: "authorization check failed"}
+	}
 }
 
 // writeValidationError maps a controlplane.ErrInvalid (the in-app replacement for

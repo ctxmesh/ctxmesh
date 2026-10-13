@@ -75,3 +75,6 @@ sdk/rust/target/
 
 # Ruby SDK build output
 sdk/ruby/*.gem
+
+# A `go build ./examples/echo-agent/` from the repo root writes its binary here.
+/echo-agent

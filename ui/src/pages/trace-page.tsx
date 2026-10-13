@@ -24,7 +24,10 @@ import { TraceExplorer } from "@/components/dashboard/trace-explorer";
 import { FixtureStepper } from "@/components/dashboard/fixture-stepper";
 import { FeedbackPanel } from "@/components/dashboard/feedback-panel";
 import { api, ApiError, type SpanSummary, type TraceDetailResponse } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { formatDateTime, formatLatency, formatUSD } from "@/lib/format";
+import { useNamespace } from "@/lib/namespace";
+import { settleNotice, useSettlingTrace } from "@/lib/trace-settle";
 import { ShareRunDialog } from "@/components/dashboard/share-run-dialog";
 
 // TracePage — the forensic run reader (m16.7; M151 §6.1 archetype A5, trace
@@ -83,6 +86,8 @@ type AddToDatasetState =
   | { kind: "error"; message: string };
 
 function AddToDatasetPanel({ traceId }: { traceId: string }) {
+  // The dataset lives in the selected workspace, the namespace the Datasets page reads.
+  const { workingNamespace } = useNamespace();
   const [datasetName, setDatasetName] = React.useState("");
   const [state, setState] = React.useState<AddToDatasetState>({ kind: "idle" });
 
@@ -90,9 +95,13 @@ function AddToDatasetPanel({ traceId }: { traceId: string }) {
     e.preventDefault();
     const name = datasetName.trim();
     if (!name) return;
+    if (!workingNamespace) {
+      setState({ kind: "error", message: "Choose a workspace first: the dataset belongs to one." });
+      return;
+    }
     setState({ kind: "submitting" });
     try {
-      const result = await api.addRunToDataset(name, { traceId });
+      const result = await api.addRunToDataset(workingNamespace, name, { traceId });
       setState({ kind: "success", caseId: result.caseId });
     } catch (err) {
       if (err instanceof ApiError && err.isNotImplemented) {
@@ -112,7 +121,13 @@ function AddToDatasetPanel({ traceId }: { traceId: string }) {
       <CardContent>
         <p className="mb-3 text-sm text-secondary-foreground">
           Personal data is redacted, then the run is appended to a dataset as a
-          labelled case. The dataset is created if it does not exist yet.
+          labelled case. The dataset is created if it does not exist yet
+          {workingNamespace ? (
+            <>
+              , in <span className="font-mono text-xs">{workingNamespace}</span>
+            </>
+          ) : null}
+          .
         </p>
         <form
           onSubmit={(e) => void onSubmit(e)}
@@ -212,11 +227,7 @@ function failedSpans(spans: SpanSummary[]): number {
 
 export function TracePage() {
   const { id = "" } = useParams();
-  const [state, setState] = React.useState<PageState>({ kind: "loading" });
   const [shareOpen, setShareOpen] = React.useState(false);
-  // Retry is a re-run of the same effect, not a second fetch path — §7 A5's
-  // "ErrorState + Retry" with exactly one place that knows how to load a trace.
-  const [attempt, setAttempt] = React.useState(0);
   // How many times the pending state has re-checked. Also the flicker guard: the fetch effect
   // resets to "loading", so without it the panel would blink between "still recording" and a
   // spinner every few seconds.
@@ -226,60 +237,44 @@ export function TracePage() {
     setPendingTries(0);
   }, [id]);
 
+  // Fetch detail + Langfuse link-out in parallel. If the link-out fails we simply don't
+  // show the button (best-effort, matching RunInspector). Retry re-asks the same read —
+  // §7 A5's "ErrorState + Retry" with exactly one place that knows how to load a trace.
+  const fetchTrace = React.useCallback(
+    (signal: AbortSignal) =>
+      Promise.all([
+        api.traceDetail(id, signal),
+        api.traceLink(id, signal).catch(() => null),
+      ]).then(([detail, linkRes]) => ({ detail, langfuseUrl: linkRes?.url ?? null })),
+    [id],
+  );
+  const { state: read, reload } = useLoad(fetchTrace);
+  const state = React.useMemo((): PageState => {
+    if (read.kind === "loading") return read;
+    if (read.kind === "ready") return { kind: "ready", ...read.data };
+    // 501 → no trace backend wired: calm "not configured", never a red error.
+    if (read.status === 501) return { kind: "unconfigured" };
+    // A 404 the BFF marked trace_pending is "not yet", not "never": the id resolved to a run
+    // the caller may read, and only the spans are missing. This is the ordinary state seconds
+    // after a first run on a cold pod, where the agent's OTLP exporter is still backing off
+    // against a collector that was not listening yet (m52.G30). Showing "The trace didn't
+    // load" there tells a new user their first run broke, immediately after it succeeded.
+    if (read.code === TRACE_PENDING_CODE) return { kind: "pending" };
+    return { kind: "error", message: read.message, forbidden: read.forbidden };
+  }, [read]);
+
   React.useEffect(() => {
     if (state.kind !== "pending" || pendingTries >= PENDING_MAX_TRIES) return;
     const t = window.setTimeout(() => {
       setPendingTries((n) => n + 1);
-      setAttempt((n) => n + 1);
+      reload();
     }, PENDING_POLL_MS);
     return () => window.clearTimeout(t);
-  }, [state.kind, pendingTries]);
+  }, [state.kind, pendingTries, reload]);
 
-  React.useEffect(() => {
-    if (!id) return;
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-
-    // Fetch detail + Langfuse link-out in parallel. If the link-out fails we
-    // simply don't show the button (best-effort, matching RunInspector).
-    Promise.all([
-      api.traceDetail(id, controller.signal),
-      api.traceLink(id, controller.signal).catch(() => null),
-    ])
-      .then(([detail, linkRes]) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "ready",
-          detail,
-          langfuseUrl: linkRes?.url ?? null,
-        });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // 501 → no trace backend wired: calm "not configured", never a red error.
-        if (err instanceof ApiError && err.isNotImplemented) {
-          setState({ kind: "unconfigured" });
-          return;
-        }
-        // A 404 the BFF marked trace_pending is "not yet", not "never": the id resolved to a run
-        // the caller may read, and only the spans are missing. This is the ordinary state seconds
-        // after a first run on a cold pod, where the agent's OTLP exporter is still backing off
-        // against a collector that was not listening yet (m52.G30). Showing "The trace didn't
-        // load" there tells a new user their first run broke, immediately after it succeeded.
-        if (err instanceof ApiError && err.code === TRACE_PENDING_CODE) {
-          setState({ kind: "pending" });
-          return;
-        }
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load the trace",
-          forbidden,
-        });
-      });
-
-    return () => controller.abort();
-  }, [id, attempt]);
+  // A fresh run's trace lands in pieces, so the loaded trace is re-read, bounded, until it matches
+  // what the run recorded (lib/trace-settle).
+  const settling = useSettlingTrace(id, state.kind === "ready" ? state.detail : null);
 
   // ── Pending: the trace is real, its spans have not landed yet ───────────────
   // Rendered for the silent re-check too (pendingTries > 0 while the effect refetches), or the
@@ -300,7 +295,7 @@ export function TracePage() {
           record arrives.
         </QuietNote>
         {gaveUp && (
-          <Button variant="outline" onClick={() => setAttempt((n) => n + 1)}>
+          <Button variant="outline" onClick={() => reload()}>
             Check again
           </Button>
         )}
@@ -371,14 +366,15 @@ export function TracePage() {
           title="The trace didn't load."
           description="The run itself is unaffected — only its forensic record failed to read."
           detail={state.message}
-          onRetry={() => setAttempt((n) => n + 1)}
+          onRetry={() => reload()}
         />
       </div>
     );
   }
 
   // ── Ready ───────────────────────────────────────────────────────────────────
-  const { rollup, spans } = state.detail;
+  const { rollup, spans } = settling.detail ?? state.detail;
+  const notice = settleNotice(settling.status);
   const failed = failedSpans(spans);
   // Zero is not a measurement here — see the header note. `undefined` routes the
   // row to KeyValueList's stated-absence branch instead of a formatted nought.
@@ -510,6 +506,16 @@ export function TracePage() {
               title="What happened"
               lede={spanLede}
             />
+            {settling.status?.kind === "settling" && (
+              <p className="mb-3 text-sm text-muted-foreground" role="status" data-testid="trace-settling">
+                Spans are still arriving from the trace backend — this page updates as they land.
+              </p>
+            )}
+            {notice && (
+              <div className="mb-3" data-testid="trace-incomplete">
+                <QuietNote title="This trace may not be complete yet.">{notice}</QuietNote>
+              </div>
+            )}
             {/* §4.6: the wide artifact scrolls inside its own container, and the
                 floor keeps the waterfall legible instead of letting the grid
                 crush it. The page body never scrolls sideways. */}

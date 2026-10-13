@@ -21,8 +21,9 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type AgentRegistrySummary } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { api, type AgentRegistrySummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_REGISTRIES } from "@/lib/nav";
 
@@ -112,17 +113,18 @@ function nextStep(
 
 function RowActions({
   registry,
-  canEdit,
-  canDelete,
   onEdit,
   onDelete,
 }: {
   registry: AgentRegistrySummary;
-  canEdit: boolean;
-  canDelete: boolean;
   onEdit: (r: AgentRegistrySummary) => void;
   onDelete: (r: AgentRegistrySummary) => void;
 }) {
+  // Edit and Delete act in the registry's own namespace, which under "All workspaces" is not the
+  // shell's.
+  const { can } = useCapabilitiesIn(registry.namespace);
+  const canEdit = can(RES_REGISTRIES, "update");
+  const canDelete = can(RES_REGISTRIES, "delete");
   if (!canEdit && !canDelete) return null;
   return (
     <div
@@ -164,17 +166,12 @@ function RowActions({
   );
 }
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; items: AgentRegistrySummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 type View = "all" | "attention";
 
 export function AgentRegistriesPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
-  const { can } = useCapabilities();
+  const { can, canIn, ensure } = useCapabilities();
   const canCreate = can(RES_REGISTRIES, "create");
   const canEdit = can(RES_REGISTRIES, "update");
   const canDelete = can(RES_REGISTRIES, "delete");
@@ -182,45 +179,23 @@ export function AgentRegistriesPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<View>("all");
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [state, setState] = useState<Load>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
 
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listAgentRegistries(
+  const fetchPage = useCallback(
+    (signal: AbortSignal) =>
+      api.listAgentRegistries(
         {
           limit: PAGE_LIMIT,
           cursor: cursor || undefined,
           q: query || undefined,
           namespace: namespace || undefined,
         },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", items: res.items, nextCursor: res.nextCursor });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden,
-        });
-      });
-  }, [cursor, query, namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+        signal,
+      ),
+    [cursor, query, namespace],
+  );
+  const { state, reload } = useLoad(fetchPage);
 
   const resetPaging = useCallback(() => setPageStack([""]), []);
 
@@ -238,10 +213,10 @@ export function AgentRegistriesPage() {
   }, [namespace, resetPaging]);
 
   const items = useMemo(
-    () => (state.kind === "ready" ? state.items : []),
+    () => (state.kind === "ready" ? state.data.items : []),
     [state],
   );
-  const nextCursor = state.kind === "ready" ? state.nextCursor : "";
+  const nextCursor = state.kind === "ready" ? state.data.nextCursor : "";
   // hasNext keys off the CURSOR (BFF), never items.length — an empty filtered
   // window with more pages must keep Next live (the cursor-vs-q rule).
   const hasNext = nextCursor !== "";
@@ -252,6 +227,12 @@ export function AgentRegistriesPage() {
   // words, because the console cannot see past it.
   const windowed = hasPrev || hasNext;
 
+  // A row's next step opens the editor only where the caller may update, asked of the row's own
+  // namespace.
+  useEffect(() => {
+    new Set(items.map((r) => r.namespace)).forEach((ns) => ensure(ns));
+  }, [items, ensure]);
+
   // Decorate once: status, next step and sort key all come from the same
   // resolve, so a row can never disagree with itself.
   const decorated = useMemo(
@@ -259,7 +240,8 @@ export function AgentRegistriesPage() {
       items
         .map((r) => {
           const status = resolveStatus(r.ready, r.phase);
-          return { row: r, tone: status.tone, step: nextStep(r, status.tone, canEdit) };
+          const mayEdit = canIn(r.namespace, RES_REGISTRIES, "update");
+          return { row: r, tone: status.tone, step: nextStep(r, status.tone, mayEdit) };
         })
         .sort(
           (a, b) =>
@@ -267,7 +249,7 @@ export function AgentRegistriesPage() {
             TONE_RANK[a.tone] - TONE_RANK[b.tone] ||
             a.row.name.localeCompare(b.row.name),
         ),
-    [items, canEdit],
+    [items, canIn],
   );
 
   const needing = decorated.filter((d) => d.step.tone !== "none").length;
@@ -293,7 +275,7 @@ export function AgentRegistriesPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "agent registries",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 
@@ -460,13 +442,13 @@ export function AgentRegistriesPage() {
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Agent registries"
         onRowClick={(r) => navigate(detailPath(r))}
+        // Under "All workspaces" each row decides by its own namespace; one workspace decides for
+        // every row, so a viewer there gets no actions column.
         rowActions={
-          canEdit || canDelete
+          namespace === "" || canEdit || canDelete
             ? (r) => (
                 <RowActions
                   registry={r}
-                  canEdit={canEdit}
-                  canDelete={canDelete}
                   onEdit={(reg) => navigate(`${detailPath(reg)}?edit=1`)}
                   onDelete={(reg) => navigate(`${detailPath(reg)}?delete=1`)}
                 />

@@ -12,7 +12,9 @@
 # Java's was a hard 404 on Maven Central, so its copy-paste install failed outright, and crates.io
 # spent that whole time telling people to install a version the crate had moved past.
 #
-# So: one script writes them all, and --check asserts they agree with CHANGELOG.md.
+# So: one script writes them all, and --check asserts they agree with CHANGELOG.md. The chart's
+# version and appVersion are among them: appVersion tags every first-party image, and a clone at a
+# release tag installs whatever the tree's Chart.yaml says.
 #
 #   ./hack/bump-version.sh 0.1.0-beta.4    write every file
 #   ./hack/bump-version.sh --check         assert they already agree (wired into tier0)
@@ -39,16 +41,20 @@ import pathlib, re, sys
 
 target, check, product = sys.argv[1], sys.argv[2] == "1", sys.argv[3]
 
-# (file, regex, replacement-template). Every pattern is anchored so it cannot match a dependency's
-# version — the Java pom carries seven <version> tags and only the first is the project's.
+# (file, regex, replacement-template). The regex captures the bare version as group v. Every pattern
+# is anchored so it cannot match a dependency's version — the Java pom carries seven <version> tags
+# and only the first is the project's.
 EDITS = [
-    ("sdk/rust/Cargo.toml",              r'(?m)^version = "[^"]*"',        'version = "{v}"'),
-    ("sdk/go/version.go",                r'(?m)^const Version = "[^"]*"',  'const Version = "{v}"'),
-    ("sdk/ruby/lib/ctxmesh/version.rb",  r'(?m)^  VERSION = "[^"]*"',      '  VERSION = "{v}"'),
-    ("sdk/java/pom.xml",                 r'<version>[^<]*</version>',      '<version>{v}</version>'),
+    ("sdk/rust/Cargo.toml",              r'(?m)^version = "(?P<v>[^"]*)"',        'version = "{v}"'),
+    ("sdk/go/version.go",                r'(?m)^const Version = "(?P<v>[^"]*)"',  'const Version = "{v}"'),
+    ("sdk/ruby/lib/ctxmesh/version.rb",  r'(?m)^  VERSION = "(?P<v>[^"]*)"',      '  VERSION = "{v}"'),
+    ("sdk/java/pom.xml",                 r'<version>(?P<v>[^<]*)</version>',      '<version>{v}</version>'),
     # The install snippets a stranger copies. These are the ones that drifted.
-    ("sdk/rust/README.md",               r'(?m)^ctxmesh = "[^"]*"',        'ctxmesh = "{v}"'),
-    ("sdk/java/README.md",               r'<version>[^<]*</version>',      '<version>{v}</version>'),
+    ("sdk/rust/README.md",               r'(?m)^ctxmesh = "(?P<v>[^"]*)"',        'ctxmesh = "{v}"'),
+    ("sdk/java/README.md",               r'<version>(?P<v>[^<]*)</version>',      '<version>{v}</version>'),
+    # The chart in the tree: what a clone at a release tag installs, images included.
+    ("deploy/helm/ctxmesh/Chart.yaml",   r'(?m)^version: (?P<v>\S+)$',            'version: {v}'),
+    ("deploy/helm/ctxmesh/Chart.yaml",   r'(?m)^appVersion: "v(?P<v>[^"]*)"$',    'appVersion: "v{v}"'),
 ]
 
 rc = 0
@@ -61,12 +67,11 @@ for rel, pat, tmpl in EDITS:
     if not m:
         print(f"FAIL: {rel} has no version where this script looks (pattern: {pat})", file=sys.stderr)
         rc = 1; continue
-    found = re.search(r'"([^"]*)"|<version>([^<]*)</version>', m.group(0))
-    current = (found.group(1) or found.group(2)) if found else "?"
+    current = m.group("v")
     if check:
         if current != product:
             print(f"FAIL: {rel} declares {current} but the product is {product} — "
-                  f"nothing stamps it at release, so that is what a user gets", file=sys.stderr)
+                  f"it ships as written, so a user who installs from it gets {current}", file=sys.stderr)
             rc = 1
         else:
             print(f"  ok: {rel} at {current}")

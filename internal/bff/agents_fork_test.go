@@ -45,7 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
@@ -90,14 +90,14 @@ func newForkServer(t *testing.T, artStore publishedartifact.Store, nsStore names
 
 // ownAgent builds a console-authored AgentDeployment (carrying the source-spec annotation) in
 // the given namespace — the duplicate-in-place origin.
-func ownAgent(name, ns string) *agentsv1alpha1.AgentDeployment {
-	return &agentsv1alpha1.AgentDeployment{
+func ownAgent(name, ns string) *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        name,
 			Namespace:   ns,
 			Annotations: map[string]string{expand.AnnotationSourceSpec: forkSourceSpec(name)},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/echo:v1"},
+		Spec: agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/echo:v1"},
 	}
 }
 
@@ -141,7 +141,7 @@ func TestFork_DuplicateInPlace(t *testing.T) {
 	assert.Equal(t, forkCallerNS, resp.Agent.Namespace, "Agent.Namespace must be the CALLER's namespace, not the origin's")
 
 	// The forked AgentDeployment landed under the local name, with provenance.
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "my-assistant"}, &forked))
 	assert.Equal(t, forkCallerNS, forked.Labels[labelForkOriginNamespace])
 	assert.Equal(t, "assistant", forked.Labels[labelForkOriginName])
@@ -161,16 +161,16 @@ func TestFork_DefaultName(t *testing.T) {
 	rec := doFork(t, s, "publisher-ns", "assistant", ForkAgentRequest{Namespace: forkCallerNS})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: forkCallerNS, Name: "assistant"}, &forked))
 	assert.Equal(t, "publisher-ns", forked.Labels[labelForkOriginNamespace])
 }
 
 // TestFork_NotForkable_400: an origin with no source-spec (kubectl-authored) is not forkable.
 func TestFork_NotForkable_400(t *testing.T) {
-	kubectlAgent := &agentsv1alpha1.AgentDeployment{
+	kubectlAgent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "raw", Namespace: forkCallerNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	s, _ := newForkServer(t, publishedartifact.NewMemStore(), namespacetenant.NewMemStore(), kubectlAgent)
 
@@ -214,7 +214,7 @@ func TestFork_CrossNS_Public(t *testing.T) {
 	rec := doFork(t, s, "publisher-ns", "assistant", ForkAgentRequest{Name: "local-copy", Namespace: forkCallerNS})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local-copy"}, &forked))
 	assert.Equal(t, "publisher-ns", forked.Labels[labelForkOriginNamespace])
 	assert.Equal(t, "assistant", forked.Labels[labelForkOriginName])
@@ -234,7 +234,7 @@ func TestFork_CrossNS_OrgInTenant(t *testing.T) {
 
 	rec := doFork(t, s, "sibling-ns", "org-agent", ForkAgentRequest{Namespace: forkCallerNS})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "org-agent"}, &forked))
 	assert.Equal(t, "sibling-ns", forked.Labels[labelForkOriginNamespace])
 }
@@ -251,7 +251,7 @@ func TestFork_CrossNS_OrgOutsideTenant_404(t *testing.T) {
 
 	rec := doFork(t, s, "foreign-ns", "org-agent", ForkAgentRequest{Namespace: forkCallerNS})
 	require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	assert.Error(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "org-agent"}, &forked),
 		"an undiscoverable origin must not fork anything")
 }
@@ -301,7 +301,7 @@ func TestFork_Idempotent_SameOrigin(t *testing.T) {
 	assert.Equal(t, "local", resp.Agent.Name)
 
 	// Exactly one copy exists (the re-fork created no duplicate) — verified by name still present.
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &got))
 	assert.Equal(t, "publisher-ns", got.Labels[labelForkOriginNamespace])
 }
@@ -311,7 +311,7 @@ func TestFork_Idempotent_SameOrigin(t *testing.T) {
 func TestFork_NameCollision_DifferentOrigin_409(t *testing.T) {
 	// A pre-existing local agent named "local" that is NOT a fork of publisher-ns/assistant
 	// (it carries a different origin's provenance).
-	collider := &agentsv1alpha1.AgentDeployment{
+	collider := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "local",
 			Namespace: forkCallerNS,
@@ -320,7 +320,7 @@ func TestFork_NameCollision_DifferentOrigin_409(t *testing.T) {
 				labelForkOriginName:      "some-other-agent",
 			},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{Image: "img:x"},
+		Spec: agentsv1beta1.AgentDeploymentSpec{Image: "img:x"},
 	}
 	art := publishedartifact.NewMemStore()
 	publishArt(t, art, "publisher-ns", "assistant", visibilityPublic, "hash-1")
@@ -333,9 +333,9 @@ func TestFork_NameCollision_DifferentOrigin_409(t *testing.T) {
 // TestFork_NameCollision_NoForkLabels_409: a target-name agent with NO fork labels (a plain
 // hand-authored agent) → 409 (it is not a fork of anything, so a re-fork must not 200-lie).
 func TestFork_NameCollision_NoForkLabels_409(t *testing.T) {
-	plain := &agentsv1alpha1.AgentDeployment{
+	plain := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "local", Namespace: forkCallerNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:plain"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:plain"},
 	}
 	art := publishedartifact.NewMemStore()
 	publishArt(t, art, "publisher-ns", "assistant", visibilityPublic, "hash-1")
@@ -365,7 +365,7 @@ func TestFork_EditPreservesProvenanceLabels(t *testing.T) {
 	rec := doFork(t, s, "publisher-ns", "assistant", ForkAgentRequest{Name: "local", Namespace: forkCallerNS})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
-	var before agentsv1alpha1.AgentDeployment
+	var before agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &before))
 	require.Equal(t, "publisher-ns", before.Labels[labelForkOriginNamespace], "sanity: the fork stamped provenance")
 
@@ -379,7 +379,7 @@ func TestFork_EditPreservesProvenanceLabels(t *testing.T) {
 	s.Handler().ServeHTTP(putRec, putReq)
 	require.Equal(t, http.StatusOK, putRec.Code, "the edit must apply; body: %s", putRec.Body.String())
 
-	var after agentsv1alpha1.AgentDeployment
+	var after agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &after))
 	// The edit landed AND the provenance labels survived.
 	assert.Equal(t, "ghcr.io/ctxmesh/echo:v2", after.Spec.Image, "the edit must land")

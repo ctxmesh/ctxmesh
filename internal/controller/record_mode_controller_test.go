@@ -28,7 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
@@ -41,7 +41,7 @@ var recordEgressConfig = OBOEgressConfig{
 	SidecarImage:           "egress-sidecar:test",
 	CapabilityPublicKeyB64: "PUBKEY",
 	CapabilityAudience:     "aud",
-	CredentialNamespace:    "ae-credentials",
+	TokenServiceURL:        "http://token-service.test:8443",
 }
 
 func newRecordReconciler() *AgentDeploymentReconciler {
@@ -57,11 +57,11 @@ func newRecordBindingReconciler() *MCPToolBindingReconciler {
 }
 
 // mkRecordAgent creates a RECORD-CAPABLE (spec.record=true) agent.
-func mkRecordAgent(t *testing.T, name, namespace string, record bool) *agentsv1alpha1.AgentDeployment {
+func mkRecordAgent(t *testing.T, name, namespace string, record bool) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	a := &agentsv1alpha1.AgentDeployment{
+	a := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -92,22 +92,22 @@ func TestRecordMode_FrontsAllTools_SidecarInjected(t *testing.T) {
 	// Enabled=false), only record mode causes the sidecar injection + the endpoint rewrites.
 	const sidecarImage = "ghcr.io/ctxmesh/echo-tool:latest"
 	mkRegistry(t, "reg-rec", ns,
-		agentsv1alpha1.ToolEntry{Name: "open_tool", URL: url},
-		agentsv1alpha1.ToolEntry{Name: "echo_tool", Image: sidecarImage},
+		agentsv1beta1.ToolEntry{Name: "open_tool", URL: url},
+		agentsv1beta1.ToolEntry{Name: "echo_tool", Image: sidecarImage},
 	)
-	binding := mkBinding(t, "rec-open", ns, agentsv1alpha1.MCPToolBindingSpec{
+	binding := mkBinding(t, "rec-open", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-rec",
 		ToolName:    "open_tool",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: url},
+		Server:      agentsv1beta1.ToolServer{URL: url},
 	})
-	sidecarBinding := mkBinding(t, "rec-echo", ns, agentsv1alpha1.MCPToolBindingSpec{
+	sidecarBinding := mkBinding(t, "rec-echo", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-rec",
 		ToolName:    "echo_tool",
 		Mode:        toolmanifest.ModeSidecar,
-		Server:      agentsv1alpha1.ToolServer{Image: sidecarImage},
+		Server:      agentsv1beta1.ToolServer{Image: sidecarImage},
 	})
 
 	reconcileNN(t, newRecordReconciler(), agent.Name, ns)
@@ -180,13 +180,13 @@ func TestRecordMode_NonRecordAgent_FrontedButNoRecordEnv(t *testing.T) {
 	agent := mkRecordAgent(t, "rec-plain", ns, false) // record = false
 	const url = "http://mcp-open.default.svc.cluster.local/mcp"
 
-	mkRegistry(t, "reg-plain", ns, agentsv1alpha1.ToolEntry{Name: "open_tool", URL: url})
-	binding := mkBinding(t, "plain-open", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "reg-plain", ns, agentsv1beta1.ToolEntry{Name: "open_tool", URL: url})
+	binding := mkBinding(t, "plain-open", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef:    agent.Name,
 		RegistryRef: "reg-plain",
 		ToolName:    "open_tool",
 		Mode:        toolmanifest.ModeRemote,
-		Server:      agentsv1alpha1.ToolServer{URL: url},
+		Server:      agentsv1beta1.ToolServer{URL: url},
 	})
 
 	reconcileNN(t, newRecordReconciler(), agent.Name, ns)

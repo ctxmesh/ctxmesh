@@ -36,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // arNS is the namespace used in AgentRegistry tests.
@@ -46,10 +46,10 @@ const arNS = "team-reg"
 
 // mockAgentRegistry builds a minimal AgentRegistry with the given registryId
 // and an empty memberSelector. Safe for direct create in the fake store.
-func mockAgentRegistry(name, ns, registryId string) *agentsv1alpha1.AgentRegistry {
-	return &agentsv1alpha1.AgentRegistry{
+func mockAgentRegistry(name, ns, registryId string) *agentsv1beta1.AgentRegistry {
+	return &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryId,
 			MemberSelector: metav1.LabelSelector{},
 		},
@@ -61,15 +61,15 @@ func mockAgentRegistry(name, ns, registryId string) *agentsv1alpha1.AgentRegistr
 // is suppressed because the signature should not be over-specialised.
 //
 //nolint:unparam
-func fullAgentRegistry(name, ns, registryId string) *agentsv1alpha1.AgentRegistry {
-	return &agentsv1alpha1.AgentRegistry{
+func fullAgentRegistry(name, ns, registryId string) *agentsv1beta1.AgentRegistry {
+	return &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId: registryId,
 			MemberSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{"registry": registryId},
 			},
-			Guards: &agentsv1alpha1.RegistryGuards{
+			Guards: &agentsv1beta1.RegistryGuards{
 				MaxDepth:  4,
 				HopBudget: 16,
 			},
@@ -80,7 +80,7 @@ func fullAgentRegistry(name, ns, registryId string) *agentsv1alpha1.AgentRegistr
 
 // readyAR sets the Ready condition on an AgentRegistry (simulates a reconciled
 // object where the controller has resolved memberSelector and injected guard defaults).
-func readyAR(ar *agentsv1alpha1.AgentRegistry) *agentsv1alpha1.AgentRegistry {
+func readyAR(ar *agentsv1beta1.AgentRegistry) *agentsv1beta1.AgentRegistry {
 	ar.Status.Conditions = []metav1.Condition{
 		{
 			Type:               "Ready",
@@ -95,7 +95,7 @@ func readyAR(ar *agentsv1alpha1.AgentRegistry) *agentsv1alpha1.AgentRegistry {
 
 // withMembers sets the status.members on an AgentRegistry (simulates the
 // controller having resolved memberSelector to a concrete member list).
-func withMembers(ar *agentsv1alpha1.AgentRegistry, members ...string) *agentsv1alpha1.AgentRegistry {
+func withMembers(ar *agentsv1beta1.AgentRegistry, members ...string) *agentsv1beta1.AgentRegistry {
 	ar.Status.Members = members
 	return ar
 }
@@ -282,7 +282,7 @@ func TestListAgentRegistriesNamespaceScoping(t *testing.T) {
 // TestListAgentRegistriesLimitAndCursor proves limit/cursor paging works with
 // the list contract (same pattern as ModelRoute and SecretBinding tests).
 func TestListAgentRegistriesLimitAndCursor(t *testing.T) {
-	all := []*agentsv1alpha1.AgentRegistry{
+	all := []*agentsv1beta1.AgentRegistry{
 		mockAgentRegistry("reg-000", arNS, "r000"),
 		mockAgentRegistry("reg-001", arNS, "r001"),
 		mockAgentRegistry("reg-002", arNS, "r002"),
@@ -306,7 +306,7 @@ func TestListAgentRegistriesLimitAndCursor(t *testing.T) {
 			if lo.Limit > 0 && start+int(lo.Limit) < end {
 				end = start + int(lo.Limit)
 			}
-			arList, ok := list.(*agentsv1alpha1.AgentRegistryList)
+			arList, ok := list.(*agentsv1beta1.AgentRegistryList)
 			if !ok {
 				return fmt.Errorf("unexpected list type %T", list)
 			}
@@ -517,7 +517,7 @@ func TestCreateAgentRegistrySucceeds(t *testing.T) {
 	assert.NotNil(t, detail.Status.Members, "status.members must be [] not null")
 
 	// Confirm it landed in the fake store.
-	var got agentsv1alpha1.AgentRegistry
+	var got agentsv1beta1.AgentRegistry
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: arNS, Name: "new-registry"}, &got))
 	assert.Equal(t, "new-reg", got.Spec.RegistryId)
 	assert.Equal(t, map[string]string{"registry": "new-reg"}, got.Spec.MemberSelector.MatchLabels)
@@ -699,7 +699,7 @@ func TestUpdateAgentRegistryEditsRoles(t *testing.T) {
 	assert.Equal(t, []string{"orchestrator", "worker", "reviewer"}, detail.Roles)
 
 	// Confirm the change landed.
-	var got agentsv1alpha1.AgentRegistry
+	var got agentsv1beta1.AgentRegistry
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: arNS, Name: "my-registry"}, &got))
 	assert.Equal(t, []string{"orchestrator", "worker", "reviewer"}, got.Spec.Roles)
 }
@@ -873,7 +873,7 @@ func TestDeleteAgentRegistryRemovesObject(t *testing.T) {
 	rec := deleteAgentRegistry(t, s, "my-registry")
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
-	var got agentsv1alpha1.AgentRegistry
+	var got agentsv1beta1.AgentRegistry
 	err := c.Get(context.Background(), client.ObjectKey{Namespace: arNS, Name: "my-registry"}, &got)
 	require.True(t, apierrors.IsNotFound(err), "AgentRegistry must be gone after a successful DELETE")
 }

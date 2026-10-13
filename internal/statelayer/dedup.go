@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/ctxmesh/ctxmesh/internal/deliveryclaim"
 )
 
 // DedupStore is the async-dedup (seen-set) surface over the credentialed Valkey
@@ -33,10 +35,20 @@ import (
 // tighter than the pre-M53 GLOBAL `a2a:seen:{messageID}` key (so it can only
 // over-scope less, never more), and it closes the cross-tenant poison-a-messageID
 // DoS (a pod can only write its own namespace's seen-keys).
+//
+// A launcher claims a message id while it processes the delivery, then completes it
+// on success or releases it on failure (deliveryclaim). MarkSeen is the single-step
+// record launchers built before claims still send.
 type DedupStore interface {
 	// MarkSeen atomically records the seen-key with the given TTL and reports
 	// whether this was the FIRST sighting (true ⇒ process; false ⇒ duplicate).
 	MarkSeen(ctx context.Context, key string, ttl time.Duration) (bool, error)
+	// Claim claims key for the delivery identified by token, for ttl.
+	Claim(ctx context.Context, key, token string, ttl time.Duration) (deliveryclaim.State, error)
+	// Complete records key as processed for ttl.
+	Complete(ctx context.Context, key string, ttl time.Duration) error
+	// Release drops token's claim on key.
+	Release(ctx context.Context, key, token string) error
 }
 
 // dedupSeenKeyPrefix MUST match the launcher's legacy direct-Valkey prefix
@@ -65,4 +77,18 @@ func (s *redisDedupStore) MarkSeen(ctx context.Context, key string, ttl time.Dur
 	// SetNX: set key=1 iff absent with a TTL, atomically — first-seen vs duplicate
 	// in one round-trip, no read-modify-write race.
 	return s.rdb.SetNX(ctx, key, 1, ttl).Result()
+}
+
+func (s *redisDedupStore) Claim(
+	ctx context.Context, key, token string, ttl time.Duration,
+) (deliveryclaim.State, error) {
+	return deliveryclaim.Claim(ctx, s.rdb, key, token, ttl)
+}
+
+func (s *redisDedupStore) Complete(ctx context.Context, key string, ttl time.Duration) error {
+	return deliveryclaim.Complete(ctx, s.rdb, key, ttl)
+}
+
+func (s *redisDedupStore) Release(ctx context.Context, key, token string) error {
+	return deliveryclaim.Release(ctx, s.rdb, key, token)
 }

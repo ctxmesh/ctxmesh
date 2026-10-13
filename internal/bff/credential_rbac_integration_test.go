@@ -25,6 +25,7 @@ package bff
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -49,9 +50,9 @@ var (
 	rbacScheme *runtime.Scheme
 )
 
-// TestMain bootstraps a bare envtest control plane (no CRDs — this suite exercises
-// only core Secrets + RBAC) with the default authorization-mode=RBAC, so a scoped
-// user's access is really enforced by the API server.
+// TestMain bootstraps an envtest control plane with the platform CRDs and the default
+// authorization-mode=RBAC, so a scoped user's access is really enforced by the API server.
+// No controllers run.
 func TestMain(m *testing.M) {
 	logf.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(true)))
 
@@ -60,7 +61,10 @@ func TestMain(m *testing.M) {
 		panic("add client-go scheme: " + err.Error())
 	}
 
-	rbacEnv = &envtest.Environment{}
+	rbacEnv = &envtest.Environment{
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		ErrorIfCRDPathMissing: true,
+	}
 	cfg, err := rbacEnv.Start()
 	if err != nil {
 		panic("start envtest: " + err.Error())

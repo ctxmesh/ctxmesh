@@ -32,7 +32,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - pods
   - secrets
   verbs:
   - get
@@ -55,10 +54,7 @@ rules:
   - agentregistries
   - agentscalingpolicies
   - agentteams
-  - agentversions
   - alertpolicies
-  - approvalpolicies
-  - feedbackstores
   - guardrailpolicies
   - knowledgebases
   - mcptoolbindings
@@ -80,8 +76,6 @@ rules:
   - agentscalingpolicies/finalizers
   - agentteams/finalizers
   - alertpolicies/finalizers
-  - approvalpolicies/finalizers
-  - feedbackstores/finalizers
   - guardrailpolicies/finalizers
   - knowledgebases/finalizers
   - mcptoolbindings/finalizers
@@ -98,8 +92,6 @@ rules:
   - agentscalingpolicies/status
   - agentteams/status
   - alertpolicies/status
-  - approvalpolicies/status
-  - feedbackstores/status
   - guardrailpolicies/status
   - knowledgebases/status
   - mcptoolbindings/status
@@ -110,6 +102,13 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - agents.ctxmesh.ai
+  resources:
+  - agentversions
+  verbs:
+  - get
+  - list
 - apiGroups:
   - agents.ctxmesh.ai
   resources:

@@ -1,0 +1,35 @@
+# TokenReview for caller authentication (ADR 0154): every caller presents a projected token the
+# service reviews. TokenReview is cluster-scoped, so this is a ClusterRole, and it grants exactly that
+# one verb. Narrower than system:auth-delegator, which would also grant SubjectAccessReview.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+  name: token-service-tokenreviewer
+rules:
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+  name: token-service-tokenreviewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: token-service-tokenreviewer
+subjects:
+- kind: ServiceAccount
+  name: token-service
+  namespace: system

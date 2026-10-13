@@ -37,7 +37,6 @@ spec:
         description: |-
           KnowledgeBase is a namespaced managed RAG corpus: a user uploads documents; the platform
           chunks, embeds, indexes, and serves them for retrieval-augmented generation (M68, ADR 0061).
-          It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook.
 
           Key design properties:
             - embeddingRoute and chunking parameters are IMMUTABLE after creation (the two one-way doors,
@@ -77,8 +76,8 @@ spec:
                   requires a full background re-ingest.
                2. chunking (size/overlap/splitter): re-chunking requires re-ingest and drives retrieval quality.
 
-              Both are enforced by CEL transition rules (the XValidation pattern used by AgentVersion and
-              AgentRegistry in this codebase, preferred over a validating webhook).
+              Both are enforced by CEL transition rules (the XValidation pattern used by AgentRegistry in
+              this codebase, preferred over a validating webhook).
             properties:
               chunking:
                 description: |-
@@ -162,7 +161,7 @@ spec:
                     description: |-
                       objectStorePrefix is the durable object-store prefix from which documents are fetched when
                       type="objectStorePrefix". The ObjectStore SPI resolves this against the configured store
-                      (MinIO in dev, BYO-S3 in prod). Must be set when type="objectStorePrefix"; ignored otherwise.
+                      (the bundled SeaweedFS in dev, BYO-S3 in prod). Must be set when type="objectStorePrefix"; ignored otherwise.
                     type: string
                   type:
                     description: |-

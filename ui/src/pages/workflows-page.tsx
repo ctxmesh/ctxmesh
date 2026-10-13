@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Filter, GitFork, Play } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -31,7 +31,9 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type WorkflowSummary } from "@/lib/api";
+import { api, type WorkflowSummary } from "@/lib/api";
+import { useNamespace } from "@/lib/namespace";
+import { useLoad } from "@/lib/use-load";
 
 // WorkflowsPage — the Workflow CR list (m67.9/m67.15, ADR 0060), rebuilt on
 // archetype A1 (M151 spec §6.1: PageHeader → FilterChipRow → DataTable →
@@ -287,11 +289,6 @@ function RowActions({
   );
 }
 
-type LoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; workflows: WorkflowSummary[] }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 type InvokeState =
   | { kind: "idle" }
   | { kind: "submitting" }
@@ -301,42 +298,21 @@ export function WorkflowsPage() {
   const navigate = useNavigate();
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewId>("all");
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
 
   // Invoke panel state: selected workflow + input + submission state.
   const [invokeTarget, setInvokeTarget] = useState<WorkflowSummary | null>(null);
   const [invokeInput, setInvokeInput] = useState("{}");
   const [invokeState, setInvokeState] = useState<InvokeState>({ kind: "idle" });
+  const { namespace } = useNamespace();
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
-    api
-      .listWorkflows(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", workflows: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const fetchWorkflows = useCallback(
+    (signal: AbortSignal) => api.listWorkflows(namespace, signal).then((res) => res.items),
+    [namespace],
+  );
+  const { state: loadState, reload } = useLoad(fetchWorkflows);
 
   const all = useMemo(
-    () => (loadState.kind === "ready" ? loadState.workflows : []),
+    () => (loadState.kind === "ready" ? loadState.data : []),
     [loadState],
   );
 
@@ -374,7 +350,7 @@ export function WorkflowsPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "workflows",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => reload(),
         }
       : null;
 

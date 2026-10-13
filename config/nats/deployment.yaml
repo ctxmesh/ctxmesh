@@ -48,7 +48,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: nats
-          image: nats:2.11-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
+          image: docker.io/library/nats:2.11-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
           args: ["--config", "/etc/nats/nats.conf"]
           ports:
             - name: client

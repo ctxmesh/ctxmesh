@@ -48,7 +48,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
@@ -121,7 +121,7 @@ func TestForkRefClosure_MissingModelRoute(t *testing.T) {
 	assert.Empty(t, resp.UnresolvedRefs)
 
 	// The degraded label is stamped on the forked agent.
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &forked))
 	assert.Equal(t, "true", forked.Labels[labelForkNeedsRebinding], "a needs-rebinding fork must carry the degraded label")
 	// U14: the SPECIFIC dangling refs are persisted as an annotation so the detail banner itemizes them.
@@ -137,7 +137,7 @@ func TestForkRefClosure_ModelRoutePresent_NoFlag(t *testing.T) {
 	spec := `{"name":"assistant","image":"ghcr.io/ctxmesh/echo:v1","model":{"route":"gpt4-prod"}}`
 	publishRefArt(t, art, "publisher-ns", spec)
 	// Seed the ModelRoute in the caller's ns so the ref resolves.
-	route := &agentsv1alpha1.ModelRoute{ObjectMeta: metav1.ObjectMeta{Name: "gpt4-prod", Namespace: forkCallerNS}}
+	route := &agentsv1beta1.ModelRoute{ObjectMeta: metav1.ObjectMeta{Name: "gpt4-prod", Namespace: forkCallerNS}}
 	s, c := newRefClosureServer(t, art, namespacetenant.NewMemStore(), toolregistry.NewMemStore(), route)
 
 	rec := doFork(t, s, "publisher-ns", "assistant", ForkAgentRequest{Name: "local", Namespace: forkCallerNS})
@@ -147,7 +147,7 @@ func TestForkRefClosure_ModelRoutePresent_NoFlag(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Empty(t, resp.NeedsRebinding, "a resolvable model route must not be flagged")
 
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &forked))
 	assert.Empty(t, forked.Labels[labelForkNeedsRebinding], "a clean fork carries no degraded label")
 }
@@ -244,9 +244,34 @@ func TestForkRefClosure_NonPublishedTool_Flags(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Contains(t, resp.NeedsRebinding, "tool: mystery-tool")
 
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &forked))
 	assert.Equal(t, "true", forked.Labels[labelForkNeedsRebinding])
+}
+
+// TestForkRefClosure_ToolOnlyOnAnotherUsersPrivateServer_Flags: a tool that only another user's
+// private server in the target namespace offers is not resolvable for the forker — the create
+// cannot bind it — so it is flagged, not treated as already local.
+func TestForkRefClosure_ToolOnlyOnAnotherUsersPrivateServer_Flags(t *testing.T) {
+	art := publishedartifact.NewMemStore()
+	publishRefArt(t, art, "author-ns", `{"name":"assistant","runtime":"managed","tools":["mystery-tool"]}`)
+	tools := toolregistry.NewMemStore()
+	_, err := tools.Upsert(context.Background(), toolregistry.ToolRegistry{
+		Namespace: forkCallerNS, Name: "bob-private",
+		Tools: []toolregistry.ToolEntry{{Name: "mystery-tool", URL: "https://bob.example/mcp"}},
+		Labels: map[string]string{
+			labelManagedBy: managedByMCP, labelMCPScope: scopePersonal, labelMCPOwner: userGrantHash("user:bob"),
+			labelMCPVisibility: visibilityPrivate, labelMCPCredentialSource: credSourceByoOAuth,
+		},
+	})
+	require.NoError(t, err)
+	s, _ := newRefClosureServer(t, art, namespacetenant.NewMemStore(), tools)
+
+	rec := doFork(t, s, "author-ns", "assistant", ForkAgentRequest{Name: "local", Namespace: forkCallerNS})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	var resp ForkAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Contains(t, resp.NeedsRebinding, "tool: mystery-tool")
 }
 
 // TestForkRefClosure_AmbiguousTool_Flags: a tool offered by MORE THAN ONE discoverable published
@@ -259,7 +284,7 @@ func TestForkRefClosure_AmbiguousTool_Flags(t *testing.T) {
 		o := oauthOrigin("publisher-ns", name, visibilityPublic)
 		o.Labels[labelMCPCredentialSource] = credSourceNone
 		// Both offer a tool named "search".
-		o.Spec.Tools = []agentsv1alpha1.ToolEntry{{Name: "search"}}
+		o.Spec.Tools = []agentsv1beta1.ToolEntry{{Name: "search"}}
 		_, err := toolStore.Upsert(ctx, crdToolRegistryToStore(o))
 		require.NoError(t, err)
 	}
@@ -298,7 +323,7 @@ func TestForkRefClosure_MissingPromptRef(t *testing.T) {
 	assert.Contains(t, resp.UnresolvedRefs, "prompt: shared-prompt")
 	assert.Empty(t, resp.NeedsRebinding)
 
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &forked))
 	assert.Empty(t, forked.Labels[labelForkNeedsRebinding], "unresolvedRefs alone does not degrade the agent")
 }
@@ -348,7 +373,7 @@ func TestForkRefClosure_MissingEvalSuiteRef(t *testing.T) {
 // TestForkRefClosure_EvalSuiteRefPresent_NoFlag: the same evalSuiteRef when the EvalSuite exists in
 // the target ns (a caller-scoped CRD GET resolves it) → NOT flagged.
 func TestForkRefClosure_EvalSuiteRefPresent_NoFlag(t *testing.T) {
-	es := &agentsv1alpha1.EvalSuite{ObjectMeta: metav1.ObjectMeta{Name: "quality-gate", Namespace: forkCallerNS}}
+	es := &agentsv1beta1.EvalSuite{ObjectMeta: metav1.ObjectMeta{Name: "quality-gate", Namespace: forkCallerNS}}
 	s, _ := newRefClosureServer(t, publishedartifact.NewMemStore(), namespacetenant.NewMemStore(), toolregistry.NewMemStore(), es)
 	r := bearerReq("alice")
 	caller, err := s.callerClients.ForRequest(r)
@@ -392,7 +417,7 @@ func TestForkRefClosure_InlineBlocksRideFree(t *testing.T) {
 	assert.Empty(t, resp.UnresolvedRefs, "an inline eval block is portable — not an unresolved evalSuiteRef")
 
 	// No degraded label (a fully-portable fork is healthy).
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &forked))
 	assert.Empty(t, forked.Labels[labelForkNeedsRebinding])
 }
@@ -438,7 +463,7 @@ func TestForkRefClosure_CatalogError_DoesNotFailFork(t *testing.T) {
 	assert.Contains(t, resp.NeedsRebinding, "tool: search")
 
 	// The agent still exists (the create ran before the closure).
-	var forked agentsv1alpha1.AgentDeployment
+	var forked agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(ctx, client.ObjectKey{Namespace: forkCallerNS, Name: "local"}, &forked))
 	assert.Equal(t, "true", forked.Labels[labelForkNeedsRebinding])
 }

@@ -51,12 +51,9 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/workflow"
@@ -83,7 +80,7 @@ func (s *Server) resolveWorkflowNodeEndpoints(
 
 	endpoints := make(map[string]string, len(want))
 	for _, name := range want {
-		var deploy agentsv1alpha1.AgentDeployment
+		var deploy agentsv1beta1.AgentDeployment
 		if err := caller.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &deploy); err != nil {
 			switch {
 			case apierrors.IsForbidden(err):
@@ -123,16 +120,12 @@ func (s *Server) registerWorkflowRunRoutes(authed *http.ServeMux) {
 	// static-artifact convention: consistent auth surface, no special-casing.
 	authed.HandleFunc("GET /api/workflows/spec-schema", s.handleWorkflowSpecSchema)
 
-	if s.adapters.Invoke != nil && s.callerClients != nil {
-		authed.HandleFunc("POST /api/workflows/{name}/runs", s.handleCreateWorkflowRun)
-		// The INLINE-spec run (planning mode, m67.7, ADR 0060 §6): the body carries a runtime-generated
-		// WorkflowSpec — NO {name}, NO Workflow CR. Registered on the SAME guard (it also spawns node
-		// sub-runs + reads the registry through the caller-scoped client).
-		authed.HandleFunc("POST /api/workflows/runs", s.handleCreateInlineWorkflowRun)
-		return
-	}
-	authed.Handle("POST /api/workflows/{name}/runs", notImplemented("workflow runs"))
-	authed.Handle("POST /api/workflows/runs", notImplemented("workflow runs"))
+	d := s.routeDeps()
+	authed.Handle("POST /api/workflows/{name}/runs", requires(s.handleCreateWorkflowRun, d.invoke, d.cluster))
+	// The INLINE-spec run (planning mode, m67.7, ADR 0060 §6): the body carries a runtime-generated
+	// WorkflowSpec — NO {name}, NO Workflow CR. Same dependencies: it also spawns node sub-runs and
+	// reads the registry through the caller-scoped client.
+	authed.Handle("POST /api/workflows/runs", requires(s.handleCreateInlineWorkflowRun, d.invoke, d.cluster))
 }
 
 // workflowSpecSchemaJSON is the pure JSON-Schema for a WorkflowSpec, DERIVED from the generated Workflow
@@ -356,8 +349,9 @@ func parseInlineWorkflowRunRequest(w http.ResponseWriter, r *http.Request) (Inli
 
 // resolveWorkflowMembership enforces the workflow's trust boundary at run-create time: registryRef must
 // resolve to an AgentRegistry (same namespace) and EVERY step's agentRef must be an EXISTING
-// AgentDeployment that MATCHES the registry's memberSelector. This is the exact check the CR controller
-// (m67.1) runs at admission; the inline path runs it here because a runtime plan has no controller. Reads
+// AgentDeployment whose status.registryRef names it, the membership the controller resolved. This is the
+// exact check the CR controller (m67.1) runs at admission; the inline path runs it here because a runtime
+// plan has no controller. Reads
 // go through the CALLER-SCOPED client (ADR 0011 — the caller's own RBAC gates the registry/agent reads,
 // so an inline plan cannot escalate past what the user may see). Returns ok=true when the boundary holds;
 // otherwise (code, message, false) — a NotFound/non-member is a 422 (the plan is well-formed but its
@@ -370,7 +364,7 @@ func (s *Server) resolveWorkflowMembership(
 		ns = defaultCreateNamespace
 	}
 
-	var registry agentsv1alpha1.AgentRegistry
+	var registry agentsv1beta1.AgentRegistry
 	if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: spec.RegistryRef}, &registry); err != nil {
 		switch {
 		case apierrors.IsForbidden(err):
@@ -384,10 +378,6 @@ func (s *Server) resolveWorkflowMembership(
 			return http.StatusInternalServerError, "failed to resolve the workflow's registryRef", false
 		}
 	}
-	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
-	if err != nil {
-		return http.StatusUnprocessableEntity, fmt.Sprintf("registry %q has an invalid memberSelector: %v", spec.RegistryRef, err), false
-	}
 
 	// Dedup the agent names (the same agent may back several nodes).
 	want := make([]string, 0, len(spec.Steps))
@@ -398,7 +388,7 @@ func (s *Server) resolveWorkflowMembership(
 	want = slices.Compact(want)
 
 	for _, name := range want {
-		var agent agentsv1alpha1.AgentDeployment
+		var agent agentsv1beta1.AgentDeployment
 		if err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &agent); err != nil {
 			switch {
 			case apierrors.IsForbidden(err):
@@ -412,9 +402,15 @@ func (s *Server) resolveWorkflowMembership(
 				return http.StatusInternalServerError, fmt.Sprintf("failed to resolve step agent %q", name), false
 			}
 		}
-		if !selector.Matches(labels.Set(agent.Labels)) {
+		switch agent.Status.RegistryRef {
+		case registry.Name:
+		case "":
 			return http.StatusUnprocessableEntity,
 				fmt.Sprintf("agent %q is not a member of registry %q (the workflow's trust boundary)", name, spec.RegistryRef), false
+		default:
+			return http.StatusUnprocessableEntity,
+				fmt.Sprintf("agent %q is a member of registry %q, not %q (the workflow's trust boundary)",
+					name, agent.Status.RegistryRef, spec.RegistryRef), false
 		}
 	}
 	return 0, "", true

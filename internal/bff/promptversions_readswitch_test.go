@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
@@ -99,8 +99,8 @@ func TestPromptVersionGetReadSwitch_NotFound(t *testing.T) {
 // The diff endpoint reads BOTH versions' git pointers from the store (behind an
 // SSAR each) and resolves them — proving the store-backed diff path (m43.5).
 func TestPromptVersionDiffReadSwitch_Allowed(t *testing.T) {
-	fromSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
-	toSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
+	fromSrc := agentsv1beta1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
+	toSrc := agentsv1beta1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
 	resolver := prompt.NewFixtureResolver().
 		Seed(fromSrc, "one\n").
 		Seed(toSrc, "one\ntwo\n")
@@ -180,8 +180,8 @@ func TestPromptVersionDiffReadSwitch_VersionNotFound404(t *testing.T) {
 }
 
 func TestPromptVersionDiffReadSwitch_Unresolvable404(t *testing.T) {
-	fromSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
-	toSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
+	fromSrc := agentsv1beta1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
+	toSrc := agentsv1beta1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
 	resolver := prompt.NewFixtureResolver().Seed(fromSrc, "one\n").SeedNotFound(toSrc)
 	s, store := pvReadSwitchServer(t, &recordingAuthorizer{}, resolver)
 	seedPV(t, store, "pv-v1", fromSrc.Repo, fromSrc.Ref, fromSrc.Path)
@@ -191,8 +191,8 @@ func TestPromptVersionDiffReadSwitch_Unresolvable404(t *testing.T) {
 }
 
 func TestPromptVersionDiffReadSwitch_Identical200(t *testing.T) {
-	fromSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
-	toSrc := agentsv1alpha1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
+	fromSrc := agentsv1beta1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v1", Path: "s.md"}
+	toSrc := agentsv1beta1.GitPromptSource{Repo: "github.com/acme/p", Ref: "v2", Path: "s.md"}
 	resolver := prompt.NewFixtureResolver().Seed(fromSrc, "same\n").Seed(toSrc, "same\n")
 	s, store := pvReadSwitchServer(t, &recordingAuthorizer{}, resolver)
 	seedPV(t, store, "pv-v1", fromSrc.Repo, fromSrc.Ref, fromSrc.Path)

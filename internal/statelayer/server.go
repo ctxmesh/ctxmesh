@@ -27,6 +27,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 // maxMemoryBody caps a memory request body (1 MiB).
@@ -45,7 +47,7 @@ const memoryScopeHeader = "X-Memory-Scope"
 const memoryUserHeader = "X-Memory-User"
 
 // RegistryResolver maps a pod identity (namespace + agent SA name) to the agent's
-// registry id — the SERVER-TRUSTED shared-memory boundary (`mem:shared:{registry}:`),
+// registry id — the SERVER-TRUSTED shared-memory boundary (`mem:shared:{ns}/{registry}:`),
 // which used to be the runcap `bnd` claim (ADR 0052 §C6 RESOLUTION). It reads the
 // registryIDLabel the controller stamps on the identity SA. nil (or "" registry) ⇒ a
 // shared-scope request falls back to the private scope (no registry to key under). A
@@ -294,9 +296,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool)
 			writeJSONError(w, http.StatusServiceUnavailable, "registry resolution unavailable")
 			return Scope{}, false
 		}
-		if reg != "" {
-			boundary = registryBoundaryPrefix + reg
-		}
+		boundary = credresolve.RegistryBoundary(id.Namespace, reg)
 		// reg == "" (agent is not a registry member) → boundary stays empty →
 		// scopeFromAgent falls back to the private scope (matches prior behavior).
 	}
@@ -316,10 +316,6 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) (Scope, bool)
 // stripping it — so the memory key stays `mem:{ns}/{name}:`, byte-identical to the
 // runcap path it replaces (no key migration).
 const agentSAPrefix = "agent-"
-
-// registryBoundaryPrefix is the "r:<registry>" boundary form scopeFromAgent expects for
-// a shared-scope request (mirrors the runcap `bnd` it replaces).
-const registryBoundaryPrefix = "r:"
 
 // agentNameFromSA recovers the agent name from a per-agent identity SA name
 // ("agent-<name>" → "<name>"). ok is false when the SA is not an agent identity (no

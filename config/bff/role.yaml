@@ -3,8 +3,8 @@
 # ADR 0011 (auth-transparent proxy): the BFF must NOT hold agent-CRD access. All
 # user-facing CRD list/get/create/update/delete run on the CALLER'S token via a
 # per-request client, so the API server enforces the caller's RBAC. Consequently
-# the BFF's own SA needs NO agent-CRD verbs (agentdeployments / agentregistries /
-# agentversions / …) and NO create/update/delete anywhere.
+# the BFF's own SA needs NO agent-CRD verbs (agentdeployments / agentregistries / …)
+# and NO create/update/delete anywhere.
 #
 # The BFF's server-side work that is NOT caller-scoped uses NON-K8s creds:
 #   - /api/health           — no cluster access at all (pure liveness + version)

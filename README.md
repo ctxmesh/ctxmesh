@@ -18,29 +18,74 @@ There are three ways to work with it:
 ctxmesh ships as a Helm chart in [`deploy/helm/ctxmesh`](deploy/helm/ctxmesh). It installs the
 control plane — controller-manager + CRDs, the LiteLLM model gateway, RBAC personas
 (`ctxmesh-{operator,developer,viewer}`), the operator UI + Go BFF, and (for dev/trial) a bundled
-data plane: PostgreSQL with pgvector, Valkey, MinIO and NATS JetStream.
+data plane: PostgreSQL with pgvector, Valkey and SeaweedFS (S3-compatible object storage). NATS
+JetStream, the broker for async calls between agents, is bundled but off; turn it on with
+`devDataPlane.nats.enabled=true`, `bff.asyncBackend=jetstream` and
+`bff.natsURL=nats://ctxmesh-nats.ctxmesh.svc:4222`.
 
-**Prerequisites.** A Kubernetes cluster (≥ 1.29) with **Knative Serving + Eventing** and **KEDA**
-already installed — the controller reconciles their CRDs and agents won't come up without them
-(ctxmesh does *not* bundle them) — plus Helm 3.
+<!-- ctxmesh:prerequisites kubernetes>=1.29 knative-serving -->
+**Prerequisites.** A Kubernetes cluster with **Knative Serving** installed, and Helm 3.8 or newer.
+ctxmesh itself needs Kubernetes 1.29 or newer (the chart enforces it); your Knative Serving release
+may need newer. That is all the default install needs: agents run as Knative Services. Two add-ons
+are needed only for the features that use them:
+
+- **Knative Eventing**, only for agents with `executionModel: eventing`;
+- **KEDA**, only for scaling with an `AgentScalingPolicy`. Its queue-depth trigger also needs the
+  NATS JetStream async backend (`bff.asyncBackend: jetstream` and `bff.natsURL`), whose per-agent
+  queues are what it scales on, and the KEDA operator must reach the NATS monitoring port, 8222.
+  The bundled NATS admits it from namespace `keda` with label `app=keda-operator`; set
+  `devDataPlane.nats.kedaOperator` if KEDA runs elsewhere, and `bff.natsAccount` if NATS uses
+  accounts.
+
+ctxmesh does not bundle any of them.
 
 ```sh
-# from a clone of this repo — a dev/trial install, everything bundled, single replica
-helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace
+helm install ctxmesh oci://ghcr.io/ctxmesh/charts/ctxmesh \
+  --version 0.1.0-beta.9 \
+  --namespace ctxmesh --create-namespace \
+  --wait --timeout 20m
 ```
 
-That is the whole install. There is **no Secret to create by hand and no environment variable to
-export** — the chart provisions the database it needs and points the control plane at it. (Until
-M148 it did not: `bff-adapters` was consumed by four templates and created by none, and nothing
-deployed PostgreSQL at all, so this command produced a CrashLoopBackOff. `harness/scripts/accept-m148.sh`
-now asserts that everything the chart consumes, the chart creates.)
+That is the whole install: a dev/trial control plane with its data plane bundled, single replica.
+There is **no Secret to create by hand and no environment variable to export** — the chart provisions
+the database it needs and points the control plane at it. On a fresh local cluster, measured runs
+took **7 to 18 minutes** from an empty cluster to a running agent (typically 7 to 11), most of it
+pulling images. Give `--wait` a real timeout: Helm's default of five minutes is shorter than a first
+install's image pulls.
 
-Wait for it to come up, then open the console:
+Then open the console:
 
 ```sh
-kubectl -n ctxmesh rollout status deploy/ctxmesh-controller-manager
 kubectl -n ctxmesh port-forward svc/ctxmesh-bff 9090:9090   # → http://localhost:9090/
 ```
+
+The console signs you in with a Kubernetes bearer token and acts with that identity's RBAC. To make
+one for a namespace you will build agents in (`default` here), bind the chart's developer role to a
+ServiceAccount and ask for a token:
+
+```sh
+kubectl -n default create serviceaccount ctxmesh-builder
+kubectl -n default create rolebinding ctxmesh-builder --clusterrole=ctxmesh-developer --serviceaccount=default:ctxmesh-builder
+kubectl -n default create token ctxmesh-builder --duration=8h
+```
+
+Paste the token into the console's sign-in. The same token runs an agent through the control plane,
+which mints the run's capability and records the run:
+
+```sh
+RUN=$(curl -s -X POST http://localhost:9090/api/runs -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"agent":"my-agent","namespace":"default","input":"hello"}' | jq -r .id)
+curl -s http://localhost:9090/api/runs/$RUN -H "Authorization: Bearer $TOKEN"   # queued, running, then succeeded
+```
+
+The run opens in the console at `http://localhost:9090/runs/<id>`.
+
+To install from a clone, check out a release tag (`main` is the last release too) and use the chart
+directory instead of the OCI reference:
+`helm install ctxmesh ./deploy/helm/ctxmesh --namespace ctxmesh --create-namespace`. The chart
+installs the images published for the version in its `Chart.yaml`. A milestone branch is ahead of
+every published image and names its upcoming version, so installing one needs images built from
+it.
 
 **What you get, and what you have to add.** The install brings up a working control plane: the
 console, the CRDs, the model gateway, the databases and the credential plane. It ships **no models** —
@@ -54,15 +99,22 @@ retrieval works with no external service if you run your own embedder. Once that
 uploading documents and searching returns ranked chunks **with citations** (`documentRef` +
 `chunkIndex`), which is what an agent grounds its answers on.
 
-**Use your own images.** The chart defaults to the `:latest` tags built by `make docker-build-*`
-(side-loaded into a kind cluster). For a real cluster, push the images to a registry and override
-the repository + tag:
+**Use your own registry.** ctxmesh's own images default to `ghcr.io/ctxmesh/*` at the chart's
+version; each has a repository value (`controllerManager.image`, `bff.image`, `tokenService.image`,
+`statelayerProxy.image`, and the images injected into agent pods under
+`controllerManager.injectedImages`, `controllerManager.oboEgress.sidecarImage` and
+`bff.managedAgentImage`). The third-party images — LiteLLM, Valkey, PostgreSQL, SeaweedFS, NATS and
+Dex — are under `thirdPartyImages`, each as registry, repository, tag and digest.
+`thirdPartyImages.registryOverride` moves all of them to one registry with the same paths and
+digests, so a copy made with `crane copy` matches. `global.imagePullSecrets` adds pull secrets to
+every pod the chart renders.
 
 ```sh
 helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh --create-namespace \
-  --set controllerManager.image.repository=ghcr.io/my-org/ctxmesh-controller \
-  --set controllerManager.image.tag=v0.1.0
-  # …likewise bff.image.* and gateway.image.* (see values.yaml)
+  --set controllerManager.image.repository=registry.example.com/ctxmesh/controller \
+  --set thirdPartyImages.registryOverride=registry.example.com \
+  --set 'global.imagePullSecrets[0]=regcred'
+  # …likewise bff.image, tokenService.image and statelayerProxy.image (see values.yaml)
 ```
 
 ### Production
@@ -72,19 +124,35 @@ election, PodDisruptionBudgets, an external data plane, and signed images. See
 [`values-production.yaml`](deploy/helm/ctxmesh/values-production.yaml).
 
 A production install **must** supply its own PostgreSQL (with the `pgvector` extension — knowledge
-chunks are searched by vector similarity):
+chunks are searched by vector similarity), a per-cluster key that salts the hashed user identities
+on MCP grants, a namespace that holds the grants, and a certificate for the token service, which
+serves the credential API over TLS only:
 
+<!-- ctxmesh:install production -->
 ```sh
-helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh --create-namespace \
+kubectl create namespace ctxmesh
+# A certificate for the token service, valid for ctxmesh-token-service.ctxmesh.svc.
+kubectl -n ctxmesh create secret tls token-service-tls --cert=token-service.crt --key=token-service.key
+# The key that salts hashed user identities on MCP grants. Create it once and keep it.
+kubectl -n ctxmesh create secret generic ctxmesh-grant-hmac \
+  --from-literal=MCP_GRANT_HMAC_KEY="$(openssl rand -hex 32)"
+helm install ctxmesh ./deploy/helm/ctxmesh -n ctxmesh \
   --set profile=production \
   -f deploy/helm/ctxmesh/values-production.yaml \
-  --set postgres.externalDsn='postgres://user:pass@db.example:5432/ctxmesh?sslmode=require'
+  --set postgres.externalDsn='postgres://user:pass@db.example:5432/ctxmesh?sslmode=require' \
+  --set bff.mcp.grantHmacKeySecret=ctxmesh-grant-hmac \
+  --set bff.mcp.credentialNamespace=ctxmesh-credentials
 ```
 
+Keep the grant key: changing it later re-keys every grant, and each person reconnects. It lives in
+a Secret you own, so an upgrade cannot drop it. The chart creates `ctxmesh-credentials` with access
+for the credential components only.
+
 The bundled data plane uses deterministic, obviously-fake dev credentials and is not rendered under
-`profile=production`. The render **fails** if `postgres.externalDsn` is missing rather than
-installing a control plane that cannot start — the alternative is a CrashLoopBackOff whose cause is
-three layers from its symptom.
+`profile=production`. The render **fails** if `postgres.externalDsn`, the grant key
+(`bff.mcp.grantHmacKeySecret`) or `bff.mcp.credentialNamespace` is missing rather than installing a
+control plane that cannot start or stores grants where another tenant can read them. Without the
+`token-service-tls` Secret the token service refuses to start.
 
 **Who enables `vector`.** The schema migration runs `CREATE EXTENSION IF NOT EXISTS vector`, and
 `vector` is **not** a PostgreSQL *trusted* extension — so creating it requires elevated rights that a

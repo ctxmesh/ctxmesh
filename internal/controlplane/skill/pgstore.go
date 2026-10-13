@@ -70,12 +70,20 @@ func (s *pgStore) GetSkill(ctx context.Context, ns, name string) (Skill, bool, e
 	return sk, true, nil
 }
 
-func (s *pgStore) ListSkills(ctx context.Context, ns string) ([]Skill, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT namespace, name, description, labels, created_at, updated_at
-		FROM skills WHERE namespace = $1 ORDER BY name ASC`, ns)
+func (s *pgStore) ListSkills(ctx context.Context, namespaces []string) ([]Skill, error) {
+	const cols = `SELECT namespace, name, description, labels, created_at, updated_at FROM skills`
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if namespaces == nil {
+		rows, err = s.db.QueryContext(ctx, cols+` ORDER BY namespace ASC, name ASC`)
+	} else {
+		rows, err = s.db.QueryContext(ctx, cols+`
+			WHERE namespace = ANY(COALESCE($1::text[], '{}'::text[])) ORDER BY namespace ASC, name ASC`, namespaces)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("skill: list %s: %w", ns, err)
+		return nil, fmt.Errorf("skill: list: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 

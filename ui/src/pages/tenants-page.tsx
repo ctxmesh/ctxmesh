@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Building2, Filter } from "lucide-react";
 
@@ -39,6 +39,7 @@ import {
   type TenantUsage,
   type TenantCreateRequest,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 
 // TenantsPage — the multi-tenancy admin surface (M47, ADR 0046; re-housed on
 // the editorial system in M151, spec §6.2: "near-cap rows get warn Tags + Meter
@@ -121,10 +122,8 @@ function capOf(budgetUSD?: string): number | null {
  */
 
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; items: TenantSummary[] }
-  | { kind: "error"; message: string; forbidden: boolean };
+/** Frozen empty, so an absent usage answer does not churn the row memo. */
+const NO_USAGE: Record<string, TenantUsage> = {};
 
 // The inline detail panel's own load state, so a row-click gives immediate
 // feedback and a failed fetch is surfaced (never silently opens nothing).
@@ -579,50 +578,32 @@ export function TenantsPage() {
   const [searchParams] = useSearchParams();
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [view, setView] = useState<ViewId>("all");
-  const [state, setState] = useState<Load>({ kind: "loading" });
   const [detail, setDetail] = useState<Detail>({ kind: "none" });
-  // Live usage per tenant for the near-cap indicator (m54.5) — one batched
-  // call, best-effort (501 no state layer / 403 → the column says so).
-  const [usageByTenant, setUsageByTenant] = useState<Record<string, TenantUsage>>({});
-  const abortRef = useRef<AbortController | null>(null);
 
+  const fetchTenants = useCallback(
+    (signal: AbortSignal) => api.listTenants(signal).then((res) => res.items),
+    [],
+  );
+  const { state, reload: reloadTenants } = useLoad(fetchTenants);
+  // Live usage per tenant for the near-cap indicator (m54.5) — one batched call,
+  // best-effort: it never blocks or fails the list (no state layer → 501, a
+  // viewer → 403), and the cells and the note say when it is absent.
+  const fetchUsage = useCallback(
+    (signal: AbortSignal) =>
+      api
+        .listTenantUsage(signal)
+        .then((res) => Object.fromEntries(res.items.map((u) => [u.name, u])) as Record<string, TenantUsage>),
+    [],
+  );
+  const { state: usage, reload: reloadUsage } = useLoad(fetchUsage);
+  const usageByTenant = useMemo(
+    () => (usage.kind === "ready" ? usage.data : NO_USAGE),
+    [usage],
+  );
   const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    // Batched live usage for the near-cap column — best-effort, never blocks or
-    // fails the list (no state layer → 501, a viewer → 403).
-    setUsageByTenant({});
-    api
-      .listTenantUsage(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setUsageByTenant(Object.fromEntries(res.items.map((u) => [u.name, u])));
-      })
-      .catch(() => {
-        /* usage is optional — the cells and the note say it is absent */
-      });
-    api
-      .listTenants(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", items: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load tenants",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+    reloadTenants();
+    reloadUsage();
+  }, [reloadTenants, reloadUsage]);
 
   const openDetail = useCallback((name: string) => {
     setDetail({ kind: "loading", name });
@@ -639,7 +620,7 @@ export function TenantsPage() {
   }, []);
 
   const items = useMemo(
-    () => (state.kind === "ready" ? state.items : []),
+    () => (state.kind === "ready" ? state.data : []),
     [state],
   );
 

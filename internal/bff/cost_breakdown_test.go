@@ -19,8 +19,10 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 )
 
@@ -123,7 +125,7 @@ func TestCostBreakdownTotalFromDailyMetrics(t *testing.T) {
 	t.Cleanup(srv.Close)
 	a := newTestLangfuse(t, srv.URL)
 
-	resp, err := a.CostBreakdown(context.Background(), 10, "")
+	resp, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 10, AllNamespaces: true})
 	require.NoError(t, err)
 	// TOTAL tracks metrics/daily (7.50), NOT the trace sum (0.10) — reconciled.
 	assert.InDelta(t, 7.50, resp.Total.TotalCostUSD, 1e-9)
@@ -151,7 +153,7 @@ func TestCostBreakdownGroupsMixedCorpus(t *testing.T) {
 	srv := fakeLangfuseBreakdown(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
 
-	resp, err := a.CostBreakdown(context.Background(), 10, "")
+	resp, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 10, AllNamespaces: true})
 	require.NoError(t, err)
 
 	// Non-nil agents slice.
@@ -204,21 +206,21 @@ func TestCostBreakdownCursorPagination(t *testing.T) {
 	a := newTestLangfuse(t, srv.URL)
 
 	// Page 1 (limit=1, cursor="").
-	p1, err := a.CostBreakdown(context.Background(), 1, "")
+	p1, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 1, AllNamespaces: true})
 	require.NoError(t, err)
 	require.Len(t, p1.Agents, 1)
 	assert.NotEmpty(t, p1.NextCursor, "page 1 must have a next cursor")
 	first := p1.Agents[0].AgentName
 
 	// Page 2.
-	p2, err := a.CostBreakdown(context.Background(), 1, p1.NextCursor)
+	p2, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 1, Cursor: p1.NextCursor, AllNamespaces: true})
 	require.NoError(t, err)
 	require.Len(t, p2.Agents, 1)
 	assert.NotEmpty(t, p2.NextCursor, "page 2 must have a next cursor")
 	assert.NotEqual(t, first, p2.Agents[0].AgentName, "page 2 must be a different agent")
 
 	// Page 3 (last page).
-	p3, err := a.CostBreakdown(context.Background(), 1, p2.NextCursor)
+	p3, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 1, Cursor: p2.NextCursor, AllNamespaces: true})
 	require.NoError(t, err)
 	require.Len(t, p3.Agents, 1)
 	assert.Equal(t, "", p3.NextCursor, "last page must have no next cursor")
@@ -233,7 +235,7 @@ func TestCostBreakdownBadCursorIs400(t *testing.T) {
 	srv := fakeLangfuseBreakdown(t, []lfTrace{})
 	a := newTestLangfuse(t, srv.URL)
 
-	_, err := a.CostBreakdown(context.Background(), 10, "notanint")
+	_, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 10, Cursor: "notanint", AllNamespaces: true})
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrBadParam)
 }
@@ -243,7 +245,7 @@ func TestCostBreakdownEmptyIsValid(t *testing.T) {
 	srv := fakeLangfuseBreakdown(t, []lfTrace{})
 	a := newTestLangfuse(t, srv.URL)
 
-	resp, err := a.CostBreakdown(context.Background(), 10, "")
+	resp, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 10, AllNamespaces: true})
 	require.NoError(t, err)
 	assert.NotNil(t, resp.Agents, "agents must be [] not nil on empty window")
 	assert.Empty(t, resp.Agents)
@@ -260,7 +262,7 @@ func TestCostBreakdownUpstreamErrorSurfaces(t *testing.T) {
 	t.Cleanup(srv.Close)
 	a := newTestLangfuse(t, srv.URL)
 
-	_, err := a.CostBreakdown(context.Background(), 10, "")
+	_, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 10, AllNamespaces: true})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "502")
 }
@@ -275,10 +277,10 @@ const costTestTenant = "acme"
 
 // costTestTenantObject returns the default Tenant CR the cost handler tests seed
 // into the fake caller client so the ADR 0077 breakdown filter resolves.
-func costTestTenantObject() *agentsv1alpha1.Tenant {
-	return &agentsv1alpha1.Tenant{
+func costTestTenantObject() *agentsv1beta1.Tenant {
+	return &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: costTestTenant},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: []string{"default", "other", "ns"}},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: []string{"default", "other", "ns"}},
 	}
 }
 
@@ -465,17 +467,17 @@ func TestHandlerCostBreakdownData200(t *testing.T) {
 // never cluster-wide, never another tenant's.
 
 // tenantCR is a small Tenant-fixture builder for the isolation tests.
-func tenantCR(name string, namespaces ...string) *agentsv1alpha1.Tenant {
-	return &agentsv1alpha1.Tenant{
+func tenantCR(name string, namespaces ...string) *agentsv1beta1.Tenant {
+	return &agentsv1beta1.Tenant{
 		ObjectMeta: metav1.ObjectMeta{Name: name},
-		Spec:       agentsv1alpha1.TenantSpec{Namespaces: namespaces},
+		Spec:       agentsv1beta1.TenantSpec{Namespaces: namespaces},
 	}
 }
 
 // newIsolationCostServer builds a permissive (always-allow SSAR) cost server
 // seeded with the given Tenant CRs and rollup store, wired with the given
 // adapters — the fixture backbone for the tenant-isolation proofs.
-func newIsolationCostServer(t *testing.T, a Adapters, store costrollup.Store, tenants ...*agentsv1alpha1.Tenant) *Server {
+func newIsolationCostServer(t *testing.T, a Adapters, store costrollup.Store, tenants ...*agentsv1beta1.Tenant) *Server {
 	t.Helper()
 	objs := make([]client.Object, 0, len(tenants))
 	for _, tnt := range tenants {
@@ -651,7 +653,7 @@ func TestCostBreakdown_UnpricedIsNotZero(t *testing.T) {
 	}
 	srv := fakeLangfuseBreakdown(t, corpus)
 	a := newTestLangfuse(t, srv.URL)
-	resp, err := a.CostBreakdown(context.Background(), 10, "")
+	resp, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 10, AllNamespaces: true})
 	require.NoError(t, err)
 
 	byName := map[string]AgentCostItem{}
@@ -674,4 +676,101 @@ func TestCostBreakdown_UnpricedIsNotZero(t *testing.T) {
 	// The window total is the sum of what is KNOWN — an unknown must not be counted as zero
 	// and quietly make a partial figure look complete.
 	assert.InDelta(t, 0.0, resp.Total.TotalCostUSD, 1e-9)
+}
+
+// TestCostBreakdownNarrowsBeforePaging: through the real aggregation, an agent that ranks 60th in
+// the window is on the first page of a breakdown narrowed to its namespace, the total is its own,
+// and the cluster-wide window rollup is not fetched for a total it would not report.
+func TestCostBreakdownNarrowsBeforePaging(t *testing.T) {
+	corpus := make([]lfTrace, 0, 62)
+	for i := range 59 {
+		corpus = append(corpus, lfTrace{
+			ID: fmt.Sprintf("t%d", i), Tags: []string{fmt.Sprintf("agent:theirs/big-%02d", i)},
+			TotalCost: costPtr(float64(100 - i)), Usage: &lfUsage{TotalTokens: 1000},
+		})
+	}
+	corpus = append(corpus,
+		lfTrace{ID: "m1", Tags: []string{"agent:mine/small"}, TotalCost: costPtr(0.5), Usage: &lfUsage{TotalTokens: 7}},
+		lfTrace{ID: "m2", Tags: []string{"agent:mine/small"}, TotalCost: costPtr(0.25), Usage: &lfUsage{TotalTokens: 3}},
+		lfTrace{ID: "u1", TotalCost: costPtr(9)},
+	)
+	var metricsCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/public/traces":
+			_ = json.NewEncoder(w).Encode(lfTracesResponse{Data: corpus})
+		case "/api/public/metrics/daily":
+			metricsCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(lfDailyMetricsResponse{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	a := newTestLangfuse(t, srv.URL)
+
+	resp, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 50, Namespaces: []string{"mine"}})
+	require.NoError(t, err)
+	require.Len(t, resp.Agents, 1)
+	assert.Equal(t, "small", resp.Agents[0].AgentName)
+	assert.Equal(t, 2, resp.Agents[0].RunCount)
+	assert.Empty(t, resp.NextCursor)
+	assert.InDelta(t, 0.75, resp.Total.TotalCostUSD, 1e-9)
+	assert.Equal(t, int64(10), resp.Total.TotalTokens)
+	assert.NotNil(t, resp.Total.ByModel)
+	assert.Zero(t, metricsCalls.Load(), "a narrowed total is its own rows; the cluster rollup is not asked")
+
+	// Unnarrowed, the same agent is on page 2 of 50, behind a cursor, under the cluster total.
+	p1, err := a.CostBreakdown(context.Background(), CostBreakdownQuery{Limit: 50, AllNamespaces: true})
+	require.NoError(t, err)
+	require.Len(t, p1.Agents, 50)
+	assert.Equal(t, "50", p1.NextCursor)
+	assert.Equal(t, int32(1), metricsCalls.Load())
+}
+
+// TestCostBreakdownPageScopes pins costBreakdownPage on its own: a zero query keeps nothing, the
+// untagged bucket belongs to no namespace, and pages and cursors count only the kept rows.
+func TestCostBreakdownPageScopes(t *testing.T) {
+	agents := []AgentCostItem{
+		{AgentNs: "b", AgentName: "x", TotalCostUSD: costPtr(5), TotalTokens: 50},
+		{AgentNs: "a", AgentName: "y", TotalCostUSD: costPtr(4), TotalTokens: 40},
+		{AgentNs: "", AgentName: "(untagged)", TotalCostUSD: costPtr(3), TotalTokens: 30},
+		{AgentNs: "a", AgentName: "z", TotalTokens: 20},
+	}
+	window := CostSummary{TotalCostUSD: 99, TotalTokens: 999, Observations: 9, ByModel: []MetricPoint{{Label: "m", Value: 99}}}
+
+	none, err := costBreakdownPage(agents, window, CostBreakdownQuery{})
+	require.NoError(t, err)
+	assert.Empty(t, none.Agents, "the zero query keeps nothing")
+	assert.NotNil(t, none.Agents)
+	assert.Zero(t, none.Total.TotalCostUSD, "and never reports the window total")
+
+	all, err := costBreakdownPage(agents, window, CostBreakdownQuery{Limit: 10, AllNamespaces: true})
+	require.NoError(t, err)
+	assert.Len(t, all.Agents, 4)
+	assert.Equal(t, window, all.Total)
+
+	p1, err := costBreakdownPage(agents, window, CostBreakdownQuery{Limit: 1, Namespaces: []string{"a", ""}})
+	require.NoError(t, err)
+	require.Len(t, p1.Agents, 1)
+	assert.Equal(t, "y", p1.Agents[0].AgentName)
+	assert.Equal(t, "1", p1.NextCursor)
+	assert.InDelta(t, 4.0, p1.Total.TotalCostUSD, 1e-9, "unpriced z adds nothing; the untagged bucket is no namespace's")
+	assert.Equal(t, int64(60), p1.Total.TotalTokens)
+	assert.Zero(t, p1.Total.Observations)
+
+	p2, err := costBreakdownPage(agents, window, CostBreakdownQuery{Limit: 1, Cursor: p1.NextCursor, Namespaces: []string{"a"}})
+	require.NoError(t, err)
+	require.Len(t, p2.Agents, 1)
+	assert.Equal(t, "z", p2.Agents[0].AgentName)
+	assert.Empty(t, p2.NextCursor)
+
+	past, err := costBreakdownPage(agents, window, CostBreakdownQuery{Limit: 1, Cursor: "2", Namespaces: []string{"a"}})
+	require.NoError(t, err)
+	assert.Empty(t, past.Agents)
+	assert.Empty(t, past.NextCursor)
+
+	_, err = costBreakdownPage(agents, window, CostBreakdownQuery{Cursor: "-1", AllNamespaces: true})
+	assert.ErrorIs(t, err, ErrBadParam)
 }

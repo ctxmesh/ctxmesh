@@ -2,7 +2,7 @@ import * as React from "react";
 
 import { cn } from "@/lib/utils";
 
-// Select — a token-driven native <select>. The config-builder uses it for
+// Select — a token-driven native <select>. The create-agent form uses it for
 // bounded enums (executionModel, eval gate) where the CRD schema fixes the
 // allowed values; a native select keeps the dependency surface small (no Radix
 // Select) and M151 §5.3 keeps that decision. Same field surface as Input:

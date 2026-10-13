@@ -37,6 +37,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ctxmesh/ctxmesh/internal/statelayer"
+	"k8s.io/client-go/kubernetes"
+
 	"github.com/go-logr/logr"
 	_ "github.com/jackc/pgx/v5/stdlib" // register the "pgx" database/sql driver for the durable run store
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,27 +48,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 	"github.com/ctxmesh/ctxmesh/internal/bff"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/sharedrun"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
-	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/dbpool"
@@ -132,7 +120,7 @@ func runPreflight(ctx context.Context) int {
 	oboOn := strings.EqualFold(os.Getenv("MCP_OBO_EGRESS_ENABLED"), "true")
 	required := map[string]string{
 		// Always needed for a functional install (all derivable/defaulted by the chart, m124.3):
-		"TOKEN_SERVICE_URL":        os.Getenv("TOKEN_SERVICE_URL"),
+		envTokenServiceURL:         os.Getenv(envTokenServiceURL),
 		"MCP_CREDENTIAL_NAMESPACE": os.Getenv("MCP_CREDENTIAL_NAMESPACE"),
 		"COST_ROLLUP_ENABLED":      os.Getenv("COST_ROLLUP_ENABLED"),
 	}
@@ -223,11 +211,11 @@ func runPreflight(ctx context.Context) int {
 }
 
 // newPlatformScheme builds the scheme the caller-scoped client encodes/decodes the platform CRDs with
-// (core + both agents API versions).
+// (core + the agents API).
 func newPlatformScheme() (*runtime.Scheme, error) {
 	scheme := runtime.NewScheme()
 	for _, add := range []func(*runtime.Scheme) error{
-		clientgoscheme.AddToScheme, agentsv1alpha1.AddToScheme, agentsv1beta1.AddToScheme,
+		clientgoscheme.AddToScheme, agentsv1beta1.AddToScheme,
 	} {
 		if err := add(scheme); err != nil {
 			return nil, fmt.Errorf("building the platform scheme: %w", err)
@@ -384,16 +372,11 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// backend and DB/vault creds stay out of this user-facing BFF. mTLS engages when the
 	// BFF_TOKEN_SERVICE_TLS_* files are present (the same platform material the sidecars use);
 	// absent ⇒ plain HTTP (dev). Unset TOKEN_SERVICE_URL ⇒ the BFF writes the grant Secret directly.
-	var grantStore credresolve.GrantWriter
-	var tsHTTPClient *http.Client // reused by the KB test-query endpoint (m68.13)
-	if tsURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tsURL != "" {
-		httpClient, tlsErr := tokenServiceHTTPClient(tsURL)
-		if tlsErr != nil {
-			return fmt.Errorf("build token-service mTLS client: %w", tlsErr)
-		}
-		tsHTTPClient = httpClient
-		grantStore = credplane.NewClient(tsURL, httpClient)
-		log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", httpClient != nil)
+	// Every call carries the BFF's projected token, which is what lets it store grants (ADR 0154).
+	// tsHTTPClient is reused by the KB test-query endpoint (m68.13).
+	tsHTTPClient, grantStore, err := tokenServiceWiring(log, os.Getenv)
+	if err != nil {
+		return err
 	}
 
 	// Durable run store (ADR 0034 §durability, m32.1): when RUN_STORE_DSN names a Postgres, runs
@@ -450,11 +433,6 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return fmt.Errorf("open control-plane postgres: %w", cpErr)
 	}
 	defer func() { _ = cpDB.Close() }()
-	promptStore := promptversion.NewPostgresStore(cpDB)
-	toolStore := toolregistry.NewPostgresStore(cpDB)                   // shares the handle + migrations
-	nsTenantStore := namespacetenant.NewPostgresStore(cpDB)            // m73.4: namespace→tenant mirror for catalog
-	publishedArtifactStore := publishedartifact.NewPostgresStore(cpDB) // m74.1: snapshot-at-publish templates
-	sharedRunStore := sharedrun.NewPostgresStore(cpDB)                 // m75.1: single-run capability share links
 	log.Info("control-plane store enabled (ADR 0042/0044): PromptVersions + ToolRegistries served from Postgres")
 
 	// Worker-path dispatch (ADR 0034, m32.2): RUN_WORKER_DISPATCH makes POST /runs leave runs
@@ -494,14 +472,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		return fmt.Errorf("init durable KB object store: %w", err)
 	}
 
-	// KB ingestion direct-write path (M68, ADR 0061 governance #8): the run-worker is a TRUSTED control-plane
-	// workload that already holds the controlplane DSN, so the ingestion executor (m68.6) EMBEDS + WRITES
-	// knowledge_chunks DIRECTLY — no token-service proxy hop (agent pods never do this; they read via proxy).
-	//   - the knowledge store rides the already-open cpDB (the same pgvector Postgres as memory).
-	//   - the gateway embedder is built from MODEL_GATEWAY_URL, exactly as the token-service builds its memory
-	//     embedder (the same seam). Absent ⇒ nil ⇒ the ingest endpoint + executor degrade honestly (501 / a
-	//     clear failed-run reason), never a panic.
-	knowledgeStore := knowledge.NewPostgresStore(cpDB)
+	// The ingestion executor embeds through the gateway built from MODEL_GATEWAY_URL, the same seam the
+	// token-service's memory embedder uses. Absent ⇒ nil ⇒ the ingest endpoint and executor degrade
+	// honestly (501, or a clear failed-run reason).
 	ingestEmbedder := newIngestEmbedder(log)
 
 	// The durable async backend for A2A hops (M141.4, ADR 0121). Built once and used for BOTH halves:
@@ -517,87 +490,52 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 	// PartiallyIngested (strictly additive).
 	ingestOCR := newIngestOCR(log)
 
-	// Dataset store (M69, ADR 0062 Fork 1): rides the same cpDB (migration 0007 applied by controlplane.Migrate).
-	// The dataset-export executor (m69.2) writes it directly (governance #8: the trusted run-worker holds cpDB +
-	// Langfuse creds), copying M66-redacted, traceId-lineaged cases out of Langfuse. Paired with the Langfuse
-	// adapter in `adapters` (built below) as the export read source.
-	datasetStore := dataset.NewPostgresStore(cpDB)
-
-	// Online-score store (M69, ADR 0062 Fork 2): rides the same cpDB (migration 0008 applied by
-	// controlplane.Migrate). The online-scoring worker (m69.5) writes it directly (governance #8: the
-	// trusted off-request worker holds cpDB + Langfuse creds), folding production traces into the
-	// per-(namespace, agent, version, window) online-score vector.
-	onlineStore := onlinescore.NewPostgresStore(cpDB)
-
-	// Cost-rollup store (M70, ADR 0063 D1): rides the same cpDB (migration 0009 applied by
-	// controlplane.Migrate). The cost-rollup worker (m70.2) writes it directly (governance #8: the
-	// trusted off-request worker holds cpDB + Valkey reach), snapshotting the ephemeral per-tenant
-	// Valkey monthly-spend keys into the durable cost_rollups ledger.
-	rollupStore := costrollup.NewPostgresStore(cpDB)
-
-	// Per-agent online-config resolver (M69, ADR 0062 Fork 2; m84.3 completes m69.6): the online-scoring
-	// worker consults it per agent to enable/tune the judge from that agent's EvalSuite.online policy. The
-	// policy is resolved by the CONTROLLER (which legitimately holds evalsuites RBAC) into a per-(ns, agent)
-	// cpDB row; the worker READS that row here (cpDB — the SAME store it writes aggregates to). The BFF
-	// deliberately does NOT read AgentDeployment/EvalSuite via its own SA: ADR 0011 keeps the BFF's SA at
-	// `rules: []` (the confused-deputy blast-radius stance; m69.6 REVERTED a BFF-SA agent-CRD ClusterRole
-	// that broke this). A missing/disabled row ⇒ (nil, nil): the worker falls back to its process defaults
-	// (judge OFF) — the fail-safe. Wired from the SAME cpDB store as onlineStore: no new dep, no agent-CRD RBAC.
-	onlineResolver := bff.NewDBOnlineConfigResolver(onlineStore)
-
-	srv := bff.NewServer(bff.Options{
-		TokenServiceURL:        strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")),
+	bindStore := runcapBindStore(log)
+	// Pod identity for the guardrail audit edge (m184.7) and the AMP attestation edge (ADR 0153):
+	// TokenReview needs the BFF's tokenreviews grant. A clientset that cannot be built leaves both off.
+	var podAuth statelayer.PodAuthenticator
+	if cs, csErr := kubernetes.NewForConfig(cfg); csErr == nil {
+		podAuth = statelayer.NewTokenReviewAuthenticator(cs, runcap.BFFPodAudience, time.Now)
+	} else {
+		log.Error(csErr, "no Kubernetes clientset: a guarded AMP callee's block cannot be audited, "+
+			"and no registry member can be attested, so every AMP call is refused")
+	}
+	requirePoP, err := requireProofOfPossession(log, os.Getenv("RUNCAP_REQUIRE_POP"), bindStore != nil)
+	if err != nil {
+		return err
+	}
+	opts := bff.Options{
+		TokenServiceURL:        strings.TrimSpace(os.Getenv(envTokenServiceURL)),
 		TokenServiceHTTPClient: tsHTTPClient,
 		GrantStore:             grantStore,
 		TenantUsage:            tenantUsage,
 		RunControl:             runControl,
 		RunStore:               runStore,
 		DocStore:               docStore,
-		KnowledgeStore:         knowledgeStore,
-		DatasetStore:           datasetStore,
-		OnlineStore:            onlineStore,
-		OnlineResolver:         onlineResolver,
-		RollupStore:            rollupStore,
 		Embedder:               ingestEmbedder,
 		OCR:                    ingestOCR,
-		// Capability discovery (M141, ADR 0120): the registry the discovery edge ranks over (the
-		// CONTROLLER writes it — the BFF only reads, so no new RBAC), plus the offline models it ranks
-		// with. It reuses `ingestEmbedder`: discovery embeds through the SAME gateway seam as ingestion.
-		AgentCapabilities:       agentcapability.NewPostgresStore(cpDB),
+		// Capability discovery (ADR 0120) embeds through the same gateway seam as ingestion.
 		DiscoveryReranker:       discoveryReranker(log),
 		DiscoveryEmbeddingRoute: strings.TrimSpace(os.Getenv("DISCOVERY_EMBEDDING_ROUTE")),
 		// Async A2A backend (M141.4, ADR 0121): the durable bus an agent hands a hop to. nil ⇒ the
 		// publish edge is absent and the dispatcher never starts, so Knative Eventing remains the only
 		// async path — exactly today's behaviour.
-		AsyncPublisher: asyncBus,
+		AsyncPublisher: asyncPublisherFor(asyncBus),
 		// Sender-constrained run capabilities (M142.5, ADR 0124). The bind store rides the shared
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
-		RuncapBind:   runcapBindStore(log),
-		ProofSpender: proofSpender(log),
-		SpawnBudgets: spawnbudget.NewPostgresStore(cpDB),
-		// The scoped kill switch (M146, ADR 0126). This is the FAIL-CLOSED half: the worker reads it
-		// before claiming and the run-create edge reads it before accepting, and neither consults the
-		// state layer — so an unreachable Valkey cannot resurrect a killed scope.
-		KillScopes:               killscope.NewPostgresStore(cpDB),
-		RequireProofOfPossession: strings.TrimSpace(os.Getenv("RUNCAP_REQUIRE_POP")) == "true",
+		RuncapBind:               bindStore,
+		PodAuth:                  podAuth,
+		ProofSpender:             proofSpender(log),
+		RequireProofOfPossession: requirePoP,
 		ConvStore:                convStore,
-		PromptStore:              promptStore,
 		// Production git-pointer prompt resolver (m121.3, ADR 0008) — the drop-in for the
 		// fixture Resolver, so GET /api/promptversions/{ns}/{name}/diff resolves REAL content
 		// from git (github.com raw). PROMPT_GIT_TOKEN (a PAT via a Secret, never committed)
 		// authorises private repos; empty ⇒ public repos only. Git stays the source of truth.
 		PromptResolver:              prompt.NewHTTPResolver(strings.TrimSpace(os.Getenv("PROMPT_GIT_TOKEN"))),
-		ToolRegistryStore:           toolStore,
-		NamespaceTenantStore:        nsTenantStore,
 		EndUserVerifier:             endUserVerifier,
 		SAIssuer:                    saIssuer,
-		EndUserAgentStore:           enduseragent.NewPostgresStore(cpDB),
-		PublishedArtifactStore:      publishedArtifactStore,
-		SharedRunStore:              sharedRunStore,
-		AgentMemoryStore:            agentmemory.NewPostgresStore(cpDB),
-		AuditStore:                  auditlog.NewPostgresStore(cpDB),
-		AlertStore:                  alertstore.NewPostgresStore(cpDB),
 		CallerClients:               callerClients,
 		Scheme:                      scheme,
 		Auth:                        bff.BearerAuthenticator{},
@@ -610,6 +548,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		MCPRequireApproval:          flags.mcpRequireApproval,
 		MCPGrantHMACKey:             mcpGrantHMACKey,
 		MCPCredentialNamespace:      mcpCredentialNamespace,
+		InstallNamespace:            installNamespace(),
 		CredentialClient:            credentialClient,
 		MCPCapabilityPrivateSeedB64: mcpCapabilitySeed,
 		MCPCapabilityAudience:       mcpCapabilityAudience,
@@ -618,7 +557,9 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		OIDCClientID:                flags.oidcClientID,
 		ConsoleURL:                  os.Getenv("CONSOLE_URL"), // ADR 0040: canonical MCP-consent callback + relay origin
 		Log:                         ctrl.Log.WithName("bff.server"),
-	})
+	}
+	opts.UseControlPlaneDB(cpDB)
+	srv := bff.NewServer(opts)
 
 	// Fail CLOSED on a missing security-critical key (M124/Gate A, ADR 0095 §2): when the operator
 	// intends per-user OBO (MCP_OBO_REQUIRED — the chart wires it from oboEgress.enabled) but run-
@@ -852,7 +793,7 @@ func newDocStore() (objectstore.ObjectStore, error) {
 // KNOWLEDGE_RERANK_URL, so an operator running ONE offline rerank service gets discovery reranking for
 // free rather than having to point a second variable at the same pod. Unset ⇒ nil ⇒ cosine-only ranking,
 // which is a complete answer, just a coarser one — rerank is fail-open by construction.
-func discoveryReranker(log logr.Logger) credplane.Reranker {
+func discoveryReranker(log logr.Logger) retrieval.Reranker {
 	rerankURL := strings.TrimSpace(os.Getenv("DISCOVERY_RERANK_URL"))
 	if rerankURL == "" {
 		rerankURL = strings.TrimSpace(os.Getenv("KNOWLEDGE_RERANK_URL"))
@@ -862,7 +803,7 @@ func discoveryReranker(log logr.Logger) credplane.Reranker {
 		return nil
 	}
 	log.Info("capability discovery: cross-encoder rerank wired (ADR 0117)", "reranker", rerankURL)
-	return credplane.NewHTTPReranker(rerankURL, nil)
+	return retrieval.NewHTTPReranker(rerankURL, nil)
 }
 
 // defaultRunWorkerConcurrency is what a BFF runs when RUN_WORKER_CONCURRENCY is unset. Small on purpose:
@@ -874,6 +815,30 @@ const defaultRunWorkerConcurrency = 2
 // ADR 0124). It must be SHARED across BFF replicas: the binding is single-use, and a per-replica record
 // would let the same capability be bound once on each replica — which is not a boundary at all. No
 // STATELAYER_ADDR ⇒ nil ⇒ the exchange edge is not registered and capabilities remain bearer tokens.
+// requireProofOfPossession decides whether an unbound (bearer) run capability is refused at the
+// capability-authenticated edges (ADR 0124). Unset, it follows whether binding is possible: a launcher can
+// only present a proof after exchanging its capability, and the exchange needs the state layer. An
+// explicit "true" with no state layer is refused: it would turn away every capability, with no way for any
+// launcher to satisfy it.
+func requireProofOfPossession(log logr.Logger, raw string, canBind bool) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return canBind, nil
+	}
+	require, err := strconv.ParseBool(raw)
+	switch {
+	case err != nil:
+		return false, fmt.Errorf("RUNCAP_REQUIRE_POP=%q is not a boolean", raw)
+	case require && !canBind:
+		return false, errors.New("RUNCAP_REQUIRE_POP=true needs the state layer (STATELAYER_ADDR) to bind " +
+			"run capabilities; without it every spawn, handoff, discover, async publish and guardrail event " +
+			"would be refused")
+	case !require:
+		log.Info("RUNCAP_REQUIRE_POP=false: bearer run capabilities are accepted — a copied capability can be spent")
+	}
+	return require, nil
+}
+
 func runcapBindStore(log logr.Logger) bff.RuncapBindStore {
 	addr := strings.TrimSpace(os.Getenv("STATELAYER_ADDR"))
 	if addr == "" {
@@ -924,6 +889,17 @@ func newIngestOCR(log logr.Logger) ocr.OCR {
 // is one feature among many here, and taking the whole console down because a broker is late to start
 // would be a worse outcome than the honest degrade (the publish edge is simply absent, so a producer gets
 // a clear 404 instead of a silent black hole).
+// asyncPublisherFor returns bus as a Publisher, and a nil interface when there is no bus. Assigning a nil
+// *JetStreamBus straight to the interface makes it non-nil, so every "is there a publisher" check passes
+// and the health check calls Err on a nil receiver: the BFF then never becomes ready on an install
+// without JetStream.
+func asyncPublisherFor(bus *asyncbus.JetStreamBus) asyncbus.Publisher {
+	if bus == nil {
+		return nil
+	}
+	return bus
+}
+
 func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 	backend := strings.ToLower(strings.TrimSpace(os.Getenv("ASYNC_BACKEND")))
 	if backend == "" {
@@ -945,6 +921,8 @@ func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 		URL:             natsURL,
 		CredentialsFile: strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")),
 		Replicas:        envInt(os.Getenv("NATS_STREAM_REPLICAS")),
+		// How many hops to one agent are delivered at once; unset or invalid ⇒ asyncbus.DefaultMaxInFlight.
+		MaxInFlight: envInt(os.Getenv("ASYNC_DELIVERY_CONCURRENCY")),
 	})
 	if err != nil {
 		log.Error(err, "async A2A backend NOT started: the broker is unreachable — "+
@@ -952,7 +930,7 @@ func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 		return nil
 	}
 	log.Info("async A2A backend connected (ADR 0121): durable hops enabled",
-		"backend", backend, "url", natsURL)
+		"backend", backend, "url", natsURL, "deliveryConcurrency", os.Getenv("ASYNC_DELIVERY_CONCURRENCY"))
 	return bus
 }
 
@@ -960,7 +938,7 @@ func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 // (M68, ADR 0061 Fork 2 / governance #8 — the trusted worker embeds + writes, agent pods do not). It reads the
 // gateway base URL from MODEL_GATEWAY_URL (the same seam the token-service memory embedder uses) + the optional
 // MODEL_GATEWAY_KEY. Unset ⇒ nil, so the ingest endpoint + executor degrade honestly (501 / a failed-run reason).
-func newIngestEmbedder(log logr.Logger) credplane.Embedder {
+func newIngestEmbedder(log logr.Logger) embedding.Embedder {
 	gwURL := strings.TrimSpace(os.Getenv("MODEL_GATEWAY_URL"))
 	if gwURL == "" {
 		log.Info("KB ingestion embedder DISABLED: MODEL_GATEWAY_URL unset — the ingest endpoint returns 501")
@@ -968,7 +946,7 @@ func newIngestEmbedder(log logr.Logger) credplane.Embedder {
 	}
 	log.Info("KB ingestion embedder enabled (ADR 0061 Fork 2): gateway embeddings, direct-write from worker",
 		"gateway", gwURL)
-	return credplane.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"),
+	return embedding.NewGatewayEmbedder(gwURL, os.Getenv("MODEL_GATEWAY_KEY"),
 		&http.Client{Timeout: 60 * time.Second})
 }
 
@@ -976,6 +954,46 @@ func newIngestEmbedder(log logr.Logger) credplane.Embedder {
 // the token-service. When the BFF_TOKEN_SERVICE_TLS_* files are all present it is mTLS
 // (the platform client cert + CA); otherwise it returns nil so credplane.NewClient uses a
 // plain default client (dev only — the token-service also degrades to plain HTTP).
+// envTokenServiceURL is the token service the BFF delegates grant writes and knowledge test queries to.
+const envTokenServiceURL = "TOKEN_SERVICE_URL"
+
+// tokenServiceWiring is the BFF's client of the token service and the grant writer over it, or nils when
+// TOKEN_SERVICE_URL is unset (the BFF then writes grant Secrets itself). The client uses mTLS when the
+// BFF_TOKEN_SERVICE_TLS_* files are present and sends the BFF's projected token on every request, which
+// is what lets it store grants (ADR 0154). A BFF pointed at the token service without a readable token
+// refuses to start: every grant write and knowledge test query would be refused.
+func tokenServiceWiring(log logr.Logger, getenv func(string) string) (*http.Client, credresolve.GrantWriter, error) {
+	tsURL := strings.TrimSpace(getenv(envTokenServiceURL))
+	if tsURL == "" {
+		return nil, nil, nil
+	}
+	tokenPath := strings.TrimSpace(getenv("TOKEN_SERVICE_TOKEN_PATH"))
+	if tokenPath == "" {
+		return nil, nil, errors.New("TOKEN_SERVICE_URL is set but TOKEN_SERVICE_TOKEN_PATH is not: mount a " +
+			"projected ServiceAccount token for audience " + runcap.TokenServicePodAudience +
+			" (the chart does) and point TOKEN_SERVICE_TOKEN_PATH at it, or unset TOKEN_SERVICE_URL")
+	}
+	raw, err := os.ReadFile(tokenPath) //nolint:gosec // a path the operator sets
+	if err == nil && strings.TrimSpace(string(raw)) == "" {
+		err = errors.New("the file is empty")
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("TOKEN_SERVICE_TOKEN_PATH %s holds no token (%w): mount a projected "+
+			"ServiceAccount token for audience %s there", tokenPath, err, runcap.TokenServicePodAudience)
+	}
+	httpClient, err := tokenServiceHTTPClient(tsURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build token-service mTLS client: %w", err)
+	}
+	mtls := httpClient != nil
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 20 * time.Second}
+	}
+	httpClient.Transport = credplane.NewBearerTransport(httpClient.Transport, tokenPath)
+	log.Info("MCP grant writes delegate to the token-service (SPI write path)", "url", tsURL, "mtls", mtls)
+	return httpClient, credplane.NewClient(tsURL, httpClient), nil
+}
+
 func tokenServiceHTTPClient(tsURL string) (*http.Client, error) {
 	certFile := strings.TrimSpace(os.Getenv("BFF_TOKEN_SERVICE_TLS_CERT_FILE"))
 	keyFile := strings.TrimSpace(os.Getenv("BFF_TOKEN_SERVICE_TLS_KEY_FILE"))
@@ -1060,4 +1078,16 @@ func buildAdapters(log logr.Logger) bff.Adapters {
 	}
 
 	return adapters
+}
+
+// installNamespace is the namespace the BFF runs in: POD_NAMESPACE, else the ServiceAccount
+// namespace file every in-cluster pod mounts. Empty outside a cluster.
+func installNamespace() string {
+	if ns := strings.TrimSpace(os.Getenv("POD_NAMESPACE")); ns != "" {
+		return ns
+	}
+	if b, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		return strings.TrimSpace(string(b))
+	}
+	return ""
 }

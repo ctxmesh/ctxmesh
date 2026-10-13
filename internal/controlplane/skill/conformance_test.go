@@ -31,7 +31,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		s := seed(t)
 		v := SkillVersion{
 			Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte("v1")),
-			Source: SourceUpload, ObjectKey: "uploads/v1",
+			Source: SourceUpload, ObjectKey: "skills/team-a/v1",
 		}
 		require.NoError(t, s.AddVersion(ctx, v))
 
@@ -48,7 +48,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		s := seed(t)
 		require.NoError(t, s.AddVersion(ctx, SkillVersion{
 			Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte("v1")),
-			Source: SourceUpload, ObjectKey: "uploads/v1",
+			Source: SourceUpload, ObjectKey: "skills/team-a/v1",
 		}))
 		require.NoError(t, s.UpsertSkill(ctx, Skill{
 			Namespace: "team-a", Name: "summarise", Description: "A new description.",
@@ -69,7 +69,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		for _, body := range []string{"v1", "v2"} {
 			require.NoError(t, s.AddVersion(ctx, SkillVersion{
 				Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte(body)),
-				Source: SourceUpload, ObjectKey: "uploads/" + body,
+				Source: SourceUpload, ObjectKey: "skills/team-a/" + body,
 			}))
 			time.Sleep(2 * time.Millisecond)
 		}
@@ -95,7 +95,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		for _, body := range []string{"v1", "v2"} {
 			require.NoError(t, s.AddVersion(ctx, SkillVersion{
 				Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte(body)),
-				Source: SourceUpload, ObjectKey: "uploads/" + body,
+				Source: SourceUpload, ObjectKey: "skills/team-a/" + body,
 			}))
 		}
 		require.NoError(t, s.SetAlias(ctx, "team-a", "summarise", "stable", Digest([]byte("v1"))))
@@ -115,7 +115,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		s := newStore(t)
 		err := s.AddVersion(ctx, SkillVersion{
 			Namespace: "team-a", Skill: "ghost", Digest: Digest([]byte("v1")),
-			Source: SourceUpload, ObjectKey: "uploads/v1",
+			Source: SourceUpload, ObjectKey: "skills/team-a/v1",
 		})
 		require.Error(t, err)
 	})
@@ -124,7 +124,7 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		s := seed(t)
 		require.NoError(t, s.AddVersion(ctx, SkillVersion{
 			Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte("v1")),
-			Source: SourceUpload, ObjectKey: "uploads/v1",
+			Source: SourceUpload, ObjectKey: "skills/team-a/v1",
 		}))
 		require.NoError(t, s.DeleteSkill(ctx, "team-a", "summarise"))
 
@@ -133,10 +133,35 @@ func runConformance(t *testing.T, newStore func(t *testing.T) Store) {
 		assert.Empty(t, vs, "orphaned versions would resolve for a skill nobody can see")
 	})
 
+	t.Run("a namespace set lists those namespaces in order, nil lists all, empty lists none", func(t *testing.T) {
+		s := seed(t)
+		require.NoError(t, s.UpsertSkill(ctx, Skill{Namespace: "team-b", Name: "other"}))
+		require.NoError(t, s.UpsertSkill(ctx, Skill{Namespace: "team-c", Name: "third"}))
+		names := func(got []Skill) []string {
+			out := make([]string, 0, len(got))
+			for _, sk := range got {
+				out = append(out, sk.Namespace+"/"+sk.Name)
+			}
+			return out
+		}
+
+		got, err := s.ListSkills(ctx, []string{"team-c", "team-a"})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"team-a/summarise", "team-c/third"}, names(got))
+
+		got, err = s.ListSkills(ctx, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"team-a/summarise", "team-b/other", "team-c/third"}, names(got))
+
+		got, err = s.ListSkills(ctx, []string{})
+		require.NoError(t, err)
+		assert.Empty(t, got)
+	})
+
 	t.Run("namespaces do not leak into each other", func(t *testing.T) {
 		s := seed(t)
 		require.NoError(t, s.UpsertSkill(ctx, Skill{Namespace: "team-b", Name: "other"}))
-		got, err := s.ListSkills(ctx, "team-a")
+		got, err := s.ListSkills(ctx, []string{"team-a"})
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "summarise", got[0].Name)

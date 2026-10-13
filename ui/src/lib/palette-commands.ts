@@ -8,7 +8,9 @@ import { NAV_SECTIONS, type NavItem } from "@/lib/nav";
 // (m13.6b). It builds the grouped CommandItem[] the kit's CommandPalette renders,
 // from live app state (RBAC allow-map, namespace list, session actions). Kept
 // side-effect-free and component-free so it is unit-testable in isolation and so
-// the palette and the sidebar nav share ONE visibility rule (they can't drift).
+// the palette and the sidebar nav share ONE RBAC visibility rule (they can't drift).
+// The palette does not follow the sidebar's first-run shortening: before the first
+// agent it is how a person who knows what they want still reaches every page.
 
 export interface BuildCommandsArgs {
   /** The RBAC gate - same `can(resource, verb)` the Sidebar uses (ADR 0011). */
@@ -35,11 +37,7 @@ function isVisible(it: NavItem, can: BuildCommandsArgs["can"]): boolean {
 }
 
 // buildCommands assembles the grouped command list. Navigate commands mirror the
-// RBAC-filtered nav (built surfaces route to their real path; not-yet-shipped IA
-// destinations route to their honest /soon placeholder, labelled with the owning
-// milestone). Actions cover only what genuinely exists in M13: switch namespace
-// (as sub-commands) and sign out. (No theme toggle - the production shell has
-// none; the design gallery's is gallery-only.)
+// RBAC-filtered nav. Actions: switch namespace (as sub-commands) and sign out.
 export function buildCommands({
   can,
   navigate,
@@ -51,21 +49,14 @@ export function buildCommands({
   const navigateCmds: CommandItem[] = NAV_SECTIONS.flatMap((section) =>
     section.items
       .filter((it) => isVisible(it, can))
-      .map((it) => {
-        const to = it.route ?? `/soon/${it.id}`;
-        const isPlaceholder = !it.route;
-        return {
-          id: `nav-${it.id}`,
-          group: "Navigate",
-          label: it.label,
-          icon: it.icon,
-          // Placeholders carry their milestone as a hint so the palette stays
-          // honest about what does / doesn't exist yet.
-          hint: isPlaceholder ? it.milestone : undefined,
-          keywords: `${section.heading} ${it.id} go to`,
-          onRun: () => navigate(to),
-        };
-      }),
+      .map((it) => ({
+        id: `nav-${it.id}`,
+        group: "Navigate",
+        label: it.label,
+        icon: it.icon,
+        keywords: `${section.heading} ${it.id} go to`,
+        onRun: () => navigate(it.route),
+      })),
   );
 
   const actionCmds: CommandItem[] = [];

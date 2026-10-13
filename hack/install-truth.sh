@@ -47,7 +47,7 @@ ok "CONTROLPLANE_DSN and RUN_STORE_DSN are both sourced by the chart"
 
 # 3. The database exists, is pgvector, and keeps its data.
 grep -q 'name: ctxmesh-postgres$'      "$RENDER" || fail "no Postgres workload — the run store, control plane, cost rollups and knowledge chunks all require it"
-grep -q 'image: pgvector/pgvector'     "$RENDER" || fail "the bundled database is not pgvector — vector search (ADR 0084) fails at the first knowledge query, not at install"
+grep -q 'image: [^ ]*pgvector/pgvector' "$RENDER" || fail "the bundled database is not pgvector — vector search (ADR 0084) fails at the first knowledge query, not at install"
 grep -q 'kind: PersistentVolumeClaim'  "$RENDER" || fail "the bundled database has no PVC — run history and cost rollups are real state"
 ok "pgvector is deployed, with a PVC rather than an emptyDir"
 
@@ -80,6 +80,26 @@ grep -A1 'name: COST_ROLLUP_ENABLED' "$RENDER" | grep -q '"1"' \
   || fail "COST_ROLLUP_ENABLED no longer defaults on — cost_rollups stays empty even once spend is booked"
 ok "COST_ROLLUP_ENABLED still defaults on"
 
+# 7b. Optional data-plane components leave nothing pointing at them when they are off.
+#
+# NATS is off by default: nothing reads it until bff.asyncBackend names it, and a broker that
+# renders anyway is a PVC and a pod spent on nothing. The object store can be turned off, and then
+# the BFF and the controller must not be handed its address, or KB uploads and record mode dial a
+# Service that is not there instead of answering 501.
+grep -q 'name: ctxmesh-nats$' "$RENDER" && fail "the default render deploys NATS, which nothing uses until bff.asyncBackend is set"
+WITHNATS="$(helm template ctxmesh "$CHART" -n ctxmesh --set devDataPlane.nats.enabled=true 2>/dev/null)" \
+  || fail "the chart does not template with NATS on"
+grep -q 'name: ctxmesh-nats-ingress$' <<<"$WITHNATS" \
+  || fail "devDataPlane.nats.enabled=true does not render NATS with its NetworkPolicy"
+NOSTORE="$(helm template ctxmesh "$CHART" -n ctxmesh --set devDataPlane.objectstore.enabled=false 2>/dev/null)" \
+  || fail "the chart does not template with the object store off"
+grep -q 'name: ctxmesh-objectstore$' <<<"$NOSTORE" && fail "devDataPlane.objectstore.enabled=false still deploys the object store"
+grep -A1 'name: OBJECT_STORE_ADDR' <<<"$NOSTORE" | grep -q 'value: ""' \
+  || fail "with the object store off the BFF still gets an OBJECT_STORE_ADDR, so KB uploads dial a missing Service instead of answering 501"
+grep -A1 'name: DEV_OBJECT_STORE' <<<"$NOSTORE" | grep -q '"false"' \
+  || fail "with the object store off the controller still injects its address into agent pods"
+ok "NATS is opt-in; turning the object store off unwires it from the BFF and the controller"
+
 # 8. A production render REFUSES rather than shipping something that cannot start.
 if helm template ctxmesh "$CHART" -n ctxmesh --set profile=production \
      -f "$CHART/values-production.yaml" > "$PROD" 2>&1; then
@@ -87,6 +107,36 @@ if helm template ctxmesh "$CHART" -n ctxmesh --set profile=production \
 fi
 grep -q 'postgres.externalDsn' "$PROD" || fail "the production render failed for some reason other than the missing external DSN"
 ok "profile=production refuses without an operator-managed database"
+
+# 8b. The README's production command renders, against the chart it names.
+#
+# It did not: the guards above require bff.mcp.grantHmacKey and bff.mcp.credentialNamespace, the
+# README left both out, and the only other render of "the README's production command" was a
+# hand-kept copy in chart_images.py that carried them. So the command is read from the README itself
+# (hack/readme_install.py), and the Secret the production profile needs at runtime, which no render
+# can see, must be in the same block.
+README_DOC="${README:-README.md}"
+PRODARGS=()
+while IFS= read -r arg; do PRODARGS+=("$arg"); done \
+  < <(python3 hack/readme_install.py production --readme "$README_DOC" --chart "$CHART")
+[ "${#PRODARGS[@]}" -gt 1 ] || fail "read no production command from $README_DOC (above)"
+if ! PRODOUT="$(helm template ctxmesh "${PRODARGS[0]}" -n ctxmesh "${PRODARGS[@]:1}" 2>&1)"; then
+  printf '%s\n' "$PRODOUT" | sed 's/^/      /' | head -12 >&2
+  fail "the production command in $README_DOC does not render: a reader who copies it gets the error above"
+fi
+grep -q 'name: TOKEN_SERVICE_TLS_REQUIRED' <<<"$PRODOUT" \
+  || fail "the README's production command no longer renders the token service with TLS required; recheck what it must create first"
+awk '/<!-- ctxmesh:install production -->/{on=1} on&&/^```/{n++} on&&n<2{print} n>=2{exit}' "$README_DOC" \
+  | grep -q 'secret tls token-service-tls' \
+  || fail "the production profile runs the token service with TLS required, and $README_DOC's production block does not create the token-service-tls Secret it starts from"
+# A grant-key Secret the command names is not optional (ADR 0154): the BFF does not start without it.
+PRODBLOCK="$(awk '/<!-- ctxmesh:install production -->/{on=1} on&&/^```/{n++} on&&n<2{print} n>=2{exit}' "$README_DOC")"
+HMACSECRET="$(grep -o 'grantHmacKeySecret=[A-Za-z0-9.-]*' <<<"$PRODBLOCK" | head -1 | cut -d= -f2)"
+if [ -n "$HMACSECRET" ]; then
+  grep -q "secret generic $HMACSECRET" <<<"$PRODBLOCK" \
+    || fail "$README_DOC's production command names the grant-key Secret $HMACSECRET and its block does not create it: the BFF would not start"
+fi
+ok "the README's production command renders and creates the Secrets it names first"
 
 # 9. The DURABLE run path, which profile=production makes mandatory.
 #
@@ -127,6 +177,17 @@ for b in bad:
 sys.exit(1 if bad else 0)
 PY
 ok "the durable run path (bff.runStore.enabled=true) consumes nothing the chart does not create"
+
+# 9b. Every workload that mints or verifies run capabilities uses the same audience (ADR 0154).
+#
+# The BFF and the run-worker mint them, the controller's injected sidecars and the token service
+# verify them. The chart templated the audience into the verifiers only, so setting it refused
+# every tool credential as invalid_capability. Rendered with the run-worker on and a probe value.
+helm template ctxmesh "$CHART" -n ctxmesh --set bff.runStore.enabled=true \
+    --set controllerManager.oboEgress.capabilityAudience=ctxmesh-audience-probe 2>/dev/null \
+  | python3 hack/capability_audience.py ctxmesh-audience-probe \
+  || fail "the run-capability audience differs between the components that mint and verify capabilities"
+ok "every component that mints or verifies run capabilities takes the same audience"
 
 # N. The demo login must be able to complete the flow the console advertises.
 #

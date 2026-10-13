@@ -442,7 +442,7 @@ export class MeshStub extends BaseStub {
   constructor(
     private readonly opts: {
       response?: Record<string, unknown>;
-      /** target -> the status the launcher would answer with (403/404/502). */
+      /** target -> the status the launcher would answer with (403/404/502/503). */
       deny?: Record<string, number>;
     } = {},
   ) {
@@ -455,7 +455,13 @@ export class MeshStub extends BaseStub {
       const status = this.opts.deny?.[target];
       if (status) {
         const reason =
-          status === 403 ? "caller_not_allowed" : status === 404 ? "unknown_target" : "upstream_failure";
+          status === 403
+            ? "caller_not_allowed"
+            : status === 404
+              ? "unknown_target"
+              : status === 503
+                ? "attestation_unavailable"
+                : "upstream_failure";
         return { status, body: JSON.stringify({ error: reason }) };
       }
       return {

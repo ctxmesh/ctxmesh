@@ -157,7 +157,7 @@ func (s *Server) reaskForOutputSchema(
 	_ = s.runStore.AppendEvent(runID, run.EventStep,
 		`{"kind":"output_schema_reask","label":"Re-asking — the answer didn't match the required format"}`)
 
-	resp, _, err := s.adapters.Invoke.Invoke(ctx, endpoint, body)
+	resp, _, err := s.adapters.Invoke.Invoke(withFreshRunCapability(ctx), endpoint, body)
 	if err != nil {
 		s.log.Info("run: the structured-output re-ask failed to invoke", "run", runID, "err", err.Error())
 		return "", false

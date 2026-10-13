@@ -17,27 +17,21 @@ limitations under the License.
 package controller
 
 import (
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
-)
-
-const (
-	// memoryDefaultAddr is the cluster-default Valkey address applied by the
-	// controller when spec.sessionMemory.backend.addr is omitted (specs/state-layer.md).
-	// Also reused as the default TENANT_QUOTA_ADDR (same operator-namespace Valkey).
-	memoryDefaultAddr = "ctxmesh-statelayer.ctxmesh.svc:6379"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // resolveMemory resolves an agent's session-memory config from the FOLDED
 // AgentDeployment.spec.sessionMemory field (ADR 0045). The standalone MemoryBinding
 // CRD was retired pre-GA (M127, ADR 0101) — its capability was a strict subset of
 // sessionMemory — so session memory is now authored ONLY via the spec field. Returns
-// the resolved backend addr + scope, and whether the agent has session memory at all.
-func resolveMemory(deploy *agentsv1alpha1.AgentDeployment) (addr, scope string, hasMemory bool) {
+// the resolved backend addr + scope, and whether the agent has session memory at all. Without
+// spec.sessionMemory.backend.addr the backend is the platform's state layer (specs/state-layer.md).
+func resolveMemory(deploy *agentsv1beta1.AgentDeployment, platform platformServices) (addr, scope string, hasMemory bool) {
 	sm := deploy.Spec.SessionMemory
 	if sm == nil {
 		return "", "", false
 	}
-	addr = memoryDefaultAddr
+	addr = platform.statelayerAddr()
 	if sm.Backend != nil && sm.Backend.Addr != "" {
 		addr = sm.Backend.Addr
 	}

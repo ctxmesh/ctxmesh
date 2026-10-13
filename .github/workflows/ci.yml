@@ -11,6 +11,7 @@
 #   py           — Py   (setup-python 3.9): make py-lint py-test
 #   ui           — Node (setup-node via ui/.nvmrc + corepack pnpm): eslint/tsc/vitest/build
 #   helm         — helm (no cluster): make helm-verify (no-drift) + helm-lint
+#   images       — docker: pulls every third-party image the chart renders, anonymously
 # e2e is owned by the agent-brain harness (ADR 0004): it checks out the
 # (private) brain with the fine-grained BRAIN_CHECKOUT_TOKEN secret and drives
 # `make -C harness tier2 SLICE=m2-gateway` on a kind cluster with Knative Serving.
@@ -136,9 +137,19 @@ jobs:
       # Go half of `make test` only (the py-test / ui-test halves are the py /
       # ui jobs). Reproduces the umbrella recipe: manifests+generate+fmt+vet,
       # then `go test ./... -coverprofile cover.out`.
+      # The run-store and credential-store suites skip without their own DSN, and CI set neither: 35
+      # internal/run tests and the fencing tests the durable worker rests on never ran here. Each gets
+      # its own database because the suites truncate their tables.
+      - name: Create the run-store and credential-store test databases
+        env:
+          PGPASSWORD: ctxmesh-ci
+        run: |
+          psql -h localhost -U postgres -c 'CREATE DATABASE ctxmesh_run' -c 'CREATE DATABASE ctxmesh_cred'
       - name: Go unit tests (manifests/generate/fmt/vet + go test)
         env:
           CONTROLPLANE_TEST_DSN: postgres://postgres:ctxmesh-ci@localhost:5432/ctxmesh?sslmode=disable
+          RUN_POSTGRES_TEST_DSN: postgres://postgres:ctxmesh-ci@localhost:5432/ctxmesh_run?sslmode=disable
+          CREDPOSTGRES_TEST_DSN: postgres://postgres:ctxmesh-ci@localhost:5432/ctxmesh_cred?sslmode=disable
         run: |
           make manifests generate fmt vet
           go test ./... -coverprofile cover.out
@@ -164,13 +175,13 @@ jobs:
       # the pinned venv from the provisioned python3 — deterministic in CI.
       - name: Python SDK lint + tests (ruff + pytest, pinned venv)
         run: make py-lint py-test
-  # The four plane-client SDKs (ADR 0139). Without this they are code nobody compiles: the
-  # contract gate proves each route STRING appears in them, which a comment satisfies.
+  # All six SDKs: each one's own tests, then the conformance suite, which drives every SDK through
+  # its public API against a real launcher built from this tree (make sdk-conformance).
   sdks:
     name: sdks
     needs: lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -216,8 +227,22 @@ jobs:
         run: |
           set -euo pipefail
           gem install minitest webrick --no-document
-          ruby -Ilib test/routes_test.rb
+          for t in test/*_test.rb; do ruby -Ilib "$t"; done
           gem build ctxmesh.gemspec
+
+      # The TypeScript SDK's own tests ran in no CI job before this step.
+      - name: TypeScript SDK (eslint + tsc + vitest)
+        run: make sdk-ts-lint sdk-ts-test
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      # The suite builds cmd/launcher and the root module's tools, which need the root Go version.
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: SDK conformance (one contract, six SDKs, a real launcher)
+        run: make sdk-conformance
 
   ui:
     name: ui
@@ -295,10 +320,15 @@ jobs:
         run: make helm-verify
       - name: helm lint
         run: make helm-lint
-      # CRD version-parity: conversion is None, so multi-version CRDs must keep matching
-      # top-level CEL validations across versions (audit FUNC-8).
+      # CRD version-parity: every CRD serves exactly one version, its storage version, and all
+      # CRDs serve the same one (ADR 0100). Conversion is None, so a second served version is a
+      # decision that must change this gate, never a regeneration side effect.
       - name: CRD version-parity gate
         run: make crd-version-parity
+      # AgentTeam and Workflow are frozen until the install path is green (ADR 0152): their generated
+      # CRDs must match hack/crd-freeze.sum, and changing one is a deliberate edit of that file.
+      - name: CRD freeze gate
+        run: make crd-frozen
       # M148 ✅ line: the install proof runs in CI so it cannot rot the way G7/G11 did.
       #
       # Every assertion is about the RENDER, so it needs no cluster and costs seconds —
@@ -312,12 +342,22 @@ jobs:
       # minutes exhausted once (m52.G3). Carded for M150.
       - name: Install-truth gate (the chart provisions what it consumes)
         run: ./hack/install-truth.sh
+      # The agents route reaches tenants' containers at agent hostnames, which the console's MCP
+      # consent page trusts as openers (ADR 0040 amendment), so the edge must sandbox what they
+      # return. Also lints deploy/edge, which nothing else did.
+      - name: Edge truth (the agents route is sandboxed)
+        run: ./hack/edge-truth.sh
       # M178 — an operator could not size ANY part of this install: 31 limits/requests blocks
       # hardcoded across the chart, none reachable from values, while the same templates read
       # .Values 219 times for everything else. The templates are fixed; this guards the NEXT
       # workload, which gets copied from an old one and quietly reopens the gap.
       - name: Chart resources are tunable (no baked-in limits)
         run: ./hack/chart-resources-tunable.sh
+      # Every image the chart renders comes from a value (a mirror or a private registry can move
+      # it), every third-party image is digest-pinned, and hack/third-party-images.txt records each
+      # one's licence. Render-only, no network.
+      - name: Image seams (no hardcoded image refs)
+        run: python3 hack/chart_images.py seamed
       # M149 m149.3 — least privilege, asserted on what we SHIP.
       #
       # M146's acceptance found ctxmesh-operator holding verbs:["*"] on agentdeployments,
@@ -397,6 +437,48 @@ jobs:
         run: ./hack/docs-images-published.sh
       - name: Registry-copy gate (no internal vocabulary on registry pages)
         run: ./hack/registry-copy.sh
+
+      # Claims about the shipped source that a string or a test name can hold, one table row each: the
+      # greps fifteen milestone acceptances used to run without touching a cluster. A rename, a deleted
+      # test or a reverted fix fails here, on the PR, instead of in a nightly. The docs-site rows read the
+      # checkout above; without it the gate fails rather than skipping.
+      - name: Shipped-truth gate (source claims from shipped milestones still hold)
+        env:
+          CTXMESH_SITE: ${{ github.workspace }}/ctxmesh.github.io
+        run: ./hack/shipped-truth.sh
+      # Every /api route the BFF serves has a caller in the console, an SDK or the platform, or a
+      # reasoned entry in hack/bff-route-callers.allow. Documented-only entries are checked against
+      # the docs checkout above, so the allowlist cannot claim a route the docs do not show.
+      - name: BFF route callers (no route without a caller)
+        env:
+          CTXMESH_SITE: ${{ github.workspace }}/ctxmesh.github.io
+        run: ./hack/bff-route-callers.sh
+
+  # Every third-party image the chart renders must pull anonymously. A digest pins the bytes, not
+  # their availability: the bundled MinIO was pinned when its vendor closed anonymous pulls, and the
+  # first sign was a stranger's failed install (ADR 0145). The nightly runs the same check, so an
+  # upstream that closes shows up without a commit.
+  images:
+    name: images
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.3
+      - name: Install PyYAML (the image lister parses the render)
+        run: python3 -m pip install --quiet pyyaml
+      - name: Pull every third-party image the chart renders, anonymously
+        run: ./hack/chart-images-pullable.sh
 
   envtest:
     name: envtest

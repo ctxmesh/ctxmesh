@@ -19,6 +19,7 @@ function installFetch(caps: {
   status?: number;
   body: unknown;
   namespaces?: { name: string }[];
+  agents?: unknown[];
 }) {
   vi.stubGlobal(
     "fetch",
@@ -36,6 +37,17 @@ function installFetch(caps: {
           ok: caps.ok,
           status: caps.status ?? (caps.ok ? 200 : 500),
           json: async () => caps.body,
+        } as Response);
+      }
+      // One agent, so the shell shows its whole nav rather than the first-run one.
+      if (url.startsWith("/api/agents?")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: caps.agents ?? [{ name: "a", namespace: "default" }],
+            nextCursor: "",
+          }),
         } as Response);
       }
       // The mounted surfaces fan out — answer everything benignly so the shell
@@ -114,7 +126,7 @@ describe("ShellCommandPalette (cmd-K in the production shell)", () => {
     expect(screen.getByRole("option", { name: /Home/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /Agents/ })).toBeInTheDocument();
     // With create allowed, the write surface IS offered (like the nav).
-    expect(screen.getByRole("option", { name: /Config builder/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Playground/ })).toBeInTheDocument();
     // The Sign out action is offered.
     expect(screen.getByRole("option", { name: /Sign out/ })).toBeInTheDocument();
   });
@@ -141,7 +153,7 @@ describe("ShellCommandPalette (cmd-K in the production shell)", () => {
     renderShell();
     // The nav omits write-only surfaces for a viewer (established shell contract).
     await waitFor(() =>
-      expect(screen.queryByRole("link", { name: /Config builder/ })).toBeNull(),
+      expect(screen.queryByRole("link", { name: /Playground/ })).toBeNull(),
     );
 
     pressCmdK();
@@ -149,8 +161,19 @@ describe("ShellCommandPalette (cmd-K in the production shell)", () => {
     // Read surface is still navigable…
     expect(screen.getByRole("option", { name: /^Agents/ })).toBeInTheDocument();
     // …but write-only surfaces are absent from the palette too (parity with nav).
-    expect(screen.queryByRole("option", { name: /Config builder/ })).toBeNull();
     expect(screen.queryByRole("option", { name: /Playground/ })).toBeNull();
+  });
+
+  it("still offers every page before the first agent, when the sidebar is short", async () => {
+    installFetch({ ...ALLOW_ALL, agents: [] });
+    renderShell();
+    await screen.findByTestId("nav-first-run-note");
+    expect(screen.queryByRole("link", { name: /Tenants/ })).toBeNull();
+
+    pressCmdK();
+    await screen.findByRole("dialog", { name: /command palette/i });
+    expect(screen.getByRole("option", { name: /Tenants/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Runs/ })).toBeInTheDocument();
   });
 
   it("runs the shell logout when Sign out is selected", async () => {
@@ -208,7 +231,6 @@ describe("buildCommands (RBAC + namespace sub-commands)", () => {
     });
     const labels = cmds.map((c) => c.label);
     expect(labels).toContain("Agents");
-    expect(labels).not.toContain("Config builder");
     expect(labels).not.toContain("Playground");
   });
 

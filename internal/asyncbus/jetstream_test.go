@@ -19,7 +19,10 @@ package asyncbus_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
 )
 
 // startEmbeddedJetStream runs a real nats-server with JetStream on a FILE store under t.TempDir().
@@ -322,4 +326,237 @@ func TestSubscribe_LeavesNothingUnacked(t *testing.T) {
 		return iErr == nil && info.NumAckPending == 0
 	}, 10*time.Second, 50*time.Millisecond,
 		"the message was never acked — Subscribe left it outstanding, so it will redeliver forever")
+}
+
+// consumerInfo reads a durable's state from the server, as KEDA's nats-jetstream scaler does.
+func consumerInfo(t *testing.T, url, durable string) (*jetstream.ConsumerInfo, error) {
+	t.Helper()
+	nc, err := nats.Connect(url)
+	require.NoError(t, err)
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	cons, err := js.Consumer(context.Background(), "CTXMESH_A2A", durable)
+	if err != nil {
+		return nil, err
+	}
+	return cons.Info(context.Background())
+}
+
+// lag is what KEDA's nats-jetstream scaler scales on: the hops a durable has not had acknowledged,
+// delivered or not.
+func lag(t *testing.T, url, durable string) int {
+	t.Helper()
+	info, err := consumerInfo(t, url, durable)
+	require.NoError(t, err)
+	return int(info.NumPending) + info.NumAckPending
+}
+
+// ensureDurable starts a consumer and stops it once the server holds its durable, as the dispatcher does
+// for every registry member before any hop is sent to it.
+func ensureDurable(t *testing.T, bus *asyncbus.JetStreamBus, url, subject, durable string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- bus.Subscribe(ctx, subject, durable, func(context.Context, asyncbus.Message) error { return nil })
+	}()
+	require.Eventually(t, func() bool { _, err := consumerInfo(t, url, durable); return err == nil },
+		10*time.Second, 20*time.Millisecond, "the durable %s was never created", durable)
+	cancel()
+	require.NoError(t, <-done)
+}
+
+// An agent's durable counts the hops waiting for that agent and for no other: the number a queue-depth
+// AgentScalingPolicy scales the agent on. A hop that was refused stays counted until it is delivered, so
+// an agent scaled to zero, whose hops fail to deliver, is still seen to have work waiting.
+func TestJetStream_AnAgentsQueueCountsOnlyItsOwnHops(t *testing.T) {
+	url := startEmbeddedJetStream(t)
+	bus := newBus(t, url)
+	worker, other := jsname.AgentDurable("team-ns", "worker"), jsname.AgentDurable("team-ns", "other")
+	ensureDurable(t, bus, url, jsname.AgentFilter("team-ns", "worker"), worker)
+	ensureDurable(t, bus, url, jsname.AgentFilter("team-ns", "other"), other)
+	require.Zero(t, lag(t, url, worker), "nothing is waiting yet")
+
+	for _, id := range []string{"w-1", "w-2", "w-3"} {
+		require.NoError(t, bus.Publish(context.Background(), hop(id, jsname.AgentSubject("reg-a", "team-ns", "worker"), `{}`)))
+	}
+	for _, id := range []string{"o-1", "o-2"} {
+		require.NoError(t, bus.Publish(context.Background(), hop(id, jsname.AgentSubject("reg-a", "team-ns", "other"), `{}`)))
+	}
+	// The same agent name in another namespace is another agent.
+	require.NoError(t, bus.Publish(context.Background(), hop("x-1", jsname.AgentSubject("reg-a", "elsewhere", "worker"), `{}`)))
+
+	require.Eventually(t, func() bool { return lag(t, url, worker) == 3 }, 10*time.Second, 50*time.Millisecond,
+		"the worker's queue holds the worker's hops")
+	assert.Equal(t, 2, lag(t, url, other), "and the other agent's queue only its own")
+
+	refusing := newCollector(3)
+	refusing.fail = errors.New("no replica is running")
+	consume(t, bus, jsname.AgentFilter("team-ns", "worker"), worker, refusing, 2*time.Second)
+	require.Positive(t, refusing.attempts(), "the hops were delivered and refused")
+	assert.Equal(t, 3, lag(t, url, worker), "refused hops are still waiting")
+
+	accepting := newCollector(3)
+	require.True(t, consume(t, bus, jsname.AgentFilter("team-ns", "worker"), worker, accepting, 30*time.Second))
+	require.Eventually(t, func() bool { return lag(t, url, worker) == 0 }, 10*time.Second, 50*time.Millisecond,
+		"once delivered, the worker's queue drains")
+	assert.Equal(t, 2, lag(t, url, other), "draining one agent's queue leaves another's alone")
+}
+
+// The durable that consumed every registry's hops before they were addressed to an agent is narrowed to
+// the registry-only subjects: it still drains a hop published that way, and never sees an agent-addressed
+// one, which the agent's own durable delivers. Without the narrowing every hop would be delivered twice.
+func TestJetStream_TheRegistryDurableDrainsOnlyRegistryOnlySubjects(t *testing.T) {
+	url := startEmbeddedJetStream(t)
+	bus := newBus(t, url)
+	const durable = "dispatcher-legacy"
+
+	// The durable as an earlier dispatcher created it: filtered on everything, with a BackOff.
+	nc, err := nats.Connect(url)
+	require.NoError(t, err)
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	_, err = js.CreateOrUpdateConsumer(context.Background(), "CTXMESH_A2A", jetstream.ConsumerConfig{
+		Durable: durable, FilterSubject: "ctxmesh.a2a.>", AckPolicy: jetstream.AckExplicitPolicy,
+		AckWait: 5 * time.Second, MaxDeliver: 5, DeliverPolicy: jetstream.DeliverAllPolicy,
+		BackOff: []time.Duration{5 * time.Second, 15 * time.Second, 60 * time.Second, 300 * time.Second},
+	})
+	require.NoError(t, err)
+	require.NoError(t, bus.Publish(context.Background(), hop("old-1", asyncbus.Subject("reg-a"), `{}`)))
+	require.NoError(t, bus.Publish(context.Background(), hop("new-1", jsname.AgentSubject("reg-a", "team-ns", "worker"), `{}`)))
+
+	c := newCollector(1)
+	require.True(t, consume(t, bus, jsname.RegistrySubjects, durable, c, 20*time.Second))
+	require.Len(t, c.messages(), 1)
+	assert.Equal(t, "old-1", c.messages()[0].ID, "a hop published on the registry-only subject is still delivered")
+
+	info, err := consumerInfo(t, url, durable)
+	require.NoError(t, err)
+	assert.Equal(t, jsname.RegistrySubjects, info.Config.FilterSubject, "the durable's filter moved")
+	assert.Empty(t, info.Config.BackOff, "its BackOff is gone, so its ack wait is the full AckWait")
+	assert.Equal(t, asyncbus.AckWait, info.Config.AckWait)
+	require.Eventually(t, func() bool { return lag(t, url, durable) == 0 }, 10*time.Second, 50*time.Millisecond,
+		"the agent-addressed hop is not waiting for the registry durable")
+
+	agent := newCollector(1)
+	require.True(t, consume(t, bus, jsname.AgentFilter("team-ns", "worker"), jsname.AgentDurable("team-ns", "worker"),
+		agent, 20*time.Second))
+	assert.Equal(t, "new-1", agent.messages()[0].ID, "the agent's own durable delivers it")
+}
+
+// A durable nothing consumes is removed by the broker after twice the stream's retention, so the queue of
+// an agent that is gone does not outlive it forever; at that age every message it could have held has
+// expired, so a durable created again later delivers nothing twice.
+func TestSubscribe_DurableExpiresAfterTwiceTheRetention(t *testing.T) {
+	url := startEmbeddedJetStream(t)
+	for maxAge, want := range map[time.Duration]time.Duration{0: 48 * time.Hour, time.Hour: 2 * time.Hour} {
+		bus, err := asyncbus.NewJetStream(context.Background(), asyncbus.JetStreamOptions{URL: url, MaxAge: maxAge})
+		require.NoError(t, err)
+		durable := fmt.Sprintf("expiring-%s", want)
+		ensureDurable(t, bus, url, jsname.AgentFilter("team-ns", "worker"), durable)
+		info, err := consumerInfo(t, url, durable)
+		require.NoError(t, err)
+		assert.Equal(t, want, info.Config.InactiveThreshold)
+		require.NoError(t, bus.Close())
+	}
+}
+
+// A hop whose handler takes longer than the old first backoff step is delivered once. With a BackOff the
+// broker took 5s as the ack wait of every first delivery and redelivered a slower hop while it was still
+// being worked on; an agent's run usually takes longer than that.
+func TestSubscribe_ASlowHandlerIsDeliveredOnce(t *testing.T) {
+	bus := newBus(t, startEmbeddedJetStream(t))
+	subject := jsname.AgentSubject("reg-a", "team-ns", "slow")
+	require.NoError(t, bus.Publish(context.Background(), hop("slow-1", subject, `{}`)))
+
+	var calls atomic.Int32
+	finished := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- bus.Subscribe(ctx, jsname.AgentFilter("team-ns", "slow"), jsname.AgentDurable("team-ns", "slow"),
+			func(context.Context, asyncbus.Message) error {
+				if calls.Add(1) == 1 {
+					time.Sleep(8 * time.Second)
+					close(finished)
+				}
+				return nil
+			})
+	}()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the slow hop was never handled")
+	}
+	time.Sleep(2 * time.Second) // a redelivery queued during the slow run would arrive now
+	cancel()
+	require.NoError(t, <-done)
+	assert.Equal(t, int32(1), calls.Load(), "a hop still being handled is not delivered again")
+}
+
+// One durable hands up to MaxInFlight hops to its handler at once, and never more: the broker is held to
+// the same bound, so no hop waits unhandled while its ack wait runs.
+func TestSubscribe_HandlesUpToMaxInFlightAtOnce(t *testing.T) {
+	url := startEmbeddedJetStream(t)
+	const limit = 3
+	bus, err := asyncbus.NewJetStream(context.Background(), asyncbus.JetStreamOptions{URL: url, MaxInFlight: limit})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bus.Close() })
+	subject, durable := jsname.AgentSubject("reg-a", "team-ns", "busy"), jsname.AgentDurable("team-ns", "busy")
+	for i := range 7 {
+		require.NoError(t, bus.Publish(context.Background(), hop(fmt.Sprintf("busy-%d", i), subject, `{}`)))
+	}
+
+	var running, most, handled atomic.Int32
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- bus.Subscribe(ctx, jsname.AgentFilter("team-ns", "busy"), durable,
+			func(context.Context, asyncbus.Message) error {
+				now := running.Add(1)
+				for seen := most.Load(); now > seen && !most.CompareAndSwap(seen, now); seen = most.Load() {
+				}
+				<-release
+				running.Add(-1)
+				handled.Add(1)
+				return nil
+			})
+	}()
+
+	require.Eventually(t, func() bool { return running.Load() == limit }, 10*time.Second, 10*time.Millisecond,
+		"hops to one agent are handled concurrently")
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, int32(limit), running.Load(), "and no more than the limit at once")
+	info, err := consumerInfo(t, url, durable)
+	require.NoError(t, err)
+	assert.Equal(t, limit, info.Config.MaxAckPending)
+	assert.LessOrEqual(t, info.NumAckPending, limit, "the broker has no more outstanding than there are handlers")
+
+	close(release)
+	require.Eventually(t, func() bool { return handled.Load() == 7 }, 10*time.Second, 10*time.Millisecond)
+	cancel()
+	require.NoError(t, <-done)
+	assert.Equal(t, int32(limit), most.Load())
+}
+
+// A subject too long for the NATS protocol's control line is refused before it is sent. Sent, it would make
+// the server close the connection for good, and every publish and consumer after it would fail until the
+// process restarted.
+func TestJetStream_AnOversizedSubjectIsRefusedAndTheConnectionSurvives(t *testing.T) {
+	bus := newBus(t, startEmbeddedJetStream(t))
+
+	long := jsname.AgentSubject("reg-a", "team-ns", strings.Repeat("a", 4100))
+	require.Error(t, bus.Publish(context.Background(), hop("too-long", long, `{}`)))
+
+	subject := jsname.AgentSubject("reg-a", "team-ns", "worker")
+	require.NoError(t, bus.Publish(context.Background(), hop("after", subject, `{}`)),
+		"the connection is still usable")
+	require.NoError(t, bus.Err())
+	c := newCollector(1)
+	require.True(t, consume(t, bus, jsname.AgentFilter("team-ns", "worker"), jsname.AgentDurable("team-ns", "worker"), c,
+		20*time.Second))
+	assert.Equal(t, "after", c.messages()[0].ID)
 }

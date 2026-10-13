@@ -22,7 +22,7 @@ profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
 {{- fail "\n\nprofile=production requires bff.runStore.worker.minReplicaCount>=2 — a WARM worker\npool (avoid a scale-from-0 cold start on an interactive run; a drain never zeroes the\npool, ADR 0051 Fork-C).\n" }}
 {{- end }}
 {{- if .Values.devDataPlane.enabled }}
-{{- fail "\n\nprofile=production forbids devDataPlane.enabled — the bundled in-cluster Valkey +\nMinIO use DETERMINISTIC dev credentials (PRD §23). Point at an externally-managed,\nHA data plane instead (devDataPlane.enabled=false).\n" }}
+{{- fail "\n\nprofile=production forbids devDataPlane.enabled — the bundled in-cluster data plane\n(Postgres, Valkey, SeaweedFS, NATS) uses DETERMINISTIC dev credentials (PRD §23). Point at an externally-managed,\nHA data plane instead (devDataPlane.enabled=false).\n" }}
 {{- end }}
 {{- /* M148/ADR 0130: the same shape as the statelayer guard below, for the database.
    With devDataPlane disabled (required above) the bundled Postgres is NOT rendered, so
@@ -63,17 +63,15 @@ profile). Closes m52.D2 (the proxy-HA render guard) and generalizes it.
 {{- end }}
 {{- /* SEC-4: MCP per-user grant Secrets (3rd-party OAuth tokens) must live in a LOCKED,
    dedicated namespace — else they land in the agent's OWN namespace where a tenant can
-   read another user's grant tokens (internal/bff/server.go). Helm can't inspect the
-   operator-provisioned bff-adapters Secret, so it can't verify MCP_GRANT_HMAC_KEY / the
-   capability seed here (unsalted identity hashes without the HMAC key) — those are
-   documented as required alongside CONTROLPLANE_DSN; the enforceable, highest-risk knob is
-   the credential namespace. */ -}}
+   read another user's grant tokens (internal/bff/server.go). The grant HMAC key is required
+   as a value or a named Secret; Helm cannot see inside an operator's Secret, so it checks
+   that one is named, not what it holds. */ -}}
 {{- if .Values.bff.mcp.enabled }}
-{{- if not .Values.bff.mcp.grantHmacKey }}
-{{- fail "\n\nprofile=production with bff.mcp.enabled requires bff.mcp.grantHmacKey — without it MCP grant\nidentity hashes are UNSALTED SHA-256 and therefore enumerable: a known username hashes to a\nknown value, so anyone who can read the grant Secrets can identify users without reading a\ntoken (ADR 0029 §7). Set a per-cluster random value; changing it later re-keys grants and\nrequires re-consent, so choose it once. (M150 m150.2 — the audit found this enforced by\nnothing but a start-up warning.)\n" }}
+{{- if not (or .Values.bff.mcp.grantHmacKey .Values.bff.mcp.grantHmacKeySecret) }}
+{{- fail "\n\nprofile=production with bff.mcp.enabled requires bff.mcp.grantHmacKeySecret (a Secret holding\nMCP_GRANT_HMAC_KEY) or bff.mcp.grantHmacKey — without it MCP grant\nidentity hashes are UNSALTED SHA-256 and therefore enumerable: a known username hashes to a\nknown value, so anyone who can read the grant Secrets can identify users without reading a\ntoken (ADR 0029 §7). Set a per-cluster random value; changing it later re-keys grants and\nrequires re-consent, so choose it once. (M150 m150.2 — the audit found this enforced by\nnothing but a start-up warning.)\n" }}
 {{- end }}
 {{- if not .Values.bff.mcp.credentialNamespace }}
-{{- fail "\n\nprofile=production with bff.mcp.enabled requires bff.mcp.credentialNamespace — else per-user\nMCP grant Secrets (3rd-party OAuth tokens) are stored in the AGENT's own namespace, where a\ntenant CAN read another user's grant tokens (ADR 0029 §7). Set a locked, dedicated\ncredential namespace; also provision MCP_GRANT_HMAC_KEY + the capability seed in the\nbff-adapters Secret (unsalted identity hashes + disabled capability minting otherwise).\n" }}
+{{- fail "\n\nprofile=production with bff.mcp.enabled requires bff.mcp.credentialNamespace — else per-user\nMCP grant Secrets (3rd-party OAuth tokens) are stored in the AGENT's own namespace, where a\ntenant CAN read another user's grant tokens (ADR 0029 §7). Set a locked, dedicated\ncredential namespace.\n" }}
 {{- end }}
 {{- end }}
 {{- /* GA Gate A (ADR 0096) → M134: make a reduced security posture LOUD, not silent. The tenant-label

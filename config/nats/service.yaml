@@ -1,6 +1,6 @@
 # ClusterIP Service for the bundled dev NATS. The BFF reaches it at
 # nats://ctxmesh-nats.ctxmesh.svc:4222 — the bff.natsURL an operator sets
-# alongside bff.asyncBackend=nats (M148/m148.5).
+# alongside bff.asyncBackend=jetstream (the only backend the BFF accepts).
 apiVersion: v1
 kind: Service
 metadata:

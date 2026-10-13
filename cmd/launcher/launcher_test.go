@@ -362,7 +362,6 @@ func TestBuildChildEnv(t *testing.T) {
 			"OBJECT_STORE_SECRET_KEY=minio-secret",
 			"LANGFUSE_SCORES_PUBLIC_KEY=pk-abc",
 			"LANGFUSE_SCORES_SECRET_KEY=sk-abc",
-			"LANGFUSE_OTLP_AUTH=Basic Zm9vOmJhcg==",
 			"STATELAYER_TOKEN_PATH=/var/run/secrets/statelayer/token",
 			// kept: the agent's own vars + SDK markers + non-secret platform config
 			"MY_APP_API_KEY=user-owned", // user spec.env — must survive (their app needs it)
@@ -376,7 +375,7 @@ func TestBuildChildEnv(t *testing.T) {
 		for _, scrubbed := range []string{
 			"OBJECT_STORE_ACCESS_KEY=minio-access", "OBJECT_STORE_SECRET_KEY=minio-secret",
 			"LANGFUSE_SCORES_PUBLIC_KEY=pk-abc", "LANGFUSE_SCORES_SECRET_KEY=sk-abc",
-			"LANGFUSE_OTLP_AUTH=Basic Zm9vOmJhcg==", "STATELAYER_TOKEN_PATH=/var/run/secrets/statelayer/token",
+			"STATELAYER_TOKEN_PATH=/var/run/secrets/statelayer/token",
 		} {
 			assertEnvNotContains(t, got, scrubbed)
 		}

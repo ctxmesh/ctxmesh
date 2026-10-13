@@ -10,8 +10,9 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { api, ApiError } from "@/lib/api";
-import type { TopologyGroup, TopologyNode, TopologyResponse } from "@/lib/api";
+import { api } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
+import type { TopologyGroup, TopologyNode } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import {
@@ -74,11 +75,6 @@ import { cn } from "@/lib/utils";
 // ---------------------------------------------------------------------------
 
 type ViewMode = "graph" | "list";
-type LoadState =
-  | { kind: "loading" }
-  | { kind: "error"; message: string; forbidden: boolean }
-  | { kind: "ready"; data: TopologyResponse };
-
 type Health = TopologyNode["health"];
 
 // ---------------------------------------------------------------------------
@@ -527,7 +523,6 @@ export function TopologyPage() {
   const { namespace } = useNamespace();
   const { can } = useCapabilities();
   const canCreate = can(RES_AGENTS, "create");
-  const [state, setState] = React.useState<LoadState>({ kind: "loading" });
   const [view, setView] = React.useState<ViewMode>("graph");
   const [searchInput, setSearchInput] = React.useState("");
   const [expandedGroups, setExpandedGroups] = React.useState<Set<string>>(new Set());
@@ -558,36 +553,20 @@ export function TopologyPage() {
   }
 
   // Fetch topology on q or expandedGroups change
-  const load = React.useCallback(() => {
-    const controller = new AbortController();
-    setState({ kind: "loading" });
-    api
-      .topology(
+  const fetchTopology = React.useCallback(
+    (signal: AbortSignal) =>
+      api.topology(
         {
           group: "registry",
           q: q || undefined,
           expand: expandedGroups.size > 0 ? Array.from(expandedGroups) : undefined,
           namespace: namespace || undefined,
         },
-        controller.signal,
-      )
-      .then((data) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", data });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const apiErr = err instanceof ApiError ? err : null;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "couldn't load topology",
-          forbidden: apiErr?.isForbidden ?? false,
-        });
-      });
-    return () => controller.abort();
-  }, [q, expandedGroups, namespace]);
-
-  React.useEffect(() => load(), [load]);
+        signal,
+      ),
+    [q, expandedGroups, namespace],
+  );
+  const { state, reload: load } = useLoad(fetchTopology);
 
   // Sync q to URL search params for shareable links
   React.useEffect(() => {

@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // agentScalingPolicyKind is the CRD kind name for an AgentScalingPolicy (used in
@@ -190,8 +190,8 @@ type AgentScalingPolicyUpdateRequest struct {
 // listAgentScalingPoliciesForCRUD lists AgentScalingPolicies via the caller-scoped
 // client (CRUD surface — distinct from the topology/delete helper
 // listAgentScalingPolicies in agents_delete.go, which accepts the AgentReader interface).
-func listAgentScalingPoliciesForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1alpha1.AgentScalingPolicyList, error) {
-	var out agentsv1alpha1.AgentScalingPolicyList
+func listAgentScalingPoliciesForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1beta1.AgentScalingPolicyList, error) {
+	var out agentsv1beta1.AgentScalingPolicyList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -202,7 +202,7 @@ func listAgentScalingPoliciesForCRUD(ctx context.Context, r client.Client, opts 
 
 // newAgentScalingPolicySummary projects an AgentScalingPolicy onto the compact
 // list DTO.
-func newAgentScalingPolicySummary(p *agentsv1alpha1.AgentScalingPolicy) AgentScalingPolicySummary {
+func newAgentScalingPolicySummary(p *agentsv1beta1.AgentScalingPolicy) AgentScalingPolicySummary {
 	ready, phase := phaseFromConditions(p.Status.Conditions)
 	return AgentScalingPolicySummary{
 		Name:      p.Name,
@@ -218,7 +218,7 @@ func newAgentScalingPolicySummary(p *agentsv1alpha1.AgentScalingPolicy) AgentSca
 
 // newAgentScalingPolicyDetail projects an AgentScalingPolicy onto the full detail
 // DTO, including the controller-owned backend field from status.
-func newAgentScalingPolicyDetail(p *agentsv1alpha1.AgentScalingPolicy) AgentScalingPolicyDetail {
+func newAgentScalingPolicyDetail(p *agentsv1beta1.AgentScalingPolicy) AgentScalingPolicyDetail {
 	ready, phase := phaseFromConditions(p.Status.Conditions)
 	d := AgentScalingPolicyDetail{
 		Name:      p.Name,
@@ -276,17 +276,17 @@ func classifyAgentScalingPolicyWriteError(err error, kind, name string) (status 
 }
 
 // buildAgentScalingPolicySpec converts a create/update request to a spec.
-func buildAgentScalingPolicySpec(agentRef, trigger string, min, max int32, cooldown, schedule string, queueRef *QueueRefDTO, metric *CustomMetricRefDTO) (agentsv1alpha1.AgentScalingPolicySpec, error) {
+func buildAgentScalingPolicySpec(agentRef, trigger string, min, max int32, cooldown, schedule string, queueRef *QueueRefDTO, metric *CustomMetricRefDTO) (agentsv1beta1.AgentScalingPolicySpec, error) {
 	if strings.TrimSpace(agentRef) == "" {
-		return agentsv1alpha1.AgentScalingPolicySpec{}, fmt.Errorf("agentRef is required")
+		return agentsv1beta1.AgentScalingPolicySpec{}, fmt.Errorf("agentRef is required")
 	}
 	if strings.TrimSpace(trigger) == "" {
-		return agentsv1alpha1.AgentScalingPolicySpec{}, fmt.Errorf("trigger is required")
+		return agentsv1beta1.AgentScalingPolicySpec{}, fmt.Errorf("trigger is required")
 	}
 	// Do NOT re-implement max>=min or schedule-required: let the API server's
 	// CRD XValidations enforce these. The BFF surfaces their rejection as honest
 	// 422 via classifyAgentScalingPolicyWriteError.
-	spec := agentsv1alpha1.AgentScalingPolicySpec{
+	spec := agentsv1beta1.AgentScalingPolicySpec{
 		AgentRef: strings.TrimSpace(agentRef),
 		Trigger:  strings.TrimSpace(trigger),
 		Min:      min,
@@ -295,13 +295,13 @@ func buildAgentScalingPolicySpec(agentRef, trigger string, min, max int32, coold
 		Schedule: schedule,
 	}
 	if queueRef != nil {
-		spec.QueueRef = &agentsv1alpha1.QueueRef{
+		spec.QueueRef = &agentsv1beta1.QueueRef{
 			Name:      queueRef.Name,
 			Namespace: queueRef.Namespace,
 		}
 	}
 	if metric != nil {
-		spec.Metric = &agentsv1alpha1.CustomMetricRef{
+		spec.Metric = &agentsv1beta1.CustomMetricRef{
 			Class:  metric.Class,
 			Metric: metric.Metric,
 		}
@@ -340,7 +340,7 @@ func (s *Server) handleListAgentScalingPolicies(w http.ResponseWriter, r *http.R
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listAgentScalingPoliciesForCRUD(r.Context(), caller, opts...)
+	list, err := listAgentScalingPoliciesForCRUD(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -384,7 +384,7 @@ func (s *Server) handleGetAgentScalingPolicy(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var p agentsv1alpha1.AgentScalingPolicy
+	var p agentsv1beta1.AgentScalingPolicy
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &p); err != nil {
 		s.writeGetError(w, err, "agent scaling policy")
 		return
@@ -437,7 +437,7 @@ func (s *Server) handleCreateAgentScalingPolicy(w http.ResponseWriter, r *http.R
 		ns = defaultCreateNamespace
 	}
 
-	p := &agentsv1alpha1.AgentScalingPolicy{
+	p := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      strings.TrimSpace(req.Name),
 			Namespace: ns,
@@ -519,7 +519,7 @@ func (s *Server) handleUpdateAgentScalingPolicy(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	apply := &agentsv1alpha1.AgentScalingPolicy{
+	apply := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -546,7 +546,7 @@ func (s *Server) handleUpdateAgentScalingPolicy(w http.ResponseWriter, r *http.R
 	}
 
 	// Re-read the live object so the response reflects what the API server persisted.
-	var live agentsv1alpha1.AgentScalingPolicy
+	var live agentsv1beta1.AgentScalingPolicy
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		s.log.Error(err, "re-read AgentScalingPolicy after apply failed", "name", name, "namespace", ns)
 		writeError(w, http.StatusInternalServerError, "agent scaling policy updated but could not be re-read")
@@ -579,7 +579,7 @@ func (s *Server) handleDeleteAgentScalingPolicy(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	p := &agentsv1alpha1.AgentScalingPolicy{
+	p := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), p); err != nil {

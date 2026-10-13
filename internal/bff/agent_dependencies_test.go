@@ -1,0 +1,583 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package bff
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+)
+
+func cond(typ string, status metav1.ConditionStatus, reason, msg string) metav1.Condition {
+	c := readyCondition(status, reason, msg)
+	c.Type = typ
+	return c
+}
+
+// depsAgent references one of everything the Bindings panel lists.
+func depsAgent() *agentsv1beta1.AgentDeployment {
+	return &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
+		Spec: agentsv1beta1.AgentDeploymentSpec{
+			Image:              "img:1",
+			Env:                []corev1.EnvVar{{Name: "MODEL_ROUTE", Value: "chat"}},
+			GuardrailPolicyRef: "pii",
+			KnowledgeBases: []agentsv1beta1.KnowledgeBaseRef{
+				{Name: "handbook", AutoInject: true},
+			},
+			SessionMemory:  &agentsv1beta1.SessionMemorySpec{Scope: "session", PerUser: true},
+			LongTermMemory: &agentsv1beta1.LongTermMemorySpec{Enabled: true, EmbeddingRoute: "embed"},
+			Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{
+				Default:   "allow",
+				Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "refund", Rule: "require-approval"}, {Name: "search", Rule: "allow"}},
+				Approvers: []agentsv1beta1.Approver{{Kind: "Group", Name: "finance"}},
+			}},
+			Feedback: &agentsv1beta1.FeedbackSpec{
+				Human:    &agentsv1beta1.HumanSource{Scores: []agentsv1beta1.ScoreDecl{{Name: "thumbs"}, {Name: "accuracy"}}},
+				External: []agentsv1beta1.ExternalSource{{Name: "csat-webhook", Score: agentsv1beta1.ScoreDecl{Name: "csat"}}},
+			},
+		},
+	}
+}
+
+func servedRoute(secretRef string) *agentsv1beta1.ModelRoute {
+	return &agentsv1beta1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "chat", Namespace: detailNS},
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
+			{Provider: "openai", Model: "gpt", Priority: 1, SecretBindingRef: secretRef},
+			{Provider: "openai", Model: "gpt-mini", Priority: 2, SecretBindingRef: secretRef},
+		}},
+		Status: agentsv1beta1.ModelRouteStatus{Conditions: []metav1.Condition{
+			readyCondition(metav1.ConditionTrue, "Served", "the gateway serves this route"),
+		}},
+	}
+}
+
+func depsByKind(t *testing.T, got []AgentDependency, kind string) []AgentDependency {
+	t.Helper()
+	var out []AgentDependency
+	for _, d := range got {
+		if d.Kind == kind {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+func detailDeps(t *testing.T, c client.Client) []AgentDependency {
+	t.Helper()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+	rec := getDetail(t, s, "echo")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got AgentDetailResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.NotNil(t, got.Dependencies)
+	return got.Dependencies
+}
+
+// TestAgentDependenciesResolved proves every kind the panel lists is resolved as the caller: the route
+// and its (deduplicated) secret binding, the guardrail, the tool binding, the knowledge base, and the
+// spec-only memory, approval and feedback declarations.
+func TestAgentDependenciesResolved(t *testing.T) {
+	sb := &agentsv1beta1.SecretBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai-key", Namespace: detailNS},
+		Spec:       agentsv1beta1.SecretBindingSpec{SecretRef: agentsv1beta1.SecretKeyRef{Name: "openai", Key: "api-key"}},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: detailNS},
+		Data:       map[string][]byte{"api-key": []byte("x")},
+	}
+	gp := &agentsv1beta1.GuardrailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "pii", Namespace: detailNS},
+		Status: agentsv1beta1.GuardrailPolicyStatus{Conditions: []metav1.Condition{
+			cond("Validated", metav1.ConditionTrue, "AllPatternsCompile", ""),
+		}},
+	}
+	tb := &agentsv1beta1.MCPToolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: detailNS},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "crm", Mode: "remote"},
+		Status:     agentsv1beta1.MCPToolBindingStatus{Conditions: []metav1.Condition{readyCondition(metav1.ConditionTrue, "Bound", "ok")}},
+	}
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: "handbook", Namespace: detailNS},
+		Status:     agentsv1beta1.KnowledgeBaseStatus{Phase: "Ready"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(depsAgent(), servedRoute("openai-key"), sb, secret, gp, tb, kb).Build()
+
+	got := detailDeps(t, c)
+
+	route := depsByKind(t, got, depKindModelRoute)
+	require.Len(t, route, 1)
+	assert.Equal(t, "chat", route[0].Name)
+	assert.Equal(t, depReady, route[0].State)
+	assert.Equal(t, "Served", route[0].Reason)
+
+	secrets := depsByKind(t, got, depKindSecretBinding)
+	require.Len(t, secrets, 1, "two providers naming one binding is one dependency")
+	assert.Equal(t, depReady, secrets[0].State)
+	assert.Equal(t, "chat", secrets[0].Via)
+
+	guard := depsByKind(t, got, depKindGuardrailPolicy)
+	require.Len(t, guard, 1)
+	assert.Equal(t, depReady, guard[0].State)
+
+	tools := depsByKind(t, got, depKindToolBinding)
+	require.Len(t, tools, 1)
+	assert.Equal(t, "echo-search", tools[0].Name)
+	assert.Equal(t, "search", tools[0].Detail)
+	assert.Equal(t, "crm", tools[0].Via)
+	assert.Equal(t, depReady, tools[0].State)
+
+	kbs := depsByKind(t, got, depKindKnowledgeBase)
+	require.Len(t, kbs, 1)
+	assert.Equal(t, depReady, kbs[0].State)
+	assert.Equal(t, "auto-inject", kbs[0].Detail)
+
+	session := depsByKind(t, got, depKindSessionMemory)
+	require.Len(t, session, 1)
+	assert.Equal(t, "session", session[0].Name)
+	assert.Equal(t, "per user", session[0].Detail)
+	assert.Equal(t, depDeclared, session[0].State)
+	longTerm := depsByKind(t, got, depKindLongTermMemory)
+	require.Len(t, longTerm, 1)
+	assert.Contains(t, longTerm[0].Detail, "embed")
+
+	rules := depsByKind(t, got, depKindApprovalRule)
+	require.Len(t, rules, 1, "only require-approval rules are approval rules")
+	assert.Equal(t, "refund", rules[0].Name)
+	approvers := depsByKind(t, got, depKindApprover)
+	require.Len(t, approvers, 1)
+	assert.Equal(t, "finance", approvers[0].Name)
+	assert.Equal(t, "Group", approvers[0].Detail)
+
+	feedback := depsByKind(t, got, depKindFeedbackSource)
+	require.Len(t, feedback, 2)
+	assert.Equal(t, "human", feedback[0].Name)
+	assert.Equal(t, "thumbs, accuracy", feedback[0].Detail)
+	assert.Equal(t, "csat-webhook", feedback[1].Name)
+	assert.Equal(t, "csat", feedback[1].Detail)
+	assert.Contains(t, feedback[0].Message, "Enforce")
+}
+
+// TestAgentDependenciesMissingAreListed proves a reference that does not resolve is listed as missing,
+// with the reason, rather than dropped.
+func TestAgentDependenciesMissingAreListed(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(depsAgent()).Build()
+
+	got := detailDeps(t, c)
+
+	for _, kind := range []string{depKindModelRoute, depKindGuardrailPolicy, depKindKnowledgeBase} {
+		ds := depsByKind(t, got, kind)
+		require.Len(t, ds, 1, kind)
+		assert.Equal(t, depMissing, ds[0].State, kind)
+		assert.NotEmpty(t, ds[0].Reason, kind)
+		assert.NotEmpty(t, ds[0].Message, kind)
+	}
+	assert.Equal(t, "GuardrailPolicyNotFound", depsByKind(t, got, depKindGuardrailPolicy)[0].Reason)
+	assert.Empty(t, depsByKind(t, got, depKindSecretBinding), "an unreadable route names no secret bindings")
+	assert.Empty(t, depsByKind(t, got, depKindToolBinding), "no binding targets the agent")
+}
+
+// TestAgentDependenciesNotReadyCarryTheConditionsWords proves a found-but-not-ready reference carries
+// its own condition's reason and message.
+func TestAgentDependenciesNotReadyCarryTheConditionsWords(t *testing.T) {
+	route := servedRoute("missing-binding")
+	route.Status.Conditions = []metav1.Condition{
+		readyCondition(metav1.ConditionFalse, "NotYetServed", "route rendered; the gateway has not started serving it yet"),
+	}
+	gp := &agentsv1beta1.GuardrailPolicy{
+		ObjectMeta: metav1.ObjectMeta{Name: "pii", Namespace: detailNS},
+		Status: agentsv1beta1.GuardrailPolicyStatus{Conditions: []metav1.Condition{
+			cond("Validated", metav1.ConditionFalse, "InvalidPattern", "pattern 0 does not compile"),
+		}},
+	}
+	tb := &agentsv1beta1.MCPToolBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo-search", Namespace: detailNS},
+		Spec:       agentsv1beta1.MCPToolBindingSpec{AgentRef: "echo", ToolName: "search", RegistryRef: "crm", Mode: "remote"},
+		Status: agentsv1beta1.MCPToolBindingStatus{Conditions: []metav1.Condition{
+			readyCondition(metav1.ConditionFalse, "RegistryNotFound", "ToolRegistry crm not found"),
+		}},
+	}
+	kb := &agentsv1beta1.KnowledgeBase{
+		ObjectMeta: metav1.ObjectMeta{Name: "handbook", Namespace: detailNS},
+		Status:     agentsv1beta1.KnowledgeBaseStatus{Phase: "Ready"},
+	}
+	ad := depsAgent()
+	ad.Status.Conditions = []metav1.Condition{
+		cond("KnowledgeReady", metav1.ConditionFalse, "TokenServiceUnavailable", "the knowledge proxy will be disabled"),
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad, route, gp, tb, kb).Build()
+
+	got := detailDeps(t, c)
+
+	r := depsByKind(t, got, depKindModelRoute)[0]
+	assert.Equal(t, depNotReady, r.State)
+	assert.Equal(t, "NotYetServed", r.Reason)
+	assert.Contains(t, r.Message, "has not started serving")
+
+	sb := depsByKind(t, got, depKindSecretBinding)
+	require.Len(t, sb, 1)
+	assert.Equal(t, depMissing, sb[0].State)
+	assert.Equal(t, "SecretBindingNotFound", sb[0].Reason)
+
+	g := depsByKind(t, got, depKindGuardrailPolicy)[0]
+	assert.Equal(t, depNotReady, g.State)
+	assert.Equal(t, "InvalidPattern", g.Reason)
+
+	tool := depsByKind(t, got, depKindToolBinding)[0]
+	assert.Equal(t, depNotReady, tool.State)
+	assert.Equal(t, "RegistryNotFound", tool.Reason)
+
+	k := depsByKind(t, got, depKindKnowledgeBase)[0]
+	assert.Equal(t, depNotReady, k.State, "a ready KB is not reachable while the agent's knowledge proxy is off")
+	assert.Equal(t, "TokenServiceUnavailable", k.Reason)
+}
+
+// TestAgentDependenciesForbiddenReadsAreUnknown proves a reference the caller may not read is reported
+// as unknown, never as missing, and that the model route falls back to the controller's condition.
+func TestAgentDependenciesForbiddenReadsAreUnknown(t *testing.T) {
+	ad := depsAgent()
+	ad.Status.Conditions = []metav1.Condition{
+		cond("ModelRouteReady", metav1.ConditionFalse, "NotYetServed", "ModelRoute chat: not served yet"),
+	}
+	denied := func(resource string) error {
+		return apierrors.NewForbidden(schema.GroupResource{Group: "agents.ctxmesh.ai", Resource: resource}, "", errors.New("denied"))
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				switch obj.(type) {
+				case *agentsv1beta1.ModelRoute:
+					return denied("modelroutes")
+				case *agentsv1beta1.GuardrailPolicy:
+					return denied("guardrailpolicies")
+				case *agentsv1beta1.KnowledgeBase:
+					return errors.New("etcd timeout")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*agentsv1beta1.MCPToolBindingList); ok {
+					return denied("mcptoolbindings")
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		}).Build()
+
+	got := detailDeps(t, c)
+
+	r := depsByKind(t, got, depKindModelRoute)[0]
+	assert.Equal(t, depNotReady, r.State, "the controller's ModelRouteReady stands in for an unreadable route")
+	assert.Equal(t, "NotYetServed", r.Reason)
+
+	g := depsByKind(t, got, depKindGuardrailPolicy)[0]
+	assert.Equal(t, depUnknown, g.State)
+	assert.Equal(t, "Forbidden", g.Reason)
+
+	k := depsByKind(t, got, depKindKnowledgeBase)[0]
+	assert.Equal(t, depUnknown, k.State, "a failed read is not evidence of absence")
+	assert.Equal(t, "ReadFailed", k.Reason)
+
+	tools := depsByKind(t, got, depKindToolBinding)
+	require.Len(t, tools, 1)
+	assert.Equal(t, depUnknown, tools[0].State, "a denied binding list is reported, not shown as no tools")
+}
+
+// TestAgentDependenciesNoneIsEmptyList proves an agent that references nothing gets [] (not null).
+func TestAgentDependenciesNoneIsEmptyList(t *testing.T) {
+	ad := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
+	assert.Empty(t, detailDeps(t, c))
+}
+
+// deniedErr is the API server's answer to a read the caller's RBAC does not allow.
+func deniedErr(group, resource string) error {
+	return apierrors.NewForbidden(schema.GroupResource{Group: group, Resource: resource}, "", errors.New("denied"))
+}
+
+// boundSecretBinding is a kubernetes-backed SecretBinding naming Secret "openai", key "api-key".
+func boundSecretBinding() *agentsv1beta1.SecretBinding {
+	return &agentsv1beta1.SecretBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "openai-key", Namespace: detailNS},
+		Spec:       agentsv1beta1.SecretBindingSpec{SecretRef: agentsv1beta1.SecretKeyRef{Name: "openai", Key: "api-key"}},
+	}
+}
+
+// TestAgentDependenciesSecretForbiddenIsUnknown proves a Secret the caller may not read leaves the
+// secret binding unknown: a denial is not evidence that the Secret is missing.
+func TestAgentDependenciesSecretForbiddenIsUnknown(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(depsAgent(), servedRoute("openai-key"), boundSecretBinding()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Secret); ok {
+					return deniedErr("", "secrets")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	sb := depsByKind(t, detailDeps(t, c), depKindSecretBinding)
+	require.Len(t, sb, 1)
+	assert.Equal(t, depUnknown, sb[0].State, "a denied Secret read is not a missing Secret")
+	assert.Equal(t, "SecretUnreadable", sb[0].Reason)
+	assert.Contains(t, sb[0].Message, "Your account can't read Secrets in "+detailNS)
+}
+
+// TestAgentDependenciesSecretReadFailedSaysSo proves a Secret read that fails for any reason but
+// RBAC is reported as a failed read, not blamed on the caller's account.
+func TestAgentDependenciesSecretReadFailedSaysSo(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(depsAgent(), servedRoute("openai-key"), boundSecretBinding()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Secret); ok {
+					return errors.New("etcd timeout")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	sb := depsByKind(t, detailDeps(t, c), depKindSecretBinding)
+	require.Len(t, sb, 1)
+	assert.Equal(t, depUnknown, sb[0].State)
+	assert.Equal(t, "SecretUnreadable", sb[0].Reason)
+	assert.Contains(t, sb[0].Message, "could not be read just now")
+	assert.NotContains(t, sb[0].Message, "Your account")
+}
+
+// TestAgentDependenciesSecretAbsentOrKeyless proves a Secret that does not exist, or exists without
+// the named key, makes the binding notReady: those are answers, not failed reads.
+func TestAgentDependenciesSecretAbsentOrKeyless(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		objects []client.Object
+	}{
+		{name: "secret absent"},
+		{name: "key absent", objects: []client.Object{&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "openai", Namespace: detailNS},
+			Data:       map[string][]byte{"other-key": []byte("x")},
+		}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := append([]client.Object{depsAgent(), servedRoute("openai-key"), boundSecretBinding()}, tc.objects...)
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+
+			sb := depsByKind(t, detailDeps(t, c), depKindSecretBinding)
+			require.Len(t, sb, 1)
+			assert.Equal(t, depNotReady, sb[0].State)
+			assert.Equal(t, "SecretUnresolved", sb[0].Reason)
+			assert.Contains(t, sb[0].Message, `"openai"`)
+		})
+	}
+}
+
+// routeDeniedClient serves the agent but refuses every ModelRoute read, as RBAC does for a caller
+// who may read agents and not routes.
+func routeDeniedClient(t *testing.T, ad *agentsv1beta1.AgentDeployment) client.Client {
+	t.Helper()
+	return fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1beta1.ModelRoute); ok {
+					return deniedErr("agents.ctxmesh.ai", "modelroutes")
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+}
+
+// TestAgentDependenciesRouteForbiddenWithoutConditionIsUnknown proves a route the caller may not
+// read, with no controller condition to stand in for it, is unknown: never missing.
+func TestAgentDependenciesRouteForbiddenWithoutConditionIsUnknown(t *testing.T) {
+	r := depsByKind(t, detailDeps(t, routeDeniedClient(t, depsAgent())), depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depUnknown, r[0].State, "a denied route read is not a missing route")
+	assert.Equal(t, "Forbidden", r[0].Reason)
+}
+
+// TestAgentDependenciesRouteForbiddenRouteNotFoundIsMissing proves that when the caller may not read
+// the route, the controller's own RouteNotFound (it reads with its identity) is reported as missing.
+func TestAgentDependenciesRouteForbiddenRouteNotFoundIsMissing(t *testing.T) {
+	ad := depsAgent()
+	ad.Status.Conditions = []metav1.Condition{
+		cond("ModelRouteReady", metav1.ConditionFalse, "RouteNotFound", `MODEL_ROUTE names "chat", and there is no ModelRoute of that name`),
+	}
+	r := depsByKind(t, detailDeps(t, routeDeniedClient(t, ad)), depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depMissing, r[0].State)
+	assert.Equal(t, "RouteNotFound", r[0].Reason)
+	assert.Contains(t, r[0].Message, "no ModelRoute of that name")
+}
+
+// TestAgentDetailWithoutDependencies proves ?dependencies=0 returns the agent without reading any of
+// its references (dependencies is null), and that the default still resolves them.
+func TestAgentDetailWithoutDependencies(t *testing.T) {
+	refReads := 0
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).
+		WithObjects(depsAgent(), servedRoute("openai-key"), boundSecretBinding()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1beta1.AgentDeployment); !ok {
+					refReads++
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/agents/"+detailNS+"/echo?dependencies=0", nil)
+	req.Header.Set("Authorization", "Bearer caller-token")
+	s.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, "null", string(raw["dependencies"]), "skipped is not the same as none")
+	assert.Equal(t, `"echo"`, string(raw["name"]))
+	assert.Zero(t, refReads, "no reference is read when dependencies are not asked for")
+
+	assert.NotEmpty(t, detailDeps(t, c))
+	assert.Positive(t, refReads, "the default still resolves every reference")
+}
+
+// TestAgentDependenciesStaleRouteConditionIsChecking proves the controller's ModelRouteReady stands in
+// for an unreadable route only once it describes the agent's current spec: before that it may be
+// about the route the agent named before an edit, so it is unknown ("Checking"), even a RouteNotFound.
+func TestAgentDependenciesStaleRouteConditionIsChecking(t *testing.T) {
+	for _, reason := range []string{"Served", "NotYetServed", "RouteNotFound"} {
+		t.Run(reason, func(t *testing.T) {
+			ad := depsAgent()
+			ad.Generation = 2
+			c := cond("ModelRouteReady", metav1.ConditionFalse, reason, "about the route before the edit")
+			c.ObservedGeneration = 1
+			ad.Status.Conditions = []metav1.Condition{c}
+
+			r := depsByKind(t, detailDeps(t, routeDeniedClient(t, ad)), depKindModelRoute)
+			require.Len(t, r, 1)
+			assert.Equal(t, depUnknown, r[0].State)
+			assert.Equal(t, "Checking", r[0].Reason)
+		})
+	}
+
+	ad := depsAgent()
+	ad.Generation = 2
+	c := cond("ModelRouteReady", metav1.ConditionFalse, "RouteNotFound", "no ModelRoute of that name")
+	c.ObservedGeneration = 2
+	ad.Status.Conditions = []metav1.Condition{c}
+	r := depsByKind(t, detailDeps(t, routeDeniedClient(t, ad)), depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depMissing, r[0].State, "a current condition still stands in")
+}
+
+// TestAgentDependenciesModelRouteFromValueFrom proves a MODEL_ROUTE read from a ConfigMap is listed
+// as a declared route with where it comes from, not dropped as "no route" and not looked up by name.
+func TestAgentDependenciesModelRouteFromValueFrom(t *testing.T) {
+	ad := depsAgent()
+	ad.Spec.Env = []corev1.EnvVar{{Name: "MODEL_ROUTE", ValueFrom: &corev1.EnvVarSource{
+		ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "llm"}, Key: "route",
+		},
+	}}}
+	routeReads := 0
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1beta1.ModelRoute); ok {
+					routeReads++
+				}
+				return cl.Get(ctx, key, obj, opts...)
+			},
+		}).Build()
+
+	got := detailDeps(t, c)
+	r := depsByKind(t, got, depKindModelRoute)
+	require.Len(t, r, 1)
+	assert.Equal(t, depDeclared, r[0].State)
+	assert.Equal(t, "ValueFrom", r[0].Reason)
+	assert.Equal(t, "from ConfigMap llm, key route", r[0].Detail)
+	assert.Contains(t, r[0].Message, "ConfigMap llm")
+	assert.Zero(t, routeReads)
+	assert.Empty(t, depsByKind(t, got, depKindSecretBinding))
+}
+
+// TestKnowledgeBaseStateIngestion proves what a knowledge base's ingestion phase means to the agent:
+// a Pending corpus nothing will ingest needs an ingest, one with a schedule is on its way, and a
+// corpus being re-ingested is still queryable.
+func TestKnowledgeBaseStateIngestion(t *testing.T) {
+	ingested := metav1.Now()
+	for _, tc := range []struct {
+		name      string
+		kb        agentsv1beta1.KnowledgeBase
+		state     string
+		reason    string
+		inMessage string
+	}{
+		{
+			name:  "pending, no schedule",
+			kb:    agentsv1beta1.KnowledgeBase{Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Pending"}},
+			state: depNotReady, reason: "NeedsIngest", inMessage: "no refresh schedule",
+		},
+		{
+			name: "pending, scheduled",
+			kb: agentsv1beta1.KnowledgeBase{
+				Spec:   agentsv1beta1.KnowledgeBaseSpec{RefreshInterval: &metav1.Duration{Duration: 3600e9}},
+				Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Pending"},
+			},
+			state: depNotReady, reason: "Pending", inMessage: "refresh schedule starts",
+		},
+		{
+			name:  "first ingestion",
+			kb:    agentsv1beta1.KnowledgeBase{Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Ingesting"}},
+			state: depNotReady, reason: "Ingesting", inMessage: "first ingestion",
+		},
+		{
+			name: "re-ingesting",
+			kb: agentsv1beta1.KnowledgeBase{
+				Status: agentsv1beta1.KnowledgeBaseStatus{Phase: "Ingesting", LastIngestedAt: &ingested},
+			},
+			state: depReady, reason: "Ingesting", inMessage: "Re-ingesting",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := knowledgeBaseState(AgentDependency{Kind: depKindKnowledgeBase, Name: "handbook"}, &tc.kb)
+			assert.Equal(t, tc.state, d.State)
+			assert.Equal(t, tc.reason, d.Reason)
+			assert.Contains(t, d.Message, tc.inMessage)
+		})
+	}
+}

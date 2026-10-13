@@ -18,7 +18,9 @@ package toolmanifest
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -359,5 +361,29 @@ func TestStructuralDigestOrderIndependent(t *testing.T) {
 	_, sb := Render(b)
 	if StructuralDigest(sa, true) != StructuralDigest(sb, true) {
 		t.Error("structural digest depends on input order")
+	}
+}
+
+// TestStructuralDigestMovedOffTheDiscoverySidecarShape: a tool-bound agent deployed when the pod
+// carried a discovery sidecar must get a new revision name, or the controller's unchanged-name guard
+// would keep the old pod template (and the sidecar, whose image is no longer published) forever.
+func TestStructuralDigestMovedOffTheDiscoverySidecarShape(t *testing.T) {
+	t.Parallel()
+
+	_, sidecars := Render([]Binding{
+		{BindingName: "wc", ToolName: "word-count", Mode: ModeSidecar, Image: "wc:1"},
+	})
+	for _, sc := range [][]SidecarTool{nil, sidecars} {
+		legacy, err := json.Marshal(struct {
+			DiscoverySidecar bool          `json:"discovery"`
+			Sidecars         []SidecarTool `json:"sidecars"`
+		}{true, append([]SidecarTool{}, sc...)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(legacy)
+		if StructuralDigest(sc, true) == fmt.Sprintf("%x", sum[:])[:8] {
+			t.Errorf("the digest of %d sidecar tool(s) still equals the discovery-sidecar shape's", len(sc))
+		}
 	}
 }

@@ -14,7 +14,7 @@ config differs, not shape (ADR 0038 — the code never branches on environment).
 |----------------------|------|---------|
 | `console.127.0.0.1.sslip.io` | all | `ctxmesh-bff` (BFF) |
 | `langfuse.127.0.0.1.sslip.io` | all | `langfuse-web` |
-| `*.default.127.0.0.1.sslip.io` | `/invoke` (Exact) | `kourier-internal` → Knative routes by Host to the agent (ext-auth guarded) |
+| `*.default.127.0.0.1.sslip.io` | `/invoke` (Exact) | `kourier-internal` → Knative routes by Host to the agent (ext-auth guarded, responses sandboxed, cookies dropped) |
 | `*.default.127.0.0.1.sslip.io` | everything else | `ctxmesh-bff` (BFF) — the per-agent **chatbox** SPA + `/api/*` |
 
 The agent host is **path-split** across two `HTTPRoute`s (m37.3, `agentEdge` values): the machine
@@ -49,9 +49,32 @@ console's `POST /api/invoke` — the agent URL is a first-class authenticated en
 **relays** the capability (never forges it), so the ADR 0033 model holds end to end; one place mints (the
 BFF), and the signing key never leaves it.
 
+A caller cannot hand an agent a capability of its own. A `ClientTrafficPolicy` on the Gateway removes
+`X-Ctxmesh-Run-Capability` and `X-Ctxmesh-Run-Proof` from every request before ext-auth runs, so the
+only capability an agent receives through the edge is the one ext-auth minted for this caller, and
+none when ext-auth mints none or is off. (Removing it on the agents route would remove ext-auth's too:
+a route's header filter applies after ext-auth.) This needs Envoy Gateway v1.2 or later, and it is the
+Gateway's one `ClientTrafficPolicy`: add other client settings to it rather than beside it.
+
 Because the agents route is in `kourier-system` and the BFF in `ctxmesh`, the chart also
 renders the cross-namespace `ReferenceGrant` (SecurityPolicy → BFF Service). Set `extAuth.enabled: false`
-to leave agent URLs unauthenticated (no OBO — the pre-ADR-0039 behaviour).
+to leave agent URLs unauthenticated (no OBO — the pre-ADR-0039 behaviour); their responses stay
+sandboxed (below).
+
+## Agent responses are sandboxed (ADR 0040)
+
+On every response that reaches a browser through the `agents` route (`/invoke`), the edge sets
+`Content-Security-Policy: sandbox` and `X-Content-Type-Options: nosniff`, replacing any the agent
+sent, and removes any `Set-Cookie`. A browser treats such a response as a document with an opaque
+origin that runs no script, and stores no cookie from it. That matters because the console's MCP
+consent page (`/connect`) accepts a consent ticket only from a page at the hostname of the agent it
+names, and because the OAuth browser-binding cookie lives on the agent host when `bff.consoleURL` is
+empty, or can be shadowed from a sibling host over plain HTTP. It holds with `extAuth.enabled: false`,
+where `/invoke` takes no credential. Clients read `/invoke` with `fetch` or SSE, which these headers do
+not affect. It covers only traffic through this edge: an agent reachable another way (Knative's own
+domain exposed directly) is not covered, and there `/connect`'s confirmation step is the remaining
+defence. The `agents-app` route (the chatbox) is not sandboxed: the SPA needs its scripts, and the BFF
+sets its own CSP there. `make edge-truth` lints this chart and asserts all of this.
 
 > **Envoy `path_prefix` gotcha:** Envoy's HTTP ext_authz *prepends* the configured `path` to the original
 > request path, so a client `POST /invoke` reaches the BFF as `POST /api/extauth/invoke`. The BFF matches

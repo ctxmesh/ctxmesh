@@ -54,7 +54,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -178,7 +178,7 @@ func danglingEvalSuiteRef(spec *forkRefSpec) string {
 // OTHER read error → true (fail-OPEN: do not flag a healthy-but-unreadable route as broken, since
 // the create already succeeded — log it so the hiccup is visible).
 func (s *Server) targetHasModelRoute(ctx context.Context, caller client.Client, ns, name string) bool {
-	var mr agentsv1alpha1.ModelRoute
+	var mr agentsv1beta1.ModelRoute
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &mr)
 	if err == nil {
 		return true
@@ -194,7 +194,7 @@ func (s *Server) targetHasModelRoute(ctx context.Context, caller client.Client, 
 // targetHasEvalSuite reports whether an EvalSuite of that name exists in the target ns (caller-
 // scoped GET). Same fail-OPEN degradation as targetHasModelRoute.
 func (s *Server) targetHasEvalSuite(ctx context.Context, caller client.Client, ns, name string) bool {
-	var es agentsv1alpha1.EvalSuite
+	var es agentsv1beta1.EvalSuite
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &es)
 	if err == nil {
 		return true
@@ -246,7 +246,17 @@ func (s *Server) closeToolRefs(r *http.Request, caller client.Client, tools []st
 	// tool name a locally-registered ToolRegistry offers → its registry (the same index the
 	// create path uses to bind tools). A nil index (no store / read error) → empty map, so every
 	// tool is treated as absent and routed through the published-catalog lookup below.
-	localIdx := toolRegistryIndex(ctx, s.toolRegistryStore, callerNS)
+	// Scoped to the servers THIS caller may use — the create path binds from the same view,
+	// so a tool only another user's private server offers is not "already resolvable" here.
+	callerOwner := ""
+	if username, uErr := callerUsername(ctx, caller); uErr == nil {
+		callerOwner = userGrantHash(username)
+	}
+	localIdx, idxErr := toolRegistryIndex(ctx, s.toolRegistryStore, callerNS, callerOwner)
+	if idxErr != nil && !errors.Is(idxErr, errNoToolRegistryStore) {
+		s.log.Error(idxErr, "fork ref-closure: reading the local MCP servers failed; every tool goes through the published catalog",
+			"namespace", callerNS)
+	}
 
 	// The published-catalog origin index (tool name → the published server that offers it),
 	// scoped to what THIS caller may discover. Built once (one catalog read) for all tools.

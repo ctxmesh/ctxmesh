@@ -32,7 +32,6 @@ spec:
           GuardrailPolicy is a namespaced, reusable content-governance policy referenced by
           AgentDeployment.spec.guardrailPolicyRef (M66, ADR 0059). The policy configures deterministic
           PII scanning, pattern-based deny lists, an optional LLM-judge layer, and per-user rate limits.
-          It is a SINGLE-version CRD born directly in v1beta1 — no v1alpha1 history, no conversion webhook needed.
 
           The guardrail engine (m66.3) enforces the policy at inference time via a sidecar that intercepts
           model input/output. failMode="closed" (default) ensures that if the engine cannot run, the

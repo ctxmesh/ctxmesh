@@ -43,6 +43,7 @@ import (
 	"strings"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
 // auditActionGuardrailBlock is the stable action kind written to audit_log for a guardrail
@@ -119,9 +120,14 @@ func (s *Server) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
 	// Sender-constrained: the capability must verify AND, when it is bound to a key, carry a
 	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
 	capab, capErr := s.verifyRuncapWithProof(r)
+	podNamespace, podAgent := "", ""
 	if capErr != nil {
-		writeError(w, http.StatusUnauthorized, capErr.Error())
-		return
+		relayed, ns, agent, ok := s.verifyRelayedForAudit(r)
+		if !ok {
+			writeRuncapError(w, capErr)
+			return
+		}
+		capab, podNamespace, podAgent = relayed, ns, agent
 	}
 
 	// (2) The actor is the verified capability's User field (already-hashed identity).
@@ -159,6 +165,13 @@ func (s *Server) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// On the relayed path the agent and namespace are the authenticated pod's, never the body's.
+	resourceName, namespace := req.Agent, namespaceFromAgentBoundary(capab.Boundary)
+	if podAgent != "" {
+		resourceName, namespace = podAgent, podNamespace
+		req.Agent = podAgent
+	}
+
 	// (4) Write the audit_log row. actor = the verified, already-hashed user id (never raw PII).
 	// Detail carries only the structured, PII-safe fields from the body — the content_hash is the
 	// audit key; the raw scanned text never appears here or anywhere in the audit trail.
@@ -167,11 +180,11 @@ func (s *Server) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
 		ActorKind:    actorKindUser,
 		Action:       auditActionGuardrailBlock,
 		ResourceKind: "GuardrailPolicy",
-		ResourceName: req.Agent,
+		ResourceName: resourceName,
 		// Stamp the agent's namespace so a NAMESPACED audit-reader (GET /api/audit?namespace=) sees the
-		// block (m52.G11c, M139) — before, the row had an empty ns, visible only to an unscoped cluster
-		// read. Derived from the VERIFIED capability's boundary ("a:<ns>/<agent>"), never a client claim.
-		Namespace: namespaceFromAgentBoundary(capab.Boundary),
+		// block (m52.G11c, M139). Derived from the VERIFIED capability's boundary ("a:<ns>/<agent>"), or
+		// on the relayed path from the authenticated pod — never a client claim.
+		Namespace: namespace,
 		Outcome:   auditOutcomeDenied,
 		Detail: map[string]any{
 			"detector":      req.Detector,
@@ -185,4 +198,38 @@ func (s *Server) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
 	// 204 No Content — the event was accepted. The launcher's best-effort POST treats any 2xx as
 	// success; a failed audit write was already logged by appendAudit (best-effort contract).
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// agentIdentitySAPrefix is how the controller names every agent's identity ServiceAccount
+// (internal/controller agentIdentitySAName): agent-<deployment name>.
+const agentIdentitySAPrefix = "agent-"
+
+// verifyRelayedForAudit admits the one case verifyRuncapWithProof cannot: an agent called over AMP holds
+// its caller's capability, bound to the caller's key, and records a block it enforced. The calling pod
+// proves its own identity with its projected token (TokenReview, the BFF audience). The capability is
+// checked for signature, audience and expiry and supplies only the user. The agent and namespace come
+// from the pod. Only a BOUND capability takes this path: an unbound one is the posture's call.
+func (s *Server) verifyRelayedForAudit(r *http.Request) (runcap.Capability, string, string, bool) {
+	if s.podAuth == nil {
+		return runcap.Capability{}, "", "", false
+	}
+	tok, found := strings.CutPrefix(strings.TrimSpace(r.Header.Get("Authorization")), "Bearer ")
+	tok = strings.TrimSpace(tok)
+	if !found || tok == "" {
+		return runcap.Capability{}, "", "", false
+	}
+	id, err := s.podAuth.Identity(r.Context(), tok)
+	if err != nil {
+		s.log.Info("guardrail event: the pod token did not authenticate", "reason", err.Error())
+		return runcap.Capability{}, "", "", false
+	}
+	agent, isAgent := strings.CutPrefix(id.ServiceAccount, agentIdentitySAPrefix)
+	if !isAgent || agent == "" {
+		return runcap.Capability{}, "", "", false
+	}
+	capab, err := s.capabilitySigner.Verifier().Verify(strings.TrimSpace(r.Header.Get(runcap.HeaderName)))
+	if err != nil || capab.KeyThumbprint == "" {
+		return runcap.Capability{}, "", "", false
+	}
+	return capab, id.Namespace, agent, true
 }

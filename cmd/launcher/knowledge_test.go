@@ -56,7 +56,7 @@ func fakeKnowledgeService(t *testing.T, searched chan<- map[string]any) *httptes
 // Tests that want a custom roster should build the knowledgeProxy directly.
 func kbProxyTo(url string) *knowledgeProxy {
 	return &knowledgeProxy{
-		tokenServiceURL: url, namespace: "prod",
+		tokenServiceURL: url, tokenPath: testPodTokenPath, namespace: "prod",
 		roster: map[string]kbGrant{"docs": {embeddingRoute: "embed-v1"}},
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
@@ -150,7 +150,7 @@ func TestKnowledge_EnabledBuildsProxy(t *testing.T) {
 func TestKnowledge_RosterGate_UnknownKBIs403(t *testing.T) {
 	ts := fakeKnowledgeService(t, nil)
 	p := &knowledgeProxy{
-		tokenServiceURL: ts.URL, namespace: "prod",
+		tokenServiceURL: ts.URL, tokenPath: testPodTokenPath, namespace: "prod",
 		roster: map[string]kbGrant{"docs": {embeddingRoute: "embed-v1"}}, // only "docs" is granted
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
@@ -165,7 +165,7 @@ func TestKnowledge_RosterGate_GrantedKBForwards(t *testing.T) {
 	searched := make(chan map[string]any, 1)
 	ts := fakeKnowledgeService(t, searched)
 	p := &knowledgeProxy{
-		tokenServiceURL: ts.URL, namespace: "prod",
+		tokenServiceURL: ts.URL, tokenPath: testPodTokenPath, namespace: "prod",
 		roster: map[string]kbGrant{"my-kb": {embeddingRoute: "text-embedding-3-small"}},
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
@@ -188,7 +188,7 @@ func TestKnowledge_RosterGate_GrantedKBForwards(t *testing.T) {
 func TestKnowledge_RosterGate_EmptyRosterRefusesAll(t *testing.T) {
 	ts := fakeKnowledgeService(t, nil)
 	p := &knowledgeProxy{
-		tokenServiceURL: ts.URL, namespace: "prod",
+		tokenServiceURL: ts.URL, tokenPath: testPodTokenPath, namespace: "prod",
 		roster: nil, // empty roster — no KBs granted
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
@@ -220,7 +220,7 @@ func TestKnowledge_RosterFill_EmbeddingModelFromRosterWinsOverRequest(t *testing
 	searched := make(chan map[string]any, 1)
 	ts := fakeKnowledgeService(t, searched)
 	p := &knowledgeProxy{
-		tokenServiceURL: ts.URL, namespace: "prod",
+		tokenServiceURL: ts.URL, tokenPath: testPodTokenPath, namespace: "prod",
 		roster: map[string]kbGrant{"docs": {embeddingRoute: "embed-from-roster"}},
 		client: &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),
 		logf: func(string, ...any) {},
@@ -288,7 +288,7 @@ func kbPerUserProxy(t *testing.T, url string) (*knowledgeProxy, *runcap.Signer) 
 	pub, priv, err := runcap.GenerateKeyPair()
 	require.NoError(t, err)
 	p := &knowledgeProxy{
-		tokenServiceURL: url, namespace: "prod",
+		tokenServiceURL: url, tokenPath: testPodTokenPath, namespace: "prod",
 		roster:   map[string]kbGrant{"personal": {embeddingRoute: "embed-v1", perUser: true}},
 		verifier: runcap.NewVerifier(pub, kbTestAudience, nil),
 		client:   &http.Client{Timeout: 5 * time.Second}, tracer: noop.NewTracerProvider().Tracer(""),

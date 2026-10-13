@@ -13,6 +13,7 @@ import {
   type LogEventType,
   type RunEventKind,
 } from "@/lib/api";
+import { chunked, golden, GOLDEN_TEXT, RUN_EVENTS_GOLDEN } from "@/test/run-events-golden";
 
 // mockFetch returns a fetch stub resolving a Response-like object. It captures
 // the (url, init) call so tests can assert on the attached headers.
@@ -63,13 +64,13 @@ describe("api client", () => {
     expect(res.agents[0].ready).toBe(true);
   });
 
-  it("health hits /api/health with the JSON Accept header", async () => {
-    const fetchMock = mockFetch({ status: "ok", version: "dev" });
+  it("reads JSON with the JSON Accept header", async () => {
+    const fetchMock = mockFetch({ namespaces: [{ name: "team-a" }] });
     vi.stubGlobal("fetch", fetchMock);
 
-    const res = await api.health();
-    expect(res.status).toBe("ok");
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/health");
+    const res = await api.namespaces();
+    expect(res.namespaces[0].name).toBe("team-a");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/namespaces");
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("Accept")).toBe(
       "application/json",
     );
@@ -168,15 +169,54 @@ describe("api client", () => {
     expect(authHeader(fetchMock)).toBe("Bearer paste-me");
   });
 
-  it("listTools reads the merged catalog from GET /api/tools", async () => {
+  it("listTools reads the merged catalog from GET /api/tools, in the namespace it is given", async () => {
     const fetchMock = mockFetch({
       tools: [{ name: "get_order", source: "acme-mcp", approvalStatus: "approved" }],
     });
     vi.stubGlobal("fetch", fetchMock);
-    const res = await api.listTools();
+    const res = await api.listTools("team-a");
     expect(res.tools).toHaveLength(1);
     expect(res.tools[0].name).toBe("get_order");
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/tools");
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/tools?namespace=team-a");
+    await api.listTools("");
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/tools");
+  });
+
+  it("every workspace list sends the namespace it is given, and none for All workspaces", async () => {
+    const fetchMock = mockFetch({ items: [], runs: [], servers: [] });
+    vi.stubGlobal("fetch", fetchMock);
+    const lists: [string, (ns: string) => Promise<unknown>][] = [
+      ["/api/knowledgebases", (ns) => api.listKnowledgeBases(ns)],
+      ["/api/mcpservers", (ns) => api.listMcpServers(ns)],
+      ["/api/mcp/approvals", (ns) => api.mcpApprovals(ns)],
+      ["/api/teams", (ns) => api.listTeams(ns)],
+      ["/api/guardrailpolicies", (ns) => api.listGuardrailPolicies(ns)],
+      ["/api/workflows", (ns) => api.listWorkflows(ns)],
+      ["/api/runs", (ns) => api.runs(ns)],
+    ];
+    for (const [path, list] of lists) {
+      fetchMock.mockClear();
+      await list("team-a");
+      expect(fetchMock.mock.calls[0][0]).toBe(`${path}?namespace=team-a`);
+      await list("");
+      expect(fetchMock.mock.calls[1][0]).toBe(path);
+    }
+  });
+
+  it("fork and connect send the namespace the copy lands in", async () => {
+    const fetchMock = mockFetch({});
+    vi.stubGlobal("fetch", fetchMock);
+    await api.forkAgent("origin", "agent", "mine", "team-a");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string)).toEqual({
+      name: "mine",
+      namespace: "team-a",
+    });
+    await api.connectMcpServer("origin", "server", undefined, "team-a");
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({
+      originNamespace: "origin",
+      originName: "server",
+      namespace: "team-a",
+    });
   });
 
   it("generateAgent returns the valid config on 200", async () => {
@@ -217,6 +257,13 @@ describe("api client", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/agents/prod/billing");
     expect(res.ready).toBe(true);
     expect(res.versions).toEqual(["v1", "v2"]);
+  });
+
+  it("agentDetail asks the BFF to skip the references when told to", async () => {
+    const fetchMock = mockFetch({ name: "billing", namespace: "prod", dependencies: null });
+    vi.stubGlobal("fetch", fetchMock);
+    await api.agentDetail("prod", "billing", undefined, { dependencies: false });
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/agents/prod/billing?dependencies=0");
   });
 
   it("traceDetail reads GET /api/traces/{id}/detail (flat spans)", async () => {
@@ -427,27 +474,48 @@ function collectRun(runId: string) {
 }
 
 describe("openRunStream (run event SSE, m32.8)", () => {
-  it("parses id/event/data frames into typed run events in order", async () => {
+  it("reads the server's frames: the payload is the text, the status, the step metadata", async () => {
+    // The handler's exact bytes, delivered in 7-byte reads so frames split across reads.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve(sseResponse(chunked(RUN_EVENTS_GOLDEN, 7)))),
+    );
+    const { events, errored } = await collectRun("run-golden");
+    expect(errored).toBeNull();
+    expect(events.map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    const tokens = events.filter((e) => e.kind === "token").map((e) => e.data);
+    expect(tokens.join("")).toBe(GOLDEN_TEXT);
+    expect(events.filter((e) => e.kind === "state").map((e) => e.data)).toEqual([
+      "running",
+      "requires_action",
+      "running",
+      "succeeded",
+    ]);
+    expect(events.filter((e) => e.kind === "step").map((e) => formatRunStep(e.data))).toEqual([
+      "Step 1 · model · ↑11 ↓7",
+      "Step 1 · tool · echo_tool",
+      "Step 2 · model · ↑40 ↓12",
+    ]);
+    expect(events.find((e) => e.kind === "message")?.data).toBe(GOLDEN_TEXT);
+  });
+
+  it("skips a named event kind it does not know rather than reading it as the answer", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
         Promise.resolve(
           sseResponse([
-            "id:1\nevent:token\ndata:Hel\n\n",
-            "id:2\nevent:token\ndata:lo\n\n",
-            "id:3\nevent:message\ndata:Hello\n\n",
-            "id:4\nevent:state\ndata:succeeded\n\n",
+            golden(0, 1),
+            "id: 2\nevent: some-future-kind\ndata: not the answer\n\n",
+            "id: 3\nevent: descendant-requires-action\ndata: run-child\n\n",
           ]),
         ),
       ),
     );
-    const { events, errored } = await collectRun("run-1");
-    expect(errored).toBeNull();
+    const { events } = await collectRun("run-1");
     expect(events).toEqual([
-      { kind: "token", data: "Hel", seq: 1 },
-      { kind: "token", data: "lo", seq: 2 },
-      { kind: "message", data: "Hello", seq: 3 },
-      { kind: "state", data: "succeeded", seq: 4 },
+      { kind: "state", data: "running", seq: 1 },
+      { kind: "descendant-requires-action", data: "run-child", seq: 3 },
     ]);
   });
 
@@ -458,7 +526,7 @@ describe("openRunStream (run event SSE, m32.8)", () => {
       "fetch",
       vi.fn((_url: string, i?: RequestInit) => {
         init = i;
-        return Promise.resolve(sseResponse(["event:state\ndata:succeeded\n\n"]));
+        return Promise.resolve(sseResponse([RUN_EVENTS_GOLDEN]));
       }),
     );
     await collectRun("run-9");
@@ -472,28 +540,6 @@ describe("openRunStream (run event SSE, m32.8)", () => {
     const { events, forbidden } = await collectRun("run-x");
     expect(events).toEqual([]);
     expect(forbidden).not.toBeNull();
-  });
-
-  it("parses `step` metadata frames as typed step events (M78)", async () => {
-    const stepJSON = '{"step":1,"kind":"model","tokens":{"prompt":11,"completion":7},"ref":null}';
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(() =>
-        Promise.resolve(
-          sseResponse([
-            `id:1\nevent:step\ndata:${stepJSON}\n\n`,
-            "id:2\nevent:step\ndata:plan-approved\n\n", // legacy plain-label form
-            "id:3\nevent:state\ndata:succeeded\n\n",
-          ]),
-        ),
-      ),
-    );
-    const { events } = await collectRun("run-step");
-    expect(events).toEqual([
-      { kind: "step", data: stepJSON, seq: 1 },
-      { kind: "step", data: "plan-approved", seq: 2 },
-      { kind: "state", data: "succeeded", seq: 3 },
-    ]);
   });
 });
 

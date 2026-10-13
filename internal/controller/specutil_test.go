@@ -25,13 +25,12 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 func TestSpecHash_Determinism(t *testing.T) {
-	spec := agentsv1alpha1.AgentDeploymentSpec{
+	spec := agentsv1beta1.AgentDeploymentSpec{
 		Image:          "ghcr.io/ctxmesh/echo-agent:latest",
 		ExecutionModel: "serving",
 		Port:           8080,
@@ -52,7 +51,7 @@ func TestSpecHash_Determinism(t *testing.T) {
 // pointer with omitempty, so it is omitted from the canonical JSON entirely — a
 // no-rollout spec hashes identically to a pre-M69 spec.
 func TestSpecHash_NoRollout_ByteForByte(t *testing.T) {
-	base := agentsv1alpha1.AgentDeploymentSpec{
+	base := agentsv1beta1.AgentDeploymentSpec{
 		Image:          "ghcr.io/ctxmesh/echo-agent:latest",
 		ExecutionModel: "serving",
 		Port:           8080,
@@ -69,18 +68,18 @@ func TestSpecHash_NoRollout_ByteForByte(t *testing.T) {
 
 	// A SET Rollout is a real config change → a different hash (a distinct revision).
 	withCanary := base
-	withCanary.Rollout = &agentsv1alpha1.RolloutSpec{Strategy: "canary", CanaryPercent: 10}
+	withCanary.Rollout = &agentsv1beta1.RolloutSpec{Strategy: "canary", CanaryPercent: 10}
 	hCanary, err := specHash(withCanary)
 	require.NoError(t, err)
 	assert.NotEqual(t, hBase, hCanary, "a set Rollout block is a real config change and must alter the specHash")
 }
 
 func TestSpecHash_DifferentSpecs(t *testing.T) {
-	spec1 := agentsv1alpha1.AgentDeploymentSpec{
+	spec1 := agentsv1beta1.AgentDeploymentSpec{
 		Image: "ghcr.io/ctxmesh/echo-agent:v1",
 		Port:  8080,
 	}
-	spec2 := agentsv1alpha1.AgentDeploymentSpec{
+	spec2 := agentsv1beta1.AgentDeploymentSpec{
 		Image: "ghcr.io/ctxmesh/echo-agent:v2",
 		Port:  8080,
 	}
@@ -94,11 +93,11 @@ func TestSpecHash_DifferentSpecs(t *testing.T) {
 }
 
 func TestSpecHash_PortChange(t *testing.T) {
-	base := agentsv1alpha1.AgentDeploymentSpec{
+	base := agentsv1beta1.AgentDeploymentSpec{
 		Image: "ghcr.io/ctxmesh/echo-agent:latest",
 		Port:  8080,
 	}
-	changed := agentsv1alpha1.AgentDeploymentSpec{
+	changed := agentsv1beta1.AgentDeploymentSpec{
 		Image: "ghcr.io/ctxmesh/echo-agent:latest",
 		Port:  9090,
 	}
@@ -113,7 +112,7 @@ func TestSpecHash_PortChange(t *testing.T) {
 
 func TestSpecHash_EnvOrder_SameSpec(t *testing.T) {
 	// Same env vars in same order → same hash
-	spec := agentsv1alpha1.AgentDeploymentSpec{
+	spec := agentsv1beta1.AgentDeploymentSpec{
 		Image: "ghcr.io/ctxmesh/echo-agent:latest",
 		Env: []corev1.EnvVar{
 			{Name: "A", Value: "1"},
@@ -130,7 +129,7 @@ func TestSpecHash_EnvOrder_SameSpec(t *testing.T) {
 }
 
 func TestSpecHash_Format(t *testing.T) {
-	spec := agentsv1alpha1.AgentDeploymentSpec{
+	spec := agentsv1beta1.AgentDeploymentSpec{
 		Image: "example",
 		Port:  8080,
 	}
@@ -163,16 +162,16 @@ func digestTools() string {
 // with hex-only components makes cross-presence collisions impossible.
 func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	toolD := digestTools()
-	memD := memoryDigest(true, memoryDefaultAddr)
+	memD := memoryDigest(true, defaultPlatform.statelayerAddr())
 	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 	require.NotEmpty(t, toolD)
 	require.NotEmpty(t, memD)
 	require.NotEmpty(t, regD)
 
-	budD := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
+	budD := budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
 	require.NotEmpty(t, budD)
 
-	promptD := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
+	promptD := promptDigest(agentsv1beta1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
 	require.NotEmpty(t, promptD)
 
 	tenantD := tenantDigest(tenantContext{id: "acme", budgetUSD: "100.00", rpm: 600}, true)
@@ -181,7 +180,7 @@ func TestCombinedBindingDigest_PresenceCombinations(t *testing.T) {
 	proxyD := statelayerProxyDigest("http://statelayer-proxy.svc:8080", true, false)
 	require.NotEmpty(t, proxyD)
 
-	runtimeD := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow"}})
+	runtimeD := runtimeDigest(&agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "allow"}})
 	require.NotEmpty(t, runtimeD)
 
 	guardrailD, err := guardrailPolicyHash(&agentsv1beta1.GuardrailPolicySpec{
@@ -243,7 +242,7 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	}, true)
 	require.NotEqual(t, toolD1, toolD2, "precondition: image change flips the tool digest")
 
-	memD1 := memoryDigest(true, memoryDefaultAddr)
+	memD1 := memoryDigest(true, defaultPlatform.statelayerAddr())
 	memD2 := memoryDigest(true, "other-valkey.ns.svc:6380")
 	require.NotEqual(t, memD1, memD2, "precondition: addr change flips the memory digest")
 
@@ -251,12 +250,12 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	regD2 := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "orchestrator", nil)
 	require.NotEqual(t, regD1, regD2, "precondition: role change flips the registry digest")
 
-	budD1 := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
-	budD2 := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "1.00", SoftThresholdPct: 80})
+	budD1 := budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
+	budD2 := budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "1.00", SoftThresholdPct: 80})
 	require.NotEqual(t, budD1, budD2, "precondition: cap change flips the budget digest")
 
-	promptD1 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
-	promptD2 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "ver-v2")
+	promptD1 := promptDigest(agentsv1beta1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
+	promptD2 := promptDigest(agentsv1beta1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "ver-v2")
 	require.NotEqual(t, promptD1, promptD2, "precondition: prompt ref/version change flips the prompt digest")
 
 	tenantD1 := tenantDigest(tenantContext{id: "acme", rpm: 600}, true)
@@ -274,8 +273,8 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 	require.NotEqual(t, proxyMountOff, proxyMountOn,
 		"precondition: an automount (default kube-API token) toggle flips the proxy digest (m79.4)")
 
-	runtimeD1 := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 3}})
-	runtimeD2 := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 5}})
+	runtimeD1 := runtimeDigest(&agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "allow", ParallelLimit: 3}})
+	runtimeD2 := runtimeDigest(&agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "allow", ParallelLimit: 5}})
 	require.NotEqual(t, runtimeD1, runtimeD2, "precondition: a runtime change flips the runtime digest")
 
 	guardrailD1, err := guardrailPolicyHash(&agentsv1beta1.GuardrailPolicySpec{
@@ -325,17 +324,17 @@ func TestCombinedBindingDigest_EitherComponentFlips(t *testing.T) {
 // resolved addr, registry digest hashes the resolved membership).
 func TestCombinedBindingDigest_Deterministic(t *testing.T) {
 	toolD := digestTools()
-	memD := memoryDigest(true, memoryDefaultAddr)
+	memD := memoryDigest(true, defaultPlatform.statelayerAddr())
 	regD := registryMembershipDigest(registryMembership{IsMember: true, RegistryID: "team", MaxDepth: 8, HopBudget: 32}, "worker", nil)
 
-	budD := budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
-	promptD := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
+	budD := budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80})
+	promptD := promptDigest(agentsv1beta1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "ver-v1")
 
 	tenantD := tenantDigest(tenantContext{id: "acme", rpm: 600}, true)
 
 	proxyD := statelayerProxyDigest("http://proxy:8080", true, false)
 
-	runtimeD := runtimeDigest(&agentsv1alpha1.RuntimeSpec{ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow"}})
+	runtimeD := runtimeDigest(&agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "allow"}})
 
 	guardrailD, err := guardrailPolicyHash(&agentsv1beta1.GuardrailPolicySpec{
 		PatternDenylist: []agentsv1beta1.PatternRule{{Name: "jb", Pattern: "ignore.*instructions"}},
@@ -391,14 +390,14 @@ func TestRegistryMembershipDigest_Component(t *testing.T) {
 // no memory → empty; addr changes flip it; deterministic.
 func TestMemoryDigest_Component(t *testing.T) {
 	assert.Equal(t, "", memoryDigest(false, ""), "no memory → empty component")
-	assert.Equal(t, "", memoryDigest(false, memoryDefaultAddr),
+	assert.Equal(t, "", memoryDigest(false, defaultPlatform.statelayerAddr()),
 		"hasMemory is the gate — addr alone must not produce a digest")
 
-	d1 := memoryDigest(true, memoryDefaultAddr)
+	d1 := memoryDigest(true, defaultPlatform.statelayerAddr())
 	d2 := memoryDigest(true, "my-valkey.ns.svc:6380")
 	assert.NotEmpty(t, d1)
 	assert.NotEqual(t, d1, d2, "different addrs → different components")
-	assert.Equal(t, d1, memoryDigest(true, memoryDefaultAddr), "deterministic")
+	assert.Equal(t, d1, memoryDigest(true, defaultPlatform.statelayerAddr()), "deterministic")
 }
 
 // TestBudgetDigest_Component pins the M8 budget component's own contract:
@@ -408,23 +407,23 @@ func TestMemoryDigest_Component(t *testing.T) {
 func TestBudgetDigest_Component(t *testing.T) {
 	assert.Equal(t, "", budgetDigest(nil), "nil budget → empty component")
 
-	base := &agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "10.00", SoftThresholdPct: 80}
+	base := &agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "10.00", SoftThresholdPct: 80}
 	d := budgetDigest(base)
 	require.NotEmpty(t, d)
 	assert.Len(t, d, 8, "budget digest is 8 hex chars")
 	assert.Equal(t, d, budgetDigest(base), "deterministic")
 
-	assert.NotEqual(t, d, budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "1.00", PerAgentUSD: "10.00", SoftThresholdPct: 80}),
+	assert.NotEqual(t, d, budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "1.00", PerAgentUSD: "10.00", SoftThresholdPct: 80}),
 		"conversation cap flip")
-	assert.NotEqual(t, d, budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "20.00", SoftThresholdPct: 80}),
+	assert.NotEqual(t, d, budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "20.00", SoftThresholdPct: 80}),
 		"agent cap flip")
-	assert.NotEqual(t, d, budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "10.00", SoftThresholdPct: 90}),
+	assert.NotEqual(t, d, budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", PerAgentUSD: "10.00", SoftThresholdPct: 90}),
 		"soft pct flip")
 
 	// Soft-pct default: an omitted (0) value hashes identically to an explicit 80.
 	assert.Equal(t,
-		budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50"}),
-		budgetDigest(&agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80}),
+		budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50"}),
+		budgetDigest(&agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80}),
 		"omitted soft pct defaults to 80")
 }
 
@@ -432,10 +431,10 @@ func TestBudgetDigest_Component(t *testing.T) {
 // empty version → empty (no prompt); each pointer field (repo/ref/path) and the
 // resolved version flips it; 8 hex chars; deterministic.
 func TestPromptDigest_Component(t *testing.T) {
-	assert.Equal(t, "", promptDigest(agentsv1alpha1.GitPromptSource{}, ""),
+	assert.Equal(t, "", promptDigest(agentsv1beta1.GitPromptSource{}, ""),
 		"no resolved version → empty component (the promptRef gate)")
 
-	src := agentsv1alpha1.GitPromptSource{Repo: "https://git/p.git", Ref: "v1", Path: "sys.txt"}
+	src := agentsv1beta1.GitPromptSource{Repo: "https://git/p.git", Ref: "v1", Path: "sys.txt"}
 	d := promptDigest(src, "ver-a")
 	require.NotEmpty(t, d)
 	assert.Len(t, d, 8, "prompt digest is 8 hex chars — the bounded suffix budget")
@@ -467,8 +466,8 @@ func TestPromptDigest_Component(t *testing.T) {
 // image.
 func TestPromptChange_DoesNotChangeImageDigest(t *testing.T) {
 	// Same agent, same bindings/budget — only the prompt version (ref) swaps.
-	promptV1 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "resolved-v1")
-	promptV2 := promptDigest(agentsv1alpha1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "resolved-v2")
+	promptV1 := promptDigest(agentsv1beta1.GitPromptSource{Repo: "r", Ref: "v1", Path: "p"}, "resolved-v1")
+	promptV2 := promptDigest(agentsv1beta1.GitPromptSource{Repo: "r", Ref: "v2", Path: "p"}, "resolved-v2")
 	require.NotEqual(t, promptV1, promptV2, "precondition: a prompt swap changes the prompt component")
 
 	combinedV1 := combinedBindingDigest("", "", "", "", promptV1, "", "", "", "", "")
@@ -487,8 +486,8 @@ func TestPromptChange_DoesNotChangeImageDigest(t *testing.T) {
 	// A same-image spec differing ONLY by promptRef keeps the SAME specHash-derived
 	// image (Image field identical) while the combined "-h" suffix differs. Prove
 	// the image field is stable across the swap.
-	specA := agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/x/agent@sha256:abc", PromptRef: "prompt-v1"}
-	specB := agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/x/agent@sha256:abc", PromptRef: "prompt-v2"}
+	specA := agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/x/agent@sha256:abc", PromptRef: "prompt-v1"}
+	specB := agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/x/agent@sha256:abc", PromptRef: "prompt-v2"}
 	assert.Equal(t, specA.Image, specB.Image,
 		"a prompt-only change keeps the container image identical (no rebuild)")
 }
@@ -500,10 +499,10 @@ func TestPromptChange_DoesNotChangeImageDigest(t *testing.T) {
 func TestRuntimeDigest_Component(t *testing.T) {
 	assert.Equal(t, "", runtimeDigest(nil), "nil runtime → empty component")
 
-	base := &agentsv1alpha1.RuntimeSpec{
-		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 4},
-		Resilience: &agentsv1alpha1.ResilienceSpec{
-			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 2},
+	base := &agentsv1beta1.RuntimeSpec{
+		ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "allow", ParallelLimit: 4},
+		Resilience: &agentsv1beta1.ResilienceSpec{
+			ModelCall: &agentsv1beta1.CallResilience{MaxRetries: 2},
 		},
 	}
 	d := runtimeDigest(base)
@@ -512,29 +511,44 @@ func TestRuntimeDigest_Component(t *testing.T) {
 	assert.Equal(t, d, runtimeDigest(base), "deterministic")
 
 	// Changing ToolPolicy.Default flips the digest.
-	changed1 := &agentsv1alpha1.RuntimeSpec{
-		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "deny", ParallelLimit: 4},
-		Resilience: &agentsv1alpha1.ResilienceSpec{
-			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 2},
+	changed1 := &agentsv1beta1.RuntimeSpec{
+		ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "deny", ParallelLimit: 4},
+		Resilience: &agentsv1beta1.ResilienceSpec{
+			ModelCall: &agentsv1beta1.CallResilience{MaxRetries: 2},
 		},
 	}
 	assert.NotEqual(t, d, runtimeDigest(changed1), "ToolPolicy.Default change must flip the runtime digest")
 
 	// Changing ParallelLimit flips the digest.
-	changed2 := &agentsv1alpha1.RuntimeSpec{
-		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 8},
-		Resilience: &agentsv1alpha1.ResilienceSpec{
-			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 2},
+	changed2 := &agentsv1beta1.RuntimeSpec{
+		ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "allow", ParallelLimit: 8},
+		Resilience: &agentsv1beta1.ResilienceSpec{
+			ModelCall: &agentsv1beta1.CallResilience{MaxRetries: 2},
 		},
 	}
 	assert.NotEqual(t, d, runtimeDigest(changed2), "ParallelLimit change must flip the runtime digest")
 
 	// Changing Resilience.ModelCall.MaxRetries flips the digest.
-	changed3 := &agentsv1alpha1.RuntimeSpec{
-		ToolPolicy: &agentsv1alpha1.ToolPolicySpec{Default: "allow", ParallelLimit: 4},
-		Resilience: &agentsv1alpha1.ResilienceSpec{
-			ModelCall: &agentsv1alpha1.CallResilience{MaxRetries: 5},
+	changed3 := &agentsv1beta1.RuntimeSpec{
+		ToolPolicy: &agentsv1beta1.ToolPolicySpec{Default: "allow", ParallelLimit: 4},
+		Resilience: &agentsv1beta1.ResilienceSpec{
+			ModelCall: &agentsv1beta1.CallResilience{MaxRetries: 5},
 		},
 	}
 	assert.NotEqual(t, d, runtimeDigest(changed3), "Resilience.ModelCall.MaxRetries change must flip the runtime digest")
+}
+
+// The collector's env reaches a pod only on a new revision, so its contract must move the digest:
+// a version bump rolls every agent once, export on/off rolls the agent, and nothing else does.
+func TestTraceExportFold(t *testing.T) {
+	base := combinedBindingDigest("", "", "", "", "", "", "x", "", "", "")
+
+	off, on := traceExportFold(base, false), traceExportFold(base, true)
+	assert.Len(t, off, 8, "the fold must keep the 8-char revision suffix budget")
+	assert.NotEqual(t, base, off, "the contract version must move every agent's digest once")
+	assert.NotEqual(t, off, on, "turning export on adds env, so it must roll a revision")
+	assert.Equal(t, off, traceExportFold(base, false), "the fold must be deterministic")
+	assert.Equal(t, on, traceExportFold(base, true), "the fold must be deterministic")
+	assert.NotEqual(t, off, traceExportFold(combinedBindingDigest("", "", "", "", "", "", "y", "", "", ""), false),
+		"the fold must carry the underlying digest through")
 }

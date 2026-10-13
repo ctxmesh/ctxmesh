@@ -193,3 +193,22 @@ func TestBindRuncap_RouteAbsentWithoutABindStore(t *testing.T) {
 	assert.Empty(t, pattern, "no bind store ⇒ no exchange edge")
 	_ = signer
 }
+
+// A run is re-minted on every claim and resume, and the resumed run can land on another pod with another
+// key. Each token binds once, independently: keying on the run id refused the run's own launcher there.
+func TestBindRuncap_ReMintedRunBindsAgainOnANewKey(t *testing.T) {
+	s, signer := newBindServer(t)
+	firstPod, err := runcap.NewProofSigner()
+	require.NoError(t, err)
+	resumedPod, err := runcap.NewProofSigner()
+	require.NoError(t, err)
+
+	first := bearerCap(t, signer, "run-resumed")
+	require.Equal(t, http.StatusOK, postBind(t, s, first, firstPod.Thumbprint()).Code)
+
+	resumed := bearerCap(t, signer, "run-resumed")
+	assert.Equal(t, http.StatusOK, postBind(t, s, resumed, resumedPod.Thumbprint()).Code,
+		"a fresh token for the same run must bind to the pod that received it")
+	assert.Equal(t, http.StatusConflict, postBind(t, s, resumed, firstPod.Thumbprint()).Code,
+		"and is then single-use like any other")
+}

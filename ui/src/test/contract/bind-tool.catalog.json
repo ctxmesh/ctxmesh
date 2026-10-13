@@ -1,0 +1,24 @@
+{
+  "tools": [
+    {
+      "name": "code-search",
+      "registry": "search-mcp",
+      "namespace": "default",
+      "description": "",
+      "inputSchema": null,
+      "source": "curated",
+      "approvalStatus": "approved"
+    }
+  ],
+  "items": [
+    {
+      "name": "code-search",
+      "registry": "search-mcp",
+      "namespace": "default",
+      "description": "",
+      "inputSchema": null,
+      "source": "curated",
+      "approvalStatus": "approved"
+    }
+  ]
+}

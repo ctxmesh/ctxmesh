@@ -20,6 +20,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
@@ -150,4 +151,45 @@ func TestDedupBackendError(t *testing.T) {
 	s, mr := newDedupProxy(t, map[string]string{"t": "ns"}, nil)
 	mr.Close()
 	assert.Equal(t, http.StatusBadGateway, do(t, s, "POST", "/dedup", "t", `{"messageID":"m"}`, nil).Code)
+}
+
+// The claim lifecycle over the proxy: a delivery claims the id while it is processed, a failed one releases
+// it so the retry is processed, and a succeeded one completes it so a redelivery is a duplicate. The claim
+// carries the TTL the launcher asked for, so one left by a dead launcher expires.
+func TestDedupClaimLifecycle(t *testing.T) {
+	s, mr := newDedupProxy(t, map[string]string{"tok": "team-alpha-ns"}, nil)
+	post := func(body string) string {
+		t.Helper()
+		rec := do(t, s, "POST", "/dedup", "tok", body, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		return rec.Body.String()
+	}
+
+	assert.JSONEq(t, `{"firstSeen":true,"state":"claimed"}`,
+		post(`{"messageID":"m-1","ttlSeconds":120,"op":"claim","token":"a"}`))
+	assert.Equal(t, 120*time.Second, mr.TTL("a2a:seen:team-alpha-ns:m-1"))
+	assert.JSONEq(t, `{"firstSeen":false,"state":"inflight"}`,
+		post(`{"messageID":"m-1","ttlSeconds":120,"op":"claim","token":"b"}`), "a concurrent duplicate waits")
+
+	post(`{"messageID":"m-1","op":"release","token":"a"}`)
+	assert.JSONEq(t, `{"firstSeen":true,"state":"claimed"}`,
+		post(`{"messageID":"m-1","ttlSeconds":120,"op":"claim","token":"retry"}`), "a released id is processed again")
+
+	post(`{"messageID":"m-1","ttlSeconds":600,"op":"complete"}`)
+	assert.Equal(t, 600*time.Second, mr.TTL("a2a:seen:team-alpha-ns:m-1"))
+	assert.JSONEq(t, `{"firstSeen":false,"state":"done"}`,
+		post(`{"messageID":"m-1","ttlSeconds":120,"op":"claim","token":"again"}`), "a completed id is a duplicate")
+	assert.JSONEq(t, `{"firstSeen":false}`, post(`{"messageID":"m-1","ttlSeconds":600}`),
+		"a launcher that predates claims reads a completed id as seen")
+}
+
+func TestDedupClaimValidation(t *testing.T) {
+	s, _ := newDedupProxy(t, map[string]string{"t": "ns"}, nil)
+	for name, body := range map[string]string{
+		"unknown op":            `{"messageID":"m","op":"forget"}`,
+		"claim without token":   `{"messageID":"m","op":"claim"}`,
+		"release without token": `{"messageID":"m","op":"release"}`,
+	} {
+		assert.Equal(t, http.StatusBadRequest, do(t, s, "POST", "/dedup", "t", body, nil).Code, name)
+	}
 }

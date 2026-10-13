@@ -26,19 +26,21 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/gateway"
 )
 
 const (
-	// gwNS is the namespace where the gateway ConfigMap and Deployment live.
-	gwNS = gateway.GatewayNamespace // "ctxmesh"
+	// gwNS is the namespace where the gateway ConfigMap and Deployment live: the platform's, which a
+	// reconciler built without one takes as the default.
+	gwNS = DefaultPlatformNamespace
 )
 
 // newMRReconciler constructs a ModelRouteReconciler backed by the envtest API server.
@@ -114,13 +116,13 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	t.Cleanup(cleanupDeploy)
 
 	const routeName = "mr-test-mock"
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      routeName,
 			Namespace: gwNS,
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
 		},
@@ -129,7 +131,7 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
 
 	r := newMRReconciler()
-	reconcileMR(t, r, gwNS, routeName)
+	first := reconcileMR(t, r, gwNS, routeName)
 
 	// ── Assert ConfigMap ───────────────────────────────────────────────────────
 	var cm corev1.ConfigMap
@@ -153,8 +155,16 @@ func TestModelRoute_MockRouteRendered(t *testing.T) {
 	assert.True(t, hasAnnotation, "gateway Deployment must have config-hash annotation")
 	assert.NotEmpty(t, hash, "config-hash annotation must be non-empty")
 
+	// Ready waits for the gateway to serve the config. envtest runs no Deployment controller, so
+	// assert the route is not Ready before the rollout, then complete the rollout by hand.
+	assert.Positive(t, first.RequeueAfter, "the reconcile must look again while the gateway rolls")
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "NotYetServed")
+	completeGatewayRollout(t)
+	assert.Equal(t, ctrl.Result{}, reconcileMR(t, r, gwNS, routeName))
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
+
 	// ── Assert ModelRoute Ready=True ───────────────────────────────────────────
-	var updated agentsv1alpha1.ModelRoute
+	var updated agentsv1beta1.ModelRoute
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: routeName, Namespace: gwNS}, &updated))
 
@@ -198,11 +208,11 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, secret) })
 
 	// Create SecretBinding referencing the Secret.
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: gwNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: secretName,
 				Key:  "api-key",
 			},
@@ -212,10 +222,10 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
 	// Create ModelRoute with the real provider.
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider:         "anthropic",
 					Model:            "claude-sonnet-4-6",
@@ -229,7 +239,7 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
 
 	r := newMRReconciler()
-	reconcileMR(t, r, gwNS, routeName)
+	first := reconcileMR(t, r, gwNS, routeName)
 
 	// ── Assert ConfigMap contains os.environ reference ─────────────────────────
 	var cm corev1.ConfigMap
@@ -237,7 +247,7 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 		types.NamespacedName{Name: gateway.GatewayConfigMapName, Namespace: gwNS}, &cm))
 
 	configYAML := cm.Data["config.yaml"]
-	evName := gateway.EnvVarName(bindingName) // e.g. "SB_TEST_BINDING_REAL"
+	evName := gateway.EnvVarName(gwNS, bindingName)
 	assert.Contains(t, configYAML, "os.environ/"+evName,
 		"config.yaml must reference the secret via os.environ/SB_*")
 
@@ -260,8 +270,16 @@ func TestModelRoute_RealProviderRendered(t *testing.T) {
 	assert.Equal(t, secretName, foundEV.ValueFrom.SecretKeyRef.Name)
 	assert.Equal(t, "api-key", foundEV.ValueFrom.SecretKeyRef.Key)
 
+	// Ready waits for the gateway to serve the config. envtest runs no Deployment controller, so
+	// assert the route is not Ready before the rollout, then complete the rollout by hand.
+	assert.Positive(t, first.RequeueAfter, "the reconcile must look again while the gateway rolls")
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "NotYetServed")
+	completeGatewayRollout(t)
+	assert.Equal(t, ctrl.Result{}, reconcileMR(t, r, gwNS, routeName))
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionTrue, "Served")
+
 	// ── Assert ModelRoute Ready=True ───────────────────────────────────────────
-	var updated agentsv1alpha1.ModelRoute
+	var updated agentsv1beta1.ModelRoute
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: routeName, Namespace: gwNS}, &updated))
 
@@ -299,20 +317,20 @@ func TestModelRoute_GatewaySecretSync(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, secret))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, secret) })
 
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: srcNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend:   "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{Name: secretName, Key: "api-key"},
+			SecretRef: agentsv1beta1.SecretKeyRef{Name: secretName, Key: "api-key"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, binding))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: srcNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider: "anthropic", Model: "claude-sonnet-4-6", Priority: 1, SecretBindingRef: bindingName,
 			}},
 		},
@@ -331,17 +349,18 @@ func TestModelRoute_GatewaySecretSync(t *testing.T) {
 	// The provider Secret is mirrored into the gateway namespace with the same data.
 	var mirror corev1.Secret
 	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: secretName, Namespace: gwNS}, &mirror),
+		types.NamespacedName{Name: gateway.MirrorSecretName(gwNS, srcNS, secretName), Namespace: gwNS}, &mirror),
 		"the provider Secret must be mirrored into the gateway namespace")
 	assert.Equal(t, apiKey, string(mirror.Data["api-key"]), "the mirror carries the same key data")
 	assert.Equal(t, gatewaySyncValue, mirror.Labels[gatewaySyncLabel], "the mirror is labelled for GC")
+	assert.Equal(t, srcNS+"/"+secretName, mirror.Annotations[mirrorSourceAnnotation], "the mirror names its source")
 
 	// GC: deleting the route removes the now-unreferenced mirror on the next reconcile.
 	require.NoError(t, k8sClient.Delete(testCtx, route))
 	routeDeleted = true
 	reconcileMR(t, r, srcNS, routeName)
 
-	err := k8sClient.Get(testCtx, types.NamespacedName{Name: secretName, Namespace: gwNS}, &corev1.Secret{})
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: gateway.MirrorSecretName(gwNS, srcNS, secretName), Namespace: gwNS}, &corev1.Secret{})
 	assert.True(t, apierrors.IsNotFound(err), "the mirror must be GC'd when no route references it")
 }
 
@@ -359,11 +378,11 @@ func TestModelRoute_MissingSecret_RouteExcluded(t *testing.T) {
 	)
 
 	// Create the SecretBinding — but deliberately do NOT create the Secret it references.
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: gwNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: "secret-that-does-not-exist",
 				Key:  "api-key",
 			},
@@ -372,10 +391,10 @@ func TestModelRoute_MissingSecret_RouteExcluded(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, binding))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider:         "openai",
 					Model:            "gpt-4o",
@@ -401,7 +420,7 @@ func TestModelRoute_MissingSecret_RouteExcluded(t *testing.T) {
 		"excluded route must NOT appear in the gateway config")
 
 	// ── Assert ModelRoute Ready=False with SecretUnresolved ────────────────────
-	var updated agentsv1alpha1.ModelRoute
+	var updated agentsv1beta1.ModelRoute
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: routeName, Namespace: gwNS}, &updated))
 
@@ -441,11 +460,11 @@ func TestModelRoute_SecretRotation_HashChanges(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, secret))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, secret) })
 
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{Name: bindingName, Namespace: gwNS},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: "kubernetes",
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: secretName,
 				Key:  "api-key",
 			},
@@ -454,10 +473,10 @@ func TestModelRoute_SecretRotation_HashChanges(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, binding))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, binding) })
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{
 					Provider:         "anthropic",
 					Model:            "claude-sonnet-4-6",
@@ -518,10 +537,10 @@ func TestModelRoute_GatewayAbsent(t *testing.T) {
 	// Deliberately do NOT create the gateway Deployment.
 
 	const routeName = "mr-test-no-gateway"
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{Name: routeName, Namespace: gwNS},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{
 				{Provider: "mock", Model: "mock-default", Priority: 1},
 			},
 		},
@@ -534,11 +553,92 @@ func TestModelRoute_GatewayAbsent(t *testing.T) {
 		NamespacedName: types.NamespacedName{Namespace: gwNS, Name: routeName},
 	})
 	require.NoError(t, err, "Reconcile must not error when gateway Deployment is absent")
-	assert.Equal(t, ctrl.Result{}, result)
+	// This asserted no requeue. The route now says it is not served (GatewayAbsent) and checks again,
+	// because nothing else would tell it when the gateway appears.
+	assert.Equal(t, ctrl.Result{RequeueAfter: gatewayAbsentPoll}, result)
+	assertRouteCondition(t, gwNS, routeName, metav1.ConditionFalse, "GatewayAbsent")
 
 	// ConfigMap must still be created.
 	var cm corev1.ConfigMap
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: gateway.GatewayConfigMapName, Namespace: gwNS}, &cm))
 	assert.Contains(t, cm.Data["config.yaml"], routeName)
+}
+
+// completeGatewayRollout stands in for the Deployment controller envtest does not run: it reports the
+// gateway's current template as fully rolled out.
+func completeGatewayRollout(t *testing.T) {
+	t.Helper()
+	var d appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx,
+		types.NamespacedName{Name: gateway.GatewayDeploymentName, Namespace: gwNS}, &d))
+	d.Status = appsv1.DeploymentStatus{
+		ObservedGeneration: d.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1,
+	}
+	require.NoError(t, k8sClient.Status().Update(testCtx, &d))
+}
+
+func assertRouteCondition(t *testing.T, ns, name string, status metav1.ConditionStatus, reason string) {
+	t.Helper()
+	var mr agentsv1beta1.ModelRoute
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: ns}, &mr))
+	c := apimeta.FindStatusCondition(mr.Status.Conditions, conditionReady)
+	require.NotNil(t, c, "ModelRoute %s/%s has no Ready condition", ns, name)
+	assert.Equal(t, status, c.Status, "Ready status (%s)", c.Message)
+	assert.Equal(t, reason, c.Reason)
+}
+
+// A route already served keeps Ready while another route's change rolls the gateway, since the pods
+// still running serve it; the new route is not Ready until the roll completes.
+func TestModelRoute_ServedRouteStaysReadyWhileAnotherRolls(t *testing.T) {
+	ensureNS(t, gwNS)
+	t.Cleanup(createGatewayDeployment(t))
+	mk := func(name string) {
+		route := &agentsv1beta1.ModelRoute{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: gwNS},
+			Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
+				{Provider: "mock", Model: "mock-default", Priority: 1},
+			}},
+		}
+		require.NoError(t, k8sClient.Create(testCtx, route))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
+	}
+	r := newMRReconciler()
+	mk("mr-served-first")
+	reconcileMR(t, r, gwNS, "mr-served-first")
+	completeGatewayRollout(t)
+	reconcileMR(t, r, gwNS, "mr-served-first")
+	assertRouteCondition(t, gwNS, "mr-served-first", metav1.ConditionTrue, "Served")
+
+	mk("mr-served-second") // changes the config, so the gateway rolls again
+	reconcileMR(t, r, gwNS, "mr-served-second")
+	assertRouteCondition(t, gwNS, "mr-served-first", metav1.ConditionTrue, "Served")
+	assertRouteCondition(t, gwNS, "mr-served-second", metav1.ConditionFalse, "NotYetServed")
+}
+
+// An edited route that was served before reports GatewayRolling, not NotYetServed: the old gateway
+// pods still answer by its alias while the new version rolls out.
+func TestModelRoute_EditedServedRouteIsRollingNotNew(t *testing.T) {
+	ensureNS(t, gwNS)
+	t.Cleanup(createGatewayDeployment(t))
+	route := &agentsv1beta1.ModelRoute{
+		ObjectMeta: metav1.ObjectMeta{Name: "mr-edited", Namespace: gwNS},
+		Spec: agentsv1beta1.ModelRouteSpec{Providers: []agentsv1beta1.ProviderRef{
+			{Provider: "mock", Model: "mock-default", Priority: 1},
+		}},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, route))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, route) })
+	r := newMRReconciler()
+	reconcileMR(t, r, gwNS, "mr-edited")
+	assertRouteCondition(t, gwNS, "mr-edited", metav1.ConditionFalse, "NotYetServed")
+	completeGatewayRollout(t)
+	reconcileMR(t, r, gwNS, "mr-edited")
+	assertRouteCondition(t, gwNS, "mr-edited", metav1.ConditionTrue, "Served")
+
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "mr-edited", Namespace: gwNS}, route))
+	route.Spec.Providers[0].Model = "mock-other" // a new generation, so a new config to roll out
+	require.NoError(t, k8sClient.Update(testCtx, route))
+	reconcileMR(t, r, gwNS, "mr-edited")
+	assertRouteCondition(t, gwNS, "mr-edited", metav1.ConditionFalse, "GatewayRolling")
 }

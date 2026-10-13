@@ -68,13 +68,19 @@ func (s *Server) verifyRuncapWithProof(r *http.Request) (runcap.Capability, erro
 		// question is purely the fleet's posture.
 		if s.requireProofOfPossession {
 			return runcap.Capability{}, errors.New(
-				"this capability is not sender-constrained; the platform requires proof-of-possession")
+				"this run capability is not sender-constrained: the agent's launcher did not bind it. Rebuild the " +
+					"agent on the current base image, or set bff.runCapabilities.requireProofOfPossession=false " +
+					"while older agents are still running")
 		}
 		s.log.V(1).Info("accepting a legacy BEARER run capability (no cnf) — set RUNCAP_REQUIRE_POP=true "+
 			"once the fleet mints sender-constrained capabilities",
 			"run", capab.RunID, "agent", capab.Agent, "path", r.URL.Path)
 		return capab, nil
 
+	case errors.Is(perr, runcap.ErrProofUnchecked):
+		// The replay set is down: refuse, but as an outage, not as an attack on this caller.
+		s.log.Error(perr, "run-capability proof could not be checked", "run", capab.RunID, "path", r.URL.Path)
+		return runcap.Capability{}, errProofUnchecked
 	default:
 		// The capability IS bound and the proof did not hold. Never accepted, in any posture — accepting
 		// here would let an attacker downgrade a constrained token by simply omitting the proof.
@@ -82,6 +88,20 @@ func (s *Server) verifyRuncapWithProof(r *http.Request) (runcap.Capability, erro
 			"path", r.URL.Path, "reason", perr.Error())
 		return runcap.Capability{}, errors.New("invalid run-capability proof")
 	}
+}
+
+// errProofUnchecked is returned when the proof could not be checked at all; writeRuncapError maps it to
+// 503 so an outage of the replay set does not read as the caller presenting a bad proof.
+var errProofUnchecked = errors.New("the run-capability proof cannot be checked right now; retry")
+
+// writeRuncapError reports a verifyRuncapWithProof failure: 503 when the platform could not check the
+// proof, 401 for everything about the capability or proof itself.
+func writeRuncapError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errProofUnchecked) {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeError(w, http.StatusUnauthorized, err.Error())
 }
 
 // requestURL reconstructs the absolute URL the caller addressed, which is what its proof is bound to. A

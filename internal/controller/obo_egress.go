@@ -23,8 +23,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/utils/ptr"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -59,11 +60,8 @@ type OBOEgressConfig struct {
 	// capabilities against; CapabilityAudience is the audience it accepts.
 	CapabilityPublicKeyB64 string
 	CapabilityAudience     string
-	// CredentialNamespace is the locked namespace holding grant Secrets (the sidecar reads
-	// them in embedded mode, or the central service does in delegation mode).
-	CredentialNamespace string
-	// TokenServiceURL, when set, makes the sidecar DELEGATE resolution to the central token
-	// service (the scaling split); empty ⇒ the sidecar embeds the backend (first working cut).
+	// TokenServiceURL is the central token service the sidecar resolves every tool credential
+	// through (ADR 0030 §1). Required for any agent with a tool: the sidecar has no other source.
 	TokenServiceURL string
 	// ResponseHeaderTimeout and StreamIdleTimeout bound a tool call's two distinct hangs (M146.7,
 	// m52.M143-knobs). Both were previously read from the sidecar's env by cmd/egress-sidecar and set
@@ -97,21 +95,31 @@ type OBOEgressConfig struct {
 // sidecar reads + fsnotify-watches it). Both nil ⇒ no toolPolicy set (permissive; the sidecar
 // starts with no policy). This task is PLUMBING only — the policy is delivered + parsed + held but
 // NOT yet enforced (enforcement is a later M82 task).
+// The egress sidecar's own variables. spec.env never reaches the sidecar.
+const (
+	envEgressAgent                 = "EGRESS_AGENT"
+	envEgressListenAddr            = "EGRESS_LISTEN_ADDR"
+	envEgressRoutes                = "EGRESS_ROUTES"
+	envEgressBoundary              = "EGRESS_BOUNDARY"
+	envEgressResponseHeaderTimeout = "EGRESS_RESPONSE_HEADER_TIMEOUT"
+	envEgressStreamIdleTimeout     = "EGRESS_STREAM_IDLE_TIMEOUT"
+)
+
 func egressSidecarContainer(
 	cfg OBOEgressConfig, namespace, agentIdentity, boundary, routesJSON string,
-	recordCapable, devDataPlane bool,
+	recordCapable bool, objectStore []corev1.EnvVar,
 	toolPolicyMount *corev1.VolumeMount, toolPolicyEnv []corev1.EnvVar,
 	routesMount *corev1.VolumeMount, routesEnv []corev1.EnvVar,
 ) corev1.Container {
 	env := []corev1.EnvVar{
-		{Name: "MCP_CAPABILITY_PUBLIC_KEY", Value: cfg.CapabilityPublicKeyB64},
-		{Name: "MCP_CAPABILITY_AUDIENCE", Value: cfg.CapabilityAudience},
-		{Name: "MCP_CREDENTIAL_NAMESPACE", Value: cfg.CredentialNamespace},
-		{Name: "EGRESS_AGENT", Value: agentIdentity},
-		{Name: "POD_NAMESPACE", Value: namespace},
+		{Name: envMCPCapPublicKey, Value: cfg.CapabilityPublicKeyB64},
+		{Name: envMCPCapAudience, Value: cfg.CapabilityAudience},
+		{Name: envTokenServiceURL, Value: cfg.TokenServiceURL},
+		{Name: envEgressAgent, Value: agentIdentity},
+		{Name: envPodNamespace, Value: namespace},
 		// Bind the port the manifest rewrite points at — chosen to avoid every other in-pod
 		// port (the managed-agent's own listener collided at the default 8081).
-		{Name: "EGRESS_LISTEN_ADDR", Value: egressSidecarListenAddr},
+		{Name: envEgressListenAddr, Value: egressSidecarListenAddr},
 	}
 	// Routes delivery (J7): prefer the hot-reloadable mounted ConfigMap (EGRESS_ROUTES_FILE) so a
 	// remote-tool-URL edit reloads live without a revision roll; fall back to the static EGRESS_ROUTES
@@ -119,32 +127,29 @@ func egressSidecarContainer(
 	if routesMount != nil {
 		env = append(env, routesEnv...)
 	} else {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_ROUTES", Value: routesJSON})
+		env = append(env, corev1.EnvVar{Name: envEgressRoutes, Value: routesJSON})
 	}
 	// The trust boundary (ADR 0033) the sidecar serves — the agent's registry, or the agent
 	// itself. It supersedes EGRESS_AGENT as the scoping gate so registry teammates can redeem a
 	// relayed capability (team-OBO); empty ⇒ the per-agent gate (standalone / OBO-boundary off).
 	if boundary != "" {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_BOUNDARY", Value: boundary})
-	}
-	if cfg.TokenServiceURL != "" {
-		env = append(env, corev1.EnvVar{Name: "TOKEN_SERVICE_URL", Value: cfg.TokenServiceURL})
+		env = append(env, corev1.EnvVar{Name: envEgressBoundary, Value: boundary})
 	}
 	// The two tool-call timeouts (M146.7). STATIC env, and folded into egressDigest below — a sidecar
 	// env change that does NOT move the revision name is silently dropped by the CreateOrUpdate guard
 	// (the M4 landmine), so an operator would edit the chart value and see nothing happen.
 	if cfg.ResponseHeaderTimeout != "" {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_RESPONSE_HEADER_TIMEOUT", Value: cfg.ResponseHeaderTimeout})
+		env = append(env, corev1.EnvVar{Name: envEgressResponseHeaderTimeout, Value: cfg.ResponseHeaderTimeout})
 	}
 	if cfg.StreamIdleTimeout != "" {
-		env = append(env, corev1.EnvVar{Name: "EGRESS_STREAM_IDLE_TIMEOUT", Value: cfg.StreamIdleTimeout})
+		env = append(env, corev1.EnvVar{Name: envEgressStreamIdleTimeout, Value: cfg.StreamIdleTimeout})
 	}
-	// Record mode (M78, ADR 0071 §1/C1): give the sidecar a fixture sink + flip on capture.
-	// RECORD_CAPABLE=true forces the C2 fail-closed at startup if OBJECT_STORE_ADDR is unset —
-	// STATIC env (reconcile-time constants), never valueFrom.
+	// Record mode (M78, ADR 0071 §1/C1): give the sidecar a fixture sink (objectStore, the agent's own
+	// object-store env, empty off the dev data plane) + flip on capture. RECORD_CAPABLE=true forces the
+	// C2 fail-closed at startup if OBJECT_STORE_ADDR is unset — STATIC env, never valueFrom.
 	if recordCapable {
-		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
-		env = append(env, objectStoreEnv(devDataPlane)...)
+		env = append(env, corev1.EnvVar{Name: envRecordCapable, Value: gatewaySyncValue})
+		env = append(env, objectStore...)
 	}
 	// Tool-call governance (M82, ADR 0074 §1): the resolved tool-policy file path (TOOL_POLICY_FILE)
 	// — STATIC (a mounted path, never valueFrom). Appended after the record env so the sidecar reads
@@ -157,16 +162,52 @@ func egressSidecarContainer(
 	if routesMount != nil {
 		mounts = append(mounts, *routesMount) // J7: the hot-reloadable routes ConfigMap.
 	}
+	env = append(env, corev1.EnvVar{Name: envGoMemLimit, Value: egressSidecarGoMemLimit})
 	return corev1.Container{
-		Name:         egressSidecarContainerName,
-		Image:        cfg.SidecarImage,
-		Env:          env,
-		VolumeMounts: mounts,
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("25m"),
-				corev1.ResourceMemory: resource.MustParse("64Mi"),
-			},
+		Name:            egressSidecarContainerName,
+		Image:           cfg.SidecarImage,
+		Env:             env,
+		VolumeMounts:    mounts,
+		Resources:       egressSidecarResources(),
+		SecurityContext: egressSidecarSecurityContext(),
+	}
+}
+
+// egressSidecarSecurityContext meets the restricted Pod Security Standard, which judges a pod by its
+// worst container: without it a namespace enforcing restricted refuses every tool-bound agent. The
+// image runs as a fixed non-root uid (Dockerfile.egress-sidecar) and the binary writes no file, so the
+// root filesystem is read-only too. It does not follow spec.unconfined: that exception is for the
+// author's image, and this one is the platform's.
+func egressSidecarSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr.To(true),
+		AllowPrivilegeEscalation: ptr.To(false),
+		ReadOnlyRootFilesystem:   ptr.To(true),
+		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{capabilityAll}},
+		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
+// The sidecar's limits, from a local load measurement of the sidecar binary (m184.40): about 16Mi idle;
+// 25Mi at 64 concurrent 1 MiB calls streamed through an allow-all route; 138Mi and a quarter core at 64
+// concurrent 1 MiB calls on a route whose policy makes it read each body (450Mi at 4 MiB bodies, which
+// the limit deliberately does not cover: a pod making 64 such calls at once is OOM-killed and restarts
+// its sidecar rather than starving the node). GOMEMLIMIT sits below the memory limit so the collector
+// runs before the kernel kills the process.
+const (
+	envGoMemLimit           = "GOMEMLIMIT"
+	egressSidecarGoMemLimit = "230MiB"
+)
+
+func egressSidecarResources() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("25m"),
+			corev1.ResourceMemory: resource.MustParse("64Mi"),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU:    resource.MustParse("500m"),
+			corev1.ResourceMemory: resource.MustParse("256Mi"),
 		},
 	}
 }
@@ -176,9 +217,9 @@ func egressSidecarContainer(
 // `bnd` against it, so registry teammates can redeem a relayed capability (team-OBO) but a
 // different registry cannot. It folds into the egress digest so a membership change rolls a new
 // revision (the EGRESS_BOUNDARY env must actually land).
-func agentEgressBoundary(deploy *agentsv1alpha1.AgentDeployment, m registryMembership) string {
+func agentEgressBoundary(deploy *agentsv1beta1.AgentDeployment, m registryMembership) string {
 	if m.IsMember && m.RegistryID != "" {
-		return credresolve.RegistryBoundary(m.RegistryID)
+		return credresolve.RegistryBoundary(deploy.Namespace, m.RegistryID)
 	}
 	return credresolve.AgentBoundary(deploy.Namespace, deploy.Name)
 }

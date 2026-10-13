@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,18 +34,18 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
 // createExecAgent creates an AgentDeployment with the given execution model and
 // optional labels, refreshes it for the server-assigned UID/generation, and
 // registers cleanup.
-func createExecAgent(t *testing.T, name, namespace, model string, labels map[string]string) *agentsv1alpha1.AgentDeployment {
+func createExecAgent(t *testing.T, name, namespace, model string, labels map[string]string) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: model,
 			Port:           8080,
@@ -59,9 +60,9 @@ func createExecAgent(t *testing.T, name, namespace, model string, labels map[str
 // createRegistry creates an AgentRegistry selecting members by the given label.
 func createRegistry(t *testing.T, name, namespace, registryID, labelKey, labelVal string) {
 	t.Helper()
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryID,
 			MemberSelector: metav1.LabelSelector{MatchLabels: map[string]string{labelKey: labelVal}},
 		},
@@ -71,9 +72,9 @@ func createRegistry(t *testing.T, name, namespace, registryID, labelKey, labelVa
 }
 
 // createScalingPolicy creates an AgentScalingPolicy targeting agentRef.
-func createScalingPolicy(t *testing.T, name, namespace, agentRef, trigger string, mutate func(*agentsv1alpha1.AgentScalingPolicySpec)) {
+func createScalingPolicy(t *testing.T, name, namespace, agentRef, trigger string, mutate func(*agentsv1beta1.AgentScalingPolicySpec)) {
 	t.Helper()
-	spec := agentsv1alpha1.AgentScalingPolicySpec{
+	spec := agentsv1beta1.AgentScalingPolicySpec{
 		AgentRef: agentRef,
 		Trigger:  trigger,
 		Min:      1,
@@ -83,7 +84,7 @@ func createScalingPolicy(t *testing.T, name, namespace, agentRef, trigger string
 	if mutate != nil {
 		mutate(&spec)
 	}
-	p := &agentsv1alpha1.AgentScalingPolicy{
+	p := &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
 		Spec:       spec,
 	}
@@ -134,7 +135,7 @@ func TestExecModel_Serving_RequestRatePolicy(t *testing.T) {
 		namespace = "default"
 	)
 	createExecAgent(t, name, namespace, "serving", nil)
-	createScalingPolicy(t, name+"-pol", namespace, name, triggerRequestRate, func(s *agentsv1alpha1.AgentScalingPolicySpec) {
+	createScalingPolicy(t, name+"-pol", namespace, name, triggerRequestRate, func(s *agentsv1beta1.AgentScalingPolicySpec) {
 		s.Min = 2
 		s.Max = 9
 	})
@@ -156,8 +157,8 @@ func TestExecModel_Serving_CustomMetricPolicy(t *testing.T) {
 		namespace = "default"
 	)
 	createExecAgent(t, name, namespace, "serving", nil)
-	createScalingPolicy(t, name+"-pol", namespace, name, triggerCustomMetric, func(s *agentsv1alpha1.AgentScalingPolicySpec) {
-		s.Metric = &agentsv1alpha1.CustomMetricRef{
+	createScalingPolicy(t, name+"-pol", namespace, name, triggerCustomMetric, func(s *agentsv1beta1.AgentScalingPolicySpec) {
+		s.Metric = &agentsv1beta1.CustomMetricRef{
 			Class:  "hpa.autoscaling.knative.dev",
 			Metric: "cpu",
 		}
@@ -236,7 +237,7 @@ func TestExecModel_Eventing_DeploymentServiceTrigger(t *testing.T) {
 
 	// status.url must point at the real (-eventing) Service, not a bare
 	// <agent> host that has no Service backing it (NXDOMAIN).
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	assert.Contains(t, updated.Status.URL, eventingServiceName(name), "status.url must reference the -eventing Service")
 
@@ -292,7 +293,7 @@ func TestExecModel_Eventing_NoRegistry_NotReady(t *testing.T) {
 
 	reconcileNN(t, newReconciler(), name, namespace)
 
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	cond := findCondition(updated.Status.Conditions, conditionReady)
 	require.NotNil(t, cond, "Ready condition must be set")
@@ -365,7 +366,7 @@ func TestExecModel_Job_BareJob(t *testing.T) {
 	assertNoTrigger(t, name, namespace)
 
 	// Status Ready=True.
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	cond := findCondition(updated.Status.Conditions, conditionReady)
 	require.NotNil(t, cond)
@@ -416,7 +417,7 @@ func TestExecModel_Job_SchedulePolicy_CronJob(t *testing.T) {
 		schedule  = "*/5 * * * *"
 	)
 	createExecAgent(t, name, namespace, "job", nil)
-	createScalingPolicy(t, name+"-pol", namespace, name, triggerSchedule, func(s *agentsv1alpha1.AgentScalingPolicySpec) {
+	createScalingPolicy(t, name+"-pol", namespace, name, triggerSchedule, func(s *agentsv1beta1.AgentScalingPolicySpec) {
 		s.Schedule = schedule
 	})
 
@@ -433,7 +434,7 @@ func TestExecModel_Job_SchedulePolicy_CronJob(t *testing.T) {
 	// The bare Job must NOT exist (CronJob replaces it).
 	assertNoJob(t, name, namespace)
 
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	cond := findCondition(updated.Status.Conditions, conditionReady)
 	require.NotNil(t, cond)
@@ -580,4 +581,88 @@ func assertNoEventingService(t *testing.T, name, namespace string) {
 	var svc corev1.Service
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: eventingServiceName(name), Namespace: namespace}, &svc)
 	assert.True(t, apierrors.IsNotFound(err), "no eventing Service expected, got err=%v", err)
+}
+
+// eventingReplicasOf reads the eventing Deployment's replica count.
+func eventingReplicasOf(t *testing.T, name, namespace string) int32 {
+	t.Helper()
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep))
+	require.NotNil(t, dep.Spec.Replicas)
+	return *dep.Spec.Replicas
+}
+
+// setEventingReplicas changes the Deployment's replicas the way KEDA's HPA does.
+func setEventingReplicas(t *testing.T, name, namespace string, n int32) {
+	t.Helper()
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep))
+	dep.Spec.Replicas = &n
+	require.NoError(t, k8sClient.Update(testCtx, &dep))
+}
+
+// TestExecModel_Eventing_QueueDepthScaler_OwnsReplicas verifies that while a
+// queue-depth ScaledObject is in effect the AgentDeployment reconciler leaves the
+// eventing Deployment's replicas to KEDA instead of resetting them on every
+// reconcile, and takes them back when the scaler goes.
+func TestExecModel_Eventing_QueueDepthScaler_OwnsReplicas(t *testing.T) {
+	const (
+		name      = "eventing-keda"
+		namespace = "default"
+		policy    = "eventing-keda-scale"
+	)
+	createExecAgent(t, name, namespace, "eventing", nil)
+	createScalingPolicy(t, policy, namespace, name, triggerQueueDepth, func(s *agentsv1beta1.AgentScalingPolicySpec) {
+		s.Min, s.Max = 0, 6
+	})
+	reconcileScalingNN(t, newScalingReconciler(), policy, namespace)
+
+	r := newReconciler()
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, int32(1), eventingReplicasOf(t, name, namespace), "a new Deployment starts at one replica")
+
+	setEventingReplicas(t, name, namespace, 4)
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, int32(4), eventingReplicasOf(t, name, namespace), "the scaler's count is not reset")
+
+	// The install loses its queue: the ScaledObject goes, and the count is the controller's again.
+	reconcileScalingNN(t, newScalingReconcilerOn(AsyncBackend{}), policy, namespace)
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, int32(1), eventingReplicasOf(t, name, namespace), "a fixed count once no scaler is in effect")
+}
+
+// TestExecModel_Eventing_QueueDepthWithoutQueue_KeepsBounds verifies that a
+// queue-depth policy with no queue to read still bounds the eventing Deployment's
+// fixed replica count: raised to min and lowered to max, never below one.
+func TestExecModel_Eventing_QueueDepthWithoutQueue_KeepsBounds(t *testing.T) {
+	const namespace = "default"
+	for name, tc := range map[string]struct {
+		min, max, want int32
+		scalingMin     int32
+	}{
+		"raised to min":           {min: 3, max: 5, want: 3},
+		"lowered to max":          {min: 0, max: 2, want: 2, scalingMin: 4},
+		"min zero still runs one": {min: 0, max: 5, want: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent := "bounded-" + strings.ReplaceAll(name, " ", "-")
+			deploy := createExecAgent(t, agent, namespace, "eventing", nil)
+			if tc.scalingMin > 0 {
+				deploy.Spec.Scaling = &agentsv1beta1.ScalingSpec{Min: tc.scalingMin, Max: 10}
+				require.NoError(t, k8sClient.Update(testCtx, deploy))
+			}
+			createScalingPolicy(t, agent+"-scale", namespace, agent, triggerQueueDepth, func(s *agentsv1beta1.AgentScalingPolicySpec) {
+				s.Min, s.Max = tc.min, tc.max
+			})
+			reconcileScalingNN(t, newScalingReconcilerOn(AsyncBackend{}), agent+"-scale", namespace)
+
+			r := newReconciler()
+			reconcileNN(t, r, agent, namespace)
+			assert.Equal(t, tc.want, eventingReplicasOf(t, agent, namespace))
+
+			setEventingReplicas(t, agent, namespace, tc.want+1)
+			reconcileNN(t, r, agent, namespace)
+			assert.Equal(t, tc.want, eventingReplicasOf(t, agent, namespace), "the fixed count is re-asserted")
+		})
+	}
 }

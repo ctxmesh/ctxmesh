@@ -1,4 +1,4 @@
-apiVersion: agents.ctxmesh.ai/v1alpha1
+apiVersion: agents.ctxmesh.ai/v1beta1
 kind: AgentDeployment
 metadata:
   name: route-agent

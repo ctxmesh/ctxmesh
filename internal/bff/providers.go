@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -31,10 +32,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 )
 
 // The connect-a-provider handlers (ADR 0015). All three are CALLER-SCOPED
@@ -160,6 +163,27 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 			"namespace", ns, "provider", req.Provider)
 	}
 
+	// Objects are named by the CONNECTION (ADR 0026), so a second key for the same
+	// provider type under a different connection name is a NEW connection, not a
+	// rotation of the first.
+	name := providerRouteName(req.connectionName())
+
+	// Authorize the whole write set BEFORE the probe: the probe contacts the base URL in
+	// the body, and a caller who could not complete the connect must not get the BFF to
+	// make that request for them.
+	if aErr := s.authorizeFlow(r.Context(), caller, flowConnectProvider, ns); aErr != nil {
+		if errors.Is(aErr, authz.ErrForbidden) {
+			s.appendAudit(r.Context(), auditlog.Entry{
+				Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+				ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns, Outcome: auditOutcomeDenied,
+				Detail: map[string]any{providerNoun: strings.ToLower(strings.TrimSpace(req.Provider))},
+			})
+		}
+		ce := s.authzRefusal(aErr, "connect a model provider")
+		writeError(w, ce.status, ce.msg)
+		return
+	}
+
 	// (2) Validate the key with a live probe. A bad key → 401 (honest), an
 	// unreachable provider → 502 — never a 500, never a swallowed success. The
 	// probe returns the initial model list the picker uses (no second round-trip).
@@ -176,10 +200,6 @@ func (s *Server) handleConnectProvider(w http.ResponseWriter, r *http.Request) {
 
 	// (3) Create the three objects with the CALLER'S client. The key goes ONLY
 	// into the Secret; it is dropped from the request struct immediately after.
-	// Objects are named by the CONNECTION (ADR 0026), so a second key for the same
-	// provider type under a different connection name is a NEW connection, not a
-	// rotation of the first.
-	name := providerRouteName(req.connectionName())
 	created, cErr := createProviderObjects(r.Context(), caller, providerCreateSpec{
 		name:        name,
 		namespace:   ns,
@@ -269,6 +289,18 @@ type providerCreateSpec struct {
 	apiKey      string
 	baseURL     string
 	models      []string
+	// model is the route's model. Empty picks primaryModel(models), as a first connect does.
+	model string
+	// rateLimit is the route's rate limit. Nil stamps the connect default.
+	rateLimit *agentsv1beta1.RateLimit
+	// mustExist makes every write an update of an object that already exists. A rotate replaces
+	// what connect wrote and never creates, so a provider missing one of its objects is refused
+	// by the pre-flight, before anything is written.
+	mustExist bool
+	// routeGeneration and bindingGeneration are the metadata.generation a rotate read. The rotate
+	// probes the provider between that read and its writes, and a spec edited meanwhile (a re-pointed
+	// endpoint) is refused rather than overwritten with what was read. Zero skips the check.
+	routeGeneration, bindingGeneration int64
 }
 
 // createProviderObjects UPSERTS the Secret, SecretBinding, and ModelRoute (in
@@ -282,7 +314,8 @@ type providerCreateSpec struct {
 // re-connect therefore succeeds and rotates, never a 409. The update is still
 // CALLER-SCOPED: a viewer without update on Secret/ModelRoute is denied by the API
 // server → the 403 surfaces (ADR 0011). A partial upsert (K8s is not transactional)
-// leaves the earlier objects and the error names the one that failed.
+// leaves the earlier objects and the error names the one that failed. With spec.mustExist (a
+// rotate) every write is an update, and a missing object is refused by the pre-flight.
 func createProviderObjects(ctx context.Context, w client.Client, spec providerCreateSpec) ([]createdObject, *createError) {
 	provider := strings.ToLower(strings.TrimSpace(spec.provider))
 	labels := map[string]string{
@@ -308,16 +341,16 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 
 	// (b) SecretBinding — logical name → Secret/key (backend kubernetes, matching
 	// the shape M2/expand produce).
-	binding := &agentsv1alpha1.SecretBinding{
+	binding := &agentsv1beta1.SecretBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
 			Namespace:   spec.namespace,
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: agentsv1alpha1.SecretBindingSpec{
+		Spec: agentsv1beta1.SecretBindingSpec{
 			Backend: secretBackendKubernetes,
-			SecretRef: agentsv1alpha1.SecretKeyRef{
+			SecretRef: agentsv1beta1.SecretKeyRef{
 				Name: spec.name,
 				Key:  secretKeyAPIKey,
 			},
@@ -329,20 +362,28 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	// model as the route's primary entry; the picker can later re-point it. The FULL
 	// discovered model list is persisted as an annotation (annProviderModels) so the
 	// picker can offer every model, not just the routed one — route-only annotation.
+	model := spec.model
+	if model == "" {
+		model = primaryModel(spec.models)
+	}
+	rateLimit := spec.rateLimit
+	if rateLimit == nil {
+		rateLimit = &agentsv1beta1.RateLimit{TenantRPM: defaultTenantRPM}
+	}
 	routeAnnotations := make(map[string]string, len(annotations)+1)
 	maps.Copy(routeAnnotations, annotations)
 	if len(spec.models) > 0 {
 		routeAnnotations[annProviderModels] = strings.Join(spec.models, ",")
 	}
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
 			Namespace:   spec.namespace,
 			Labels:      labels,
 			Annotations: routeAnnotations,
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				// The route's provider is the GATEWAY's word for the vendor (a LiteLLM
 				// prefix), which is not always the console's word for it. "custom" is a
 				// console identity — an OpenAI-compatible endpoint the operator named —
@@ -351,24 +392,25 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 				// the label first), so the console still shows "custom" and re-probes it
 				// as custom while the gateway sees a shape it understands.
 				Provider:         routeProviderFor(provider),
-				Model:            primaryModel(spec.models),
+				Model:            model,
 				Priority:         1,
 				SecretBindingRef: spec.name,
 				// The base URL IS the identity of a custom provider, so it has to reach
 				// the gateway, not just the re-probe annotation.
 				APIBase: spec.baseURL,
 			}},
-			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: defaultTenantRPM},
+			RateLimit: rateLimit,
 		},
 	}
 
 	writes := []struct {
-		kind string
-		o    client.Object
+		kind       string
+		o          client.Object
+		generation int64
 	}{
-		{secretKind, secret},
-		{secretBindingKind, binding},
-		{modelRouteKind, route},
+		{secretKind, secret, 0},
+		{secretBindingKind, binding, spec.bindingGeneration},
+		{modelRouteKind, route, spec.routeGeneration},
 	}
 
 	// PRE-FLIGHT the whole set before persisting any of it. The sequence is not transactional
@@ -380,16 +422,30 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	// this asks the API server whether the write would actually SUCCEED, which additionally
 	// covers admission webhooks, ResourceQuota on Secret counts, and policy engines. The
 	// capability probe gates the button; this gates the write.
+	dryRun := func(ctx context.Context, w client.Client, obj client.Object, _ int64) (string, error) {
+		return dryRunUpsert(ctx, w, obj)
+	}
+	write := func(ctx context.Context, w client.Client, obj client.Object, _ int64) (string, error) {
+		return upsertObject(ctx, w, obj)
+	}
+	if spec.mustExist {
+		dryRun = func(ctx context.Context, w client.Client, obj client.Object, generation int64) (string, error) {
+			return updateExisting(ctx, w, obj.DeepCopyObject().(client.Object), generation, client.DryRunAll)
+		}
+		write = func(ctx context.Context, w client.Client, obj client.Object, generation int64) (string, error) {
+			return updateExisting(ctx, w, obj, generation)
+		}
+	}
 	for _, obj := range writes {
-		if err := dryRunUpsert(ctx, w, obj.o); err != nil {
-			return nil, classifyWriteError(err, verbCreate, obj.kind, obj.o.GetName())
+		if verb, err := dryRun(ctx, w, obj.o, obj.generation); err != nil {
+			return nil, classifyProviderWriteError(err, verb, obj.kind, spec)
 		}
 	}
 
 	created := make([]createdObject, 0, 3)
 	for _, obj := range writes {
-		if verb, err := upsertObject(ctx, w, obj.o); err != nil {
-			return created, classifyWriteError(err, verb, obj.kind, obj.o.GetName())
+		if verb, err := write(ctx, w, obj.o, obj.generation); err != nil {
+			return created, classifyProviderWriteError(err, verb, obj.kind, spec)
 		}
 		created = append(created, createdObject{
 			Kind:      obj.kind,
@@ -400,22 +456,58 @@ func createProviderObjects(ctx context.Context, w client.Client, spec providerCr
 	return created, nil
 }
 
-// dryRunUpsert asks the API server whether the upsert would succeed, persisting nothing.
+// notConnectManagedError refuses to overwrite a custom resource that connect did not write.
+type notConnectManagedError struct {
+	kind, name string
+}
+
+func (e *notConnectManagedError) Error() string {
+	return fmt.Sprintf("%s %q exists and was not created by connecting a provider (it has no %s=%s label)",
+		e.kind, e.name, labelManagedBy, managedByConnect)
+}
+
+// specChangedError refuses to overwrite a custom resource whose spec changed after the caller read it.
+type specChangedError struct {
+	kind, name string
+}
+
+func (e *specChangedError) Error() string {
+	return fmt.Sprintf("its %s %q was changed while the key was being rotated; check it and try again", e.kind, e.name)
+}
+
+// classifyProviderWriteError maps a failed provider write to its HTTP answer. When the objects
+// must already exist, a missing one is the provider being incomplete, not an upstream fault.
+func classifyProviderWriteError(err error, verb, kind string, spec providerCreateSpec) *createError {
+	if nc, ok := errors.AsType[*notConnectManagedError](err); ok {
+		if spec.mustExist {
+			return &createError{status: http.StatusConflict, msg: fmt.Sprintf("provider %q cannot be rotated: %v", spec.name, nc)}
+		}
+		return &createError{status: http.StatusConflict, msg: fmt.Sprintf(
+			"%v; choose another connection name, or remove the %s first", nc, nc.kind)}
+	}
+	if sc, ok := errors.AsType[*specChangedError](err); ok {
+		return &createError{status: http.StatusConflict, msg: fmt.Sprintf("provider %q cannot be rotated: %v", spec.name, sc)}
+	}
+	if spec.mustExist && apierrors.IsNotFound(err) {
+		return &createError{status: http.StatusConflict, msg: fmt.Sprintf(
+			"provider %q is incomplete: its %s %q does not exist; disconnect it and connect it again",
+			spec.name, kind, spec.name)}
+	}
+	return classifyWriteError(err, verb, kind, spec.name)
+}
+
+// dryRunUpsert asks the API server whether the upsert would succeed, persisting nothing, and
+// returns the verb of the call that answered.
 //
 // Create-then-Update mirrors upsertObject: a dry-run Create of an object that already exists
 // returns AlreadyExists, which is not a denial — it is the signal that the real call would take
-// the Update path, so the dry-run follows it there.
-//
-// A dry-run mutates the object's ResourceVersion/UID on some paths, so the caller must not
-// depend on those afterwards; the real upsert clears ResourceVersion itself before Update.
-func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) error {
-	err := w.Create(ctx, obj.DeepCopyObject().(client.Object), client.DryRunAll)
+// the Update path, so the dry-run follows it there, with the same resourceVersion handling.
+func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) (verb string, err error) {
+	err = w.Create(ctx, obj.DeepCopyObject().(client.Object), client.DryRunAll)
 	if err == nil || !apierrors.IsAlreadyExists(err) {
-		return err
+		return verbCreate, err
 	}
-	updated := obj.DeepCopyObject().(client.Object)
-	updated.SetResourceVersion("")
-	return w.Update(ctx, updated, client.DryRunAll)
+	return updateExisting(ctx, w, obj.DeepCopyObject().(client.Object), 0, client.DryRunAll)
 }
 
 // upsertObject creates obj, or — if it already exists — updates it in place (the
@@ -423,25 +515,62 @@ func dryRunUpsert(ctx context.Context, w client.Client, obj client.Object) error
 // key), the SecretBinding/ModelRoute Spec refreshed, status subresources untouched. Every
 // call is CALLER-SCOPED, so the API server makes the authorization decision.
 //
-// The update is UNCONDITIONAL — no resourceVersion, and deliberately no prior Get.
-//
-// It used to Get the live object first, to carry its resourceVersion and UID. That made
-// `get secrets` a hidden requirement of connecting a provider, and `get` on a Secret
-// returns its DATA — so the credential-writing role would have had to be a
-// credential-READING role, which is the thing it exists not to be (ADR 0136). A rotate is
-// an unconditional overwrite by intent: the caller is stating the new key, not merging
-// with the old one, so optimistic concurrency buys nothing here and costs read access to
-// every credential in the namespace.
-//
-// The write verb is threaded back to the caller so a denial names the verb that was
-// actually refused — a Forbidden on update reported as "not allowed to create" sends a
-// user to ask an admin for a grant they already hold (found in M155).
+// The verb is threaded back to the caller so a denial names the verb that was actually
+// refused — a Forbidden on update reported as "not allowed to create" sends a user to ask an
+// admin for a grant they already hold.
 func upsertObject(ctx context.Context, w client.Client, obj client.Object) (verb string, err error) {
 	if err := w.Create(ctx, obj); err == nil || !apierrors.IsAlreadyExists(err) {
 		return verbCreate, err
 	}
-	obj.SetResourceVersion("")
-	return verbUpdate, w.Update(ctx, obj)
+	return updateExisting(ctx, w, obj, 0)
+}
+
+// updateExisting overwrites an existing object with obj. A rotate is an overwrite by intent:
+// the caller states the new value, it does not merge with the old one.
+//
+// A Secret is updated unconditionally, with no resourceVersion and no prior read. Kubernetes
+// allows that for core Secrets, and reading one would return its data, which would make the
+// credential-writing role a credential-reading one (ADR 0136).
+//
+// A custom resource cannot be updated that way: the API server refuses a custom-resource update
+// without metadata.resourceVersion. So its resourceVersion is read with a metadata-only Get,
+// which needs only `get` on that kind and returns no spec, and the update is retried if the
+// object changed in between (its controller writes status, which bumps the resourceVersion).
+// The same read refuses an object connect did not write (notConnectManagedError): connection
+// names are chosen by the user, and one can name a ModelRoute or SecretBinding made by hand or
+// by GitOps. A non-zero wantGeneration also refuses an object whose spec changed since the caller
+// read it (specChangedError). Status writes do not change the generation, so the controller's own
+// status updates never trip it, and each conflict retry checks it again.
+func updateExisting(ctx context.Context, w client.Client, obj client.Object, wantGeneration int64,
+	opts ...client.UpdateOption,
+) (string, error) {
+	if _, isSecret := obj.(*corev1.Secret); isSecret {
+		obj.SetResourceVersion("")
+		return verbUpdate, w.Update(ctx, obj, opts...)
+	}
+	gvk, err := w.GroupVersionKindFor(obj)
+	if err != nil {
+		return verbUpdate, fmt.Errorf("resolving the kind of %q: %w", obj.GetName(), err)
+	}
+	verb := verbUpdate
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live := &metav1.PartialObjectMetadata{}
+		live.SetGroupVersionKind(gvk)
+		if err := w.Get(ctx, client.ObjectKeyFromObject(obj), live); err != nil {
+			verb = verbGet
+			return err
+		}
+		verb = verbUpdate
+		if live.GetLabels()[labelManagedBy] != managedByConnect {
+			return &notConnectManagedError{kind: gvk.Kind, name: obj.GetName()}
+		}
+		if wantGeneration != 0 && live.GetGeneration() != wantGeneration {
+			return &specChangedError{kind: gvk.Kind, name: obj.GetName()}
+		}
+		obj.SetResourceVersion(live.GetResourceVersion())
+		return w.Update(ctx, obj, opts...)
+	})
+	return verb, err
 }
 
 // defaultPrimaryModel is the fallback model name returned by primaryModel when the
@@ -506,8 +635,8 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	var routes agentsv1alpha1.ModelRouteList
-	if err := caller.List(r.Context(), &routes, opts...); err != nil {
+	var routes agentsv1beta1.ModelRouteList
+	if err := s.acrossWorkspaces(caller).List(r.Context(), &routes, opts...); err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
 			return
@@ -531,7 +660,7 @@ func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
 // ProviderSummary. It carries only NON-secret material: the route/provider names,
 // the models, the Secret NAME (a reference), and the Ready condition. The key is
 // never touched here — it lives in the Secret, which this read never opens.
-func providerSummaryFromRoute(mr *agentsv1alpha1.ModelRoute) ProviderSummary {
+func providerSummaryFromRoute(mr *agentsv1beta1.ModelRoute) ProviderSummary {
 	provider := mr.Labels[labelProvider]
 
 	// The full model list the connect probe discovered, persisted at connect time
@@ -599,7 +728,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the route to learn the provider id + which SecretBinding holds the key.
-	var route agentsv1alpha1.ModelRoute
+	var route agentsv1beta1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
 		s.writeGetError(w, err, providerNoun)
 		return
@@ -611,7 +740,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve the SecretBinding → Secret name/key (backend kubernetes).
-	var binding agentsv1alpha1.SecretBinding
+	var binding agentsv1beta1.SecretBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: secretName, Namespace: ns}, &binding); err != nil {
 		s.writeGetError(w, err, "secret binding")
 		return
@@ -651,7 +780,7 @@ func (s *Server) handleProviderModels(w http.ResponseWriter, r *http.Request) {
 // routeProbeInputs pulls the provider id, the SecretBinding ref, and an optional
 // baseURL from a connect-managed ModelRoute for the re-probe. The provider id
 // comes from the route's first provider entry (falling back to the label).
-func routeProbeInputs(mr *agentsv1alpha1.ModelRoute) (provider, secretBindingRef, baseURL string) {
+func routeProbeInputs(mr *agentsv1beta1.ModelRoute) (provider, secretBindingRef, baseURL string) {
 	provider = mr.Labels[labelProvider]
 	for _, p := range mr.Spec.Providers {
 		if provider == "" {
@@ -684,11 +813,14 @@ func (s *Server) writeGetError(w http.ResponseWriter, err error, what string) {
 	}
 }
 
-// handleRotateProviderKey serves POST /api/providers/{name}/rotate (ADR 0018). It
-// rotates the stored provider key IN PLACE: validate the NEW key with one live
-// probe, then rewrite ONLY the Secret's data with the CALLER'S client. The key is
-// used once and is never returned or logged; a caller without update on the Secret
-// is denied by the API server → the 403 surfaces (ADR 0011).
+// handleRotateProviderKey serves POST /api/providers/{name}/rotate (ADR 0018). A rotate is a
+// reconnect with a new key: the provider's identity is recovered from its connect-managed
+// ModelRoute, the new key is validated with one live probe exactly as connect does, and the three
+// objects connect wrote are rewritten through the same pre-flighted write path.
+//
+// The stored Secret is never read. Reading a Secret returns its data, so no shipped persona may
+// get Secrets (ADR 0136), and the Secret connect writes holds only the key, so nothing in it needs
+// carrying over. Every call is CALLER-SCOPED (ADR 0011).
 func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
 	if !ok {
@@ -714,26 +846,61 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, msgAPIKeyRequired)
 		return
 	}
-	ns := req.Namespace
+	ns := strings.TrimSpace(req.Namespace)
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
 
-	// Read the route to learn the provider id + which SecretBinding holds the key.
-	var route agentsv1alpha1.ModelRoute
+	// A rotate is audited as a connect with rotate=true (ADR 0056 §2): success after the write,
+	// denied on any 403. The controller's Auditor watches custom resources only, so without this row
+	// the Secret holding the new key changes unaudited.
+	audit := func(provider, outcome string) {
+		detail := map[string]any{"rotate": true}
+		if provider != "" {
+			detail[providerNoun] = strings.ToLower(provider)
+		}
+		s.appendAudit(r.Context(), auditlog.Entry{
+			Actor: s.auditActor(r.Context(), caller), Action: auditActionConnect,
+			ResourceKind: resourceKindProvider, ResourceName: name, Namespace: ns, Outcome: outcome,
+			Detail: detail,
+		})
+	}
+
+	var route agentsv1beta1.ModelRoute
 	if err := caller.Get(r.Context(), client.ObjectKey{Name: name, Namespace: ns}, &route); err != nil {
+		if apierrors.IsForbidden(err) {
+			audit("", auditOutcomeDenied)
+		}
 		s.writeGetError(w, err, providerNoun)
 		return
 	}
-	provider, secretName, baseURL := routeProbeInputs(&route)
-	if secretName == "" {
-		writeError(w, http.StatusConflict, "provider has no secret binding to rotate")
+	spec, cErr := rotateSpecFromRoute(&route)
+	if cErr != nil {
+		writeError(w, cErr.status, cErr.msg)
 		return
 	}
+	var binding agentsv1beta1.SecretBinding
+	if err := caller.Get(r.Context(), client.ObjectKey{Name: spec.name, Namespace: ns}, &binding); err != nil {
+		if apierrors.IsForbidden(err) {
+			audit(spec.provider, auditOutcomeDenied)
+		}
+		if apierrors.IsNotFound(err) {
+			ce := classifyProviderWriteError(err, verbGet, secretBindingKind, spec)
+			writeError(w, ce.status, ce.msg)
+			return
+		}
+		s.writeGetError(w, err, "secret binding")
+		return
+	}
+	if cErr := checkConnectBinding(&binding, spec.name); cErr != nil {
+		writeError(w, cErr.status, cErr.msg)
+		return
+	}
+	spec.bindingGeneration = binding.Generation
 
-	// Validate the NEW key with one live probe — a bad key → 401, never a silent
-	// rotate to a broken credential.
-	models, err := providerModels(r.Context(), s.providerHTTP, provider, req.APIKey, baseURL)
+	// Validate the NEW key with one live probe, as connect does — a bad key is refused before
+	// anything is written, never a silent rotate to a broken credential.
+	models, err := providerModels(r.Context(), s.providerHTTP, spec.provider, req.APIKey, spec.baseURL)
 	if err != nil {
 		if pe, isPE := isProviderError(err); isPE {
 			writeError(w, pe.status, pe.msg)
@@ -742,35 +909,97 @@ func (s *Server) handleRotateProviderKey(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadGateway, "provider validation failed")
 		return
 	}
+	spec.apiKey = req.APIKey
+	spec.models = models
 
-	// Resolve the SecretBinding → Secret and rewrite ONLY the key in place.
-	var binding agentsv1alpha1.SecretBinding
-	if err := caller.Get(r.Context(), client.ObjectKey{Name: secretName, Namespace: ns}, &binding); err != nil {
-		s.writeGetError(w, err, "secret binding")
+	written, cErr := createProviderObjects(r.Context(), caller, spec)
+	if cErr != nil {
+		switch {
+		case cErr.status == http.StatusForbidden:
+			audit(spec.provider, auditOutcomeDenied)
+		case len(written) > 0:
+			// The pre-flight passed and a later write failed: the key may already have changed.
+			audit(spec.provider, auditOutcomeError)
+		}
+		writeError(w, cErr.status, cErr.msg)
 		return
 	}
-	var secret corev1.Secret
-	if err := caller.Get(r.Context(), client.ObjectKey{
-		Name:      binding.Spec.SecretRef.Name,
-		Namespace: ns,
-	}, &secret); err != nil {
-		s.writeGetError(w, err, "secret")
-		return
-	}
-	if secret.Data == nil {
-		secret.Data = map[string][]byte{}
-	}
-	secret.Data[binding.Spec.SecretRef.Key] = []byte(req.APIKey)
-	if err := caller.Update(r.Context(), &secret); err != nil {
-		ce := classifyCreateError(err, secretKind, secret.Name)
-		writeError(w, ce.status, ce.msg)
-		return
-	}
+	audit(spec.provider, "")
 
-	// Success → the refreshed provider summary (freshly probed models). No key.
+	// The refreshed provider summary (freshly probed models). No key.
 	summary := providerSummaryFromRoute(&route)
 	summary.Models = models
 	writeJSON(w, http.StatusOK, summary)
+}
+
+// rotateSpecFromRoute recovers what connect wrote for a provider from its ModelRoute: the name the
+// three objects share, the namespace, the console's provider id (label), the display name
+// (annotation), and the route's endpoint, model and rate limit, which a rotate keeps — it changes
+// the key, not the routing. The endpoint is spec.providers[0].apiBase, the one the gateway calls;
+// the base-url annotation is only a fallback for a route without one, and the rewrite refreshes it.
+//
+// A route connect did not write, or one edited out of the shape connect writes, is refused rather
+// than rebuilt: the rewrite would overwrite whatever made it different.
+func rotateSpecFromRoute(mr *agentsv1beta1.ModelRoute) (providerCreateSpec, *createError) {
+	refuse := func(why string) (providerCreateSpec, *createError) {
+		return providerCreateSpec{}, &createError{
+			status: http.StatusConflict,
+			msg:    fmt.Sprintf("provider %q cannot be rotated: %s", mr.Name, why),
+		}
+	}
+	if mr.Labels[labelManagedBy] != managedByConnect {
+		return refuse(fmt.Sprintf("its ModelRoute was not created by the console's connect flow (no %s=%s label)",
+			labelManagedBy, managedByConnect))
+	}
+	provider := strings.TrimSpace(mr.Labels[labelProvider])
+	if provider == "" {
+		return refuse(fmt.Sprintf("its ModelRoute has no %s label naming the provider", labelProvider))
+	}
+	if len(mr.Spec.Providers) != 1 || mr.Spec.Providers[0].SecretBindingRef != mr.Name {
+		return refuse(fmt.Sprintf("its ModelRoute was changed after connect; it must route one provider "+
+			"through the SecretBinding %q", mr.Name))
+	}
+	ref := mr.Spec.Providers[0]
+	baseURL := ref.APIBase
+	if baseURL == "" {
+		baseURL = mr.Annotations[annBaseURL]
+	}
+	displayName := mr.Annotations[annDisplayName]
+	if displayName == "" {
+		displayName = mr.Name
+	}
+	return providerCreateSpec{
+		name:            mr.Name,
+		namespace:       mr.Namespace,
+		provider:        provider,
+		displayName:     displayName,
+		baseURL:         baseURL,
+		model:           ref.Model,
+		rateLimit:       mr.Spec.RateLimit.DeepCopy(),
+		mustExist:       true,
+		routeGeneration: mr.Generation,
+	}, nil
+}
+
+// checkConnectBinding refuses a SecretBinding that connect did not write, or that no longer points
+// where connect pointed it. A rotate writes the key into the Secret connect created; if the binding
+// names another Secret, that write would not change the key the provider uses.
+func checkConnectBinding(b *agentsv1beta1.SecretBinding, name string) *createError {
+	if b.Labels[labelManagedBy] != managedByConnect {
+		return &createError{
+			status: http.StatusConflict,
+			msg: fmt.Sprintf("provider %q cannot be rotated: %v", name,
+				&notConnectManagedError{kind: secretBindingKind, name: name}),
+		}
+	}
+	if b.Spec.Backend == secretBackendKubernetes && b.Spec.SecretRef.Name == name && b.Spec.SecretRef.Key == secretKeyAPIKey {
+		return nil
+	}
+	return &createError{
+		status: http.StatusConflict,
+		msg: fmt.Sprintf("provider %q cannot be rotated: its SecretBinding was changed after connect; "+
+			"it must reference key %q of the Secret %q", name, secretKeyAPIKey, name),
+	}
 }
 
 // handleDisconnectProvider serves DELETE /api/providers/{name} (ADR 0018). It
@@ -798,8 +1027,8 @@ func (s *Server) handleDisconnectProvider(w http.ResponseWriter, r *http.Request
 		kind string
 		o    client.Object
 	}{
-		{modelRouteKind, &agentsv1alpha1.ModelRoute{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
-		{secretBindingKind, &agentsv1alpha1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
+		{modelRouteKind, &agentsv1beta1.ModelRoute{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
+		{secretBindingKind, &agentsv1beta1.SecretBinding{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
 		{secretKind, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}},
 	} {
 		if err := caller.Delete(r.Context(), obj.o); err != nil && !apierrors.IsNotFound(err) {

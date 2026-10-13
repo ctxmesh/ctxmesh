@@ -35,7 +35,7 @@ import {
   type NextStepTone,
   type WizardStep,
 } from "@/components/kit";
-import { useCapabilities } from "@/lib/capabilities";
+import { CanIn, useCapabilities } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { cn } from "@/lib/utils";
 import {
@@ -49,6 +49,7 @@ import {
   type EvalSuiteResults,
   type EvalSuiteSummary,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { RES_EVALSUITES } from "@/lib/nav";
 
 // EvalsPage — archetype A1 (index/table) with two extras the §6.2 mapping names:
@@ -101,11 +102,6 @@ import { RES_EVALSUITES } from "@/lib/nav";
 //   eval-scores-unavailable-{name} / eval-score-{scorer}
 
 // ---- discriminated state types -----------------------------------------------
-
-type PageState =
-  | { kind: "loading" }
-  | { kind: "ready"; suites: EvalSuiteSummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
 
 type ResultsState =
   | { kind: "loading" }
@@ -323,7 +319,6 @@ function EvalGatedStatBand({ metric }: { metric: MetricState }) {
 // ---- main page ----------------------------------------------------------------
 
 export function EvalsPage() {
-  const [page, setPage] = React.useState<PageState>({ kind: "loading" });
   const [showBuilder, setShowBuilder] = React.useState(false);
   const [query, setQuery] = React.useState("");
   const [view, setView] = React.useState<EvalView>("all");
@@ -335,8 +330,6 @@ export function EvalsPage() {
     null,
   );
   const [deleteState, setDeleteState] = React.useState<DeleteState>({ kind: "idle" });
-  // PRD §5 eval-gated metric — live snapshot of how many deploys are eval-gated.
-  const [metric, setMetric] = React.useState<MetricState>({ kind: "loading" });
 
   const { can } = useCapabilities();
   const { namespace: shellNs } = useNamespace();
@@ -345,52 +338,30 @@ export function EvalsPage() {
   const canCreate = can(RES_EVALSUITES, "create");
   const canDelete = can(RES_EVALSUITES, "delete");
 
-  const load = React.useCallback(
-    (signal?: AbortSignal) => {
-      setPage({ kind: "loading" });
-      setMetric({ kind: "loading" });
-
-      // Load EvalSuite list.
-      api
-        .listEvalSuites({ namespace: shellNs || undefined }, signal)
-        .then((res) => {
-          if (signal?.aborted) return;
-          setPage({ kind: "ready", suites: res.items, nextCursor: res.nextCursor });
-        })
-        .catch((err: unknown) => {
-          if (signal?.aborted) return;
-          setPage({
-            kind: "error",
-            message: err instanceof Error ? err.message : "request failed",
-            forbidden: err instanceof ApiError && err.isForbidden,
-          });
-        });
-
-      // Load eval-gated metric (PRD §5, ADR 0062 governance #2).
-      api
-        .evalGatedMetric({ namespace: shellNs || undefined, signal })
-        .then((data) => {
-          if (signal?.aborted) return;
-          setMetric({ kind: "ready", data });
-        })
-        .catch((err: unknown) => {
-          if (signal?.aborted) return;
-          // 501 = the endpoint is not wired on this install — calm, not an error.
-          if (err instanceof ApiError && err.status === 501) {
-            setMetric({ kind: "unavailable" });
-            return;
-          }
-          setMetric({ kind: "error" });
-        });
-    },
+  const fetchSuites = React.useCallback(
+    (signal: AbortSignal) => api.listEvalSuites({ namespace: shellNs || undefined }, signal),
     [shellNs],
   );
+  const { state: page, reload: reloadSuites } = useLoad(fetchSuites);
 
-  React.useEffect(() => {
-    const controller = new AbortController();
-    load(controller.signal);
-    return () => controller.abort();
-  }, [load]);
+  // PRD §5 eval-gated metric (ADR 0062 governance #2) — live snapshot of how many
+  // deploys are eval-gated.
+  const fetchMetric = React.useCallback(
+    (signal: AbortSignal) => api.evalGatedMetric({ namespace: shellNs || undefined, signal }),
+    [shellNs],
+  );
+  const { state: metricRead, reload: reloadMetric } = useLoad(fetchMetric);
+  const metric = React.useMemo((): MetricState => {
+    if (metricRead.kind === "ready") return { kind: "ready", data: metricRead.data };
+    if (metricRead.kind === "loading") return metricRead;
+    // 501 = the endpoint is not wired on this install — calm, not an error.
+    return metricRead.status === 501 ? { kind: "unavailable" } : { kind: "error" };
+  }, [metricRead]);
+
+  const load = React.useCallback(() => {
+    reloadSuites();
+    reloadMetric();
+  }, [reloadSuites, reloadMetric]);
 
   const loadResults = React.useCallback((suite: EvalSuiteSummary) => {
     const key = `${suite.namespace}/${suite.name}`;
@@ -448,13 +419,13 @@ export function EvalsPage() {
   }
 
   const all = React.useMemo(
-    () => (page.kind === "ready" ? page.suites : []),
+    () => (page.kind === "ready" ? page.data.items : []),
     [page],
   );
   // The loaded window IS the whole list only when no cursor follows it. That is
   // the one condition under which counting the rows in hand is a FACT rather
   // than a windowed guess (kit FilterChipRow contract).
-  const complete = page.kind === "ready" && page.nextCursor === "";
+  const complete = page.kind === "ready" && page.data.nextCursor === "";
 
   // Triage once, sort once. Attention-first (§6.1 A1).
   const sorted = React.useMemo(() => {
@@ -718,18 +689,22 @@ export function EvalsPage() {
         ariaLabel="Eval suites"
         tableClassName="min-w-[52rem]"
         onRowClick={(t) => openSuite(t.suite)}
+        // Under "All workspaces" each row decides by its own namespace; one workspace decides for
+        // every row, so a caller who may not delete there gets no actions column.
         rowActions={
-          canDelete
+          shellNs === "" || canDelete
             ? (t) => (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-faint hover:text-destructive"
-                  onClick={() => setDeleteTarget(t.suite)}
-                  data-testid={`eval-delete-${t.suite.name}`}
-                >
-                  Delete
-                </Button>
+                <CanIn namespace={t.suite.namespace} resource={RES_EVALSUITES} verb="delete">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-faint hover:text-destructive"
+                    onClick={() => setDeleteTarget(t.suite)}
+                    data-testid={`eval-delete-${t.suite.name}`}
+                  >
+                    Delete
+                  </Button>
+                </CanIn>
               )
             : undefined
         }

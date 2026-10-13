@@ -133,8 +133,9 @@ type Store interface {
 	Get(id string) (*Run, error)
 	// GetByTraceID returns a COPY of the run whose TraceID matches traceID, or (nil, nil) if none
 	// is found (not an error — a nil run means "not found by trace id"). Callers must not mutate
-	// the returned run. This is the fallback resolution path for the share mint, which is keyed by
-	// the trace-detail page's traceId rather than the internal run.ID.
+	// the returned run. Several runs share a trace (sub-runs, a handoff's new root); the one returned
+	// is the earliest root, so every reader of a trace is authorized through the same run. It is how
+	// an id from the trace-detail page, which is a trace id rather than a run.ID, finds its run.
 	GetByTraceID(traceID string) (*Run, error)
 	// Update applies fn to the stored run atomically and returns a copy. A non-nil error from fn
 	// (e.g. an illegal Transition) aborts the update, leaving the run unchanged.
@@ -147,7 +148,8 @@ type Store interface {
 	// Subscribe returns a channel delivering the run's events with Seq > fromSeq: first the
 	// buffered backlog, then live events. The channel is CLOSED when the run reaches a terminal
 	// state and its backlog is drained (so an SSE handler ends cleanly). cancel releases the
-	// subscription. Errors if the run is unknown.
+	// subscription. Errors if the run is unknown, or (Postgres) if a terminal run's backlog cannot be
+	// read; a live stream that loses the database ends early, and the client resumes from its cursor.
 	Subscribe(id string, fromSeq int) (events <-chan Event, cancel func(), err error)
 	// ClaimQueued atomically leases the oldest `queued` run to workerID (transitioning it to
 	// `running`, stamping the worker + a lease that expires after `lease`) and returns it, so a
@@ -242,26 +244,49 @@ type Store interface {
 	// client). Read-only; a nil/empty `kinds` returns nothing.
 	ListWaitingApproval(ctx context.Context, namespace string, kinds []ActionKind, limit int) ([]WaitingApproval, error)
 
-	// ListByEndUser returns the runs OWNED by callerUsername at (namespace, agent), most-recently-updated
-	// first — the end-user "my runs" list (M137/EU1c, ADR 0107). The mandatory
-	// `WHERE caller_username=$1 AND namespace=$2 AND agent=$3` is the ISOLATION BOUNDARY, not a
-	// client-supplied filter: a verified end-user principal (oidc:<iss>#<sub>) can never see another
-	// principal's runs, and the (namespace, agent) is HOST-derived so they cannot enumerate their runs on
-	// a different agent. A blank callerUsername returns nothing (fail-CLOSED — never a list-all). limit>0
-	// bounds the page. Read-only; a query/scan error is returned.
-	ListByEndUser(ctx context.Context, callerUsername, namespace, agent string, limit int) ([]EndUserRun, error)
+	// ListRoots returns ROOT runs (no parent) of the given agents, newest first: the console's Runs list
+	// when no trace store is wired. f.Agents is the isolation boundary, filled by the BFF from the
+	// caller's own RBAC; an empty set returns nothing (fail closed, never a list-all). Knowledge-base
+	// ingestions and dataset exports are not agent runs and never appear, though their Agent field holds
+	// the knowledge base's or the dataset's name. Paging is keyset on (CreatedAt, ID) through f.Before.
+	// Read-only; a query/scan error is returned.
+	ListRoots(ctx context.Context, f RootListFilter) ([]RootRun, error)
 }
 
-// EndUserRun is the projection for an end-user's "my runs" list (M137/EU1c, ADR 0107): a run the verified
-// end-user principal OWNS at a specific (namespace, agent). Just enough to render the list and deep-link
-// into a run they already own — deliberately NO Input/Messages (that is the run-detail read, itself
-// ownership-gated). Ordered most-recently-updated first.
-type EndUserRun struct {
-	ID             string    `json:"id"`
-	Status         Status    `json:"status"`
-	ConversationID string    `json:"conversationId,omitempty"`
-	CreatedAt      time.Time `json:"createdAt"`
-	UpdatedAt      time.Time `json:"updatedAt"`
+// AgentKey names one agent, the unit a Runs list is authorized at.
+type AgentKey struct {
+	Namespace string
+	Name      string
+}
+
+// RootCursor is a position in a ListRoots page: the next page holds runs strictly older than it.
+type RootCursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// RootListFilter selects the runs ListRoots returns.
+type RootListFilter struct {
+	// Agents is required; runs of any other agent are never returned.
+	Agents []AgentKey
+	// From and To bound CreatedAt, inclusive; a zero value leaves that side open.
+	From, To time.Time
+	// Before, when set, returns only runs older than this position.
+	Before *RootCursor
+	// Limit > 0 bounds the page.
+	Limit int
+}
+
+// RootRun is one row of a Runs list: enough to render and link it, deliberately without the input or
+// the messages (those are the run-detail read, which authorizes on its own).
+type RootRun struct {
+	ID        string
+	Namespace string
+	Agent     string
+	TraceID   string
+	Status    Status
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // DescendantAction is the L1-surfacing projection of a descendant sub-run paused in requires_action
@@ -546,12 +571,31 @@ func (m *memStore) Get(id string) (*Run, error) {
 func (m *memStore) GetByTraceID(traceID string) (*Run, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// The run the Postgres store picks: a root before a sub-run, then the earliest, then the lowest id.
+	var best *Run
 	for _, e := range m.entries {
-		if e.run.TraceID == traceID {
-			return cloneRun(e.run), nil
+		if e.run.TraceID != traceID {
+			continue
+		}
+		if best == nil || traceRunBefore(e.run, best) {
+			best = e.run
 		}
 	}
-	return nil, nil // not found — not an error
+	if best == nil {
+		return nil, nil // not found — not an error
+	}
+	return cloneRun(best), nil
+}
+
+// traceRunBefore orders the runs sharing a trace: roots first, then by creation time, then by id.
+func traceRunBefore(a, b *Run) bool {
+	if aRoot, bRoot := a.ParentRunID == "", b.ParentRunID == ""; aRoot != bRoot {
+		return aRoot
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 func (m *memStore) Update(id string, fn func(*Run) error) (*Run, error) {
@@ -785,29 +829,53 @@ func (m *memStore) ListWaitingApproval(_ context.Context, namespace string, kind
 	return out, nil
 }
 
-// ListByEndUser — see the Store interface (M137/EU1c, ADR 0107). Ownership-scoped my-runs list.
-func (m *memStore) ListByEndUser(_ context.Context, callerUsername, namespace, agent string, limit int) ([]EndUserRun, error) {
-	if callerUsername == "" || namespace == "" || agent == "" {
-		return nil, nil // fail-closed: a blank identity/host never lists runs
+// ListRoots — see the Store interface.
+func (m *memStore) ListRoots(_ context.Context, f RootListFilter) ([]RootRun, error) {
+	if len(f.Agents) == 0 {
+		return nil, nil
+	}
+	allow := make(map[AgentKey]bool, len(f.Agents))
+	for _, a := range f.Agents {
+		allow[a] = true
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []EndUserRun
+	var out []RootRun
 	for _, e := range m.entries {
 		r := e.run
-		if r.CallerUsername != callerUsername || r.Namespace != namespace || r.Agent != agent {
+		if r.ParentRunID != "" || r.IsIngestionJob() || r.IsDatasetExportJob() ||
+			!allow[AgentKey{Namespace: r.Namespace, Name: r.Agent}] {
 			continue
 		}
-		out = append(out, EndUserRun{
-			ID: r.ID, Status: r.Status, ConversationID: r.ConversationID,
+		if (!f.From.IsZero() && r.CreatedAt.Before(f.From)) || (!f.To.IsZero() && r.CreatedAt.After(f.To)) {
+			continue
+		}
+		if f.Before != nil && !rootOlder(r.CreatedAt, r.ID, *f.Before) {
+			continue
+		}
+		out = append(out, RootRun{
+			ID: r.ID, Namespace: r.Namespace, Agent: r.Agent, TraceID: r.TraceID, Status: r.Status,
 			CreatedAt: r.CreatedAt.UTC(), UpdatedAt: r.UpdatedAt.UTC(),
 		})
 	}
-	slices.SortFunc(out, func(a, b EndUserRun) int { return b.UpdatedAt.Compare(a.UpdatedAt) }) // newest first
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
+	m.mu.Unlock()
+	slices.SortFunc(out, func(a, b RootRun) int {
+		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(b.ID, a.ID)
+	})
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
 	}
 	return out, nil
+}
+
+// rootOlder reports whether (createdAt, id) sorts strictly after c in newest-first order.
+func rootOlder(createdAt time.Time, id string, c RootCursor) bool {
+	if !createdAt.Equal(c.CreatedAt) {
+		return createdAt.Before(c.CreatedAt)
+	}
+	return id < c.ID
 }
 
 func (m *memStore) AppendEvent(id string, kind EventKind, data string) error {

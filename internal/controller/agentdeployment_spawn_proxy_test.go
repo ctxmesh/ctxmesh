@@ -28,7 +28,7 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // supervisorKsvcEnv builds a supervisor agent + registry + team, reconciles it with the given reconciler,
@@ -37,16 +37,16 @@ func supervisorKsvcEnv(t *testing.T, r *AgentDeploymentReconciler, name, regName
 	t.Helper()
 	const ns = "default"
 	mkRegistryMesh(t, regName, ns, regName, regName)
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: map[string]string{"registry": regName}},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-	worker := &agentsv1alpha1.AgentDeployment{
+	worker := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name + "-worker", Namespace: ns, Labels: map[string]string{"registry": regName}},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, worker))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, worker) })
@@ -82,7 +82,7 @@ func TestReconcile_SupervisorSpawnGuard_ProxyVsDirect(t *testing.T) {
 	t.Run("no proxy → direct Valkey addr (pre-cutover)", func(t *testing.T) {
 		env := supervisorKsvcEnv(t, newReconciler(), "sup-direct", "sup-direct-reg", "sup-direct-team")
 		assert.Equal(t, "true", env["DELEGATE_ENABLED"])
-		assert.Equal(t, memoryDefaultAddr, env["TENANT_QUOTA_ADDR"], "proxy-less: the guard uses direct Valkey")
+		assert.Equal(t, defaultPlatform.statelayerAddr(), env["TENANT_QUOTA_ADDR"], "proxy-less: the guard uses direct Valkey")
 	})
 
 	// M119: a supervisor needs the capability public key so the spawn guard's verifier can recover THIS

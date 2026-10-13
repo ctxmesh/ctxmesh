@@ -1,0 +1,4 @@
+# The runner builds into the user cache dir. No lock is committed: the path dependency's version
+# moves with every SDK release, and a committed lock would churn with it.
+Cargo.lock
+target/

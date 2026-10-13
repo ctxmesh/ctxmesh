@@ -17,11 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -56,10 +59,10 @@ func TestEgressDigest_UrlEditDoesNotRoll(t *testing.T) {
 // + EGRESS_ROUTES_FILE env, the sidecar carries EGRESS_ROUTES_FILE + the mount and NOT the static
 // EGRESS_ROUTES env; with no mount it falls back to the static env (dev/tests).
 func TestEgressSidecarContainer_RoutesFileSupersedesEnv(t *testing.T) {
-	cfg := OBOEgressConfig{SidecarImage: "egress-sidecar:test", CapabilityPublicKeyB64: "K", CapabilityAudience: "a", CredentialNamespace: "ns"}
+	cfg := OBOEgressConfig{SidecarImage: "egress-sidecar:test", CapabilityPublicKeyB64: "K", CapabilityAudience: "a", TokenServiceURL: "http://ts"}
 	mount := &corev1.VolumeMount{Name: egressRoutesVolumeName, MountPath: egressRoutesMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envEgressRoutesFile, Value: egressRoutesMountPath + "/" + egressRoutesConfigMapKey}}
-	c := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, false, nil, nil, mount, env)
+	c := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, nil, nil, nil, mount, env)
 
 	_, hasStatic := envValue(c, "EGRESS_ROUTES")
 	assert.False(t, hasStatic, "with a routes mount, the static EGRESS_ROUTES env must NOT be set")
@@ -75,7 +78,7 @@ func TestEgressSidecarContainer_RoutesFileSupersedesEnv(t *testing.T) {
 	assert.True(t, mounted, "the routes ConfigMap must be mounted on the sidecar")
 
 	// Fallback: no mount ⇒ the static EGRESS_ROUTES env is used (legacy / dev).
-	c2 := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, false, nil, nil, nil, nil)
+	c2 := egressSidecarContainer(cfg, "ns", "ns/a", "", `[{"name":"s"}]`, false, nil, nil, nil, nil, nil)
 	staticEnv, ok := envValue(c2, "EGRESS_ROUTES")
 	require.True(t, ok, "with no mount, the static EGRESS_ROUTES env is the fallback")
 	assert.Contains(t, staticEnv.Value, `"name":"s"`)
@@ -89,9 +92,9 @@ func TestEgressSidecarContainer(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "https://token-service:8443",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, false, nil, nil, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", `[{"name":"scalekit"}]`, false, nil, nil, nil, nil, nil)
 
 	assert.Equal(t, egressSidecarContainerName, c.Name)
 	assert.Equal(t, "egress-sidecar:test", c.Image)
@@ -104,7 +107,7 @@ func TestEgressSidecarContainer(t *testing.T) {
 	for name, want := range map[string]string{
 		"MCP_CAPABILITY_PUBLIC_KEY": "PUBKEY",
 		"MCP_CAPABILITY_AUDIENCE":   "aud",
-		"MCP_CREDENTIAL_NAMESPACE":  "ae-credentials",
+		"TOKEN_SERVICE_URL":         "https://token-service:8443",
 		"EGRESS_AGENT":              "team-alpha/support",
 		// The trust boundary the sidecar serves — the registry (ADR 0033, m30.3).
 		"EGRESS_BOUNDARY": "r:squad-a",
@@ -118,20 +121,14 @@ func TestEgressSidecarContainer(t *testing.T) {
 		assert.Nil(t, e.ValueFrom, "%s must be a literal value (Knative rejects valueFrom.fieldRef)", name)
 	}
 
-	// No delegation env unless a token-service URL is configured.
-	_, hasDelegate := envValue(c, "TOKEN_SERVICE_URL")
-	assert.False(t, hasDelegate)
+	// The sidecar reads no credential store itself, so it is given no credential namespace.
+	_, hasCredNS := envValue(c, "MCP_CREDENTIAL_NAMESPACE")
+	assert.False(t, hasCredNS)
 	// No record env for a non-record-capable sidecar (byte-for-byte the pre-M78 OBO sidecar).
 	_, hasRecord := envValue(c, "RECORD_CAPABLE")
 	assert.False(t, hasRecord)
 	_, hasStore := envValue(c, "OBJECT_STORE_ADDR")
 	assert.False(t, hasStore, "a non-record sidecar gets no object-store env")
-
-	cfg.TokenServiceURL = "https://token-service:8443"
-	delegating := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, nil, nil, nil, nil)
-	tsu, ok := envValue(delegating, "TOKEN_SERVICE_URL")
-	require.True(t, ok)
-	assert.Equal(t, "https://token-service:8443", tsu.Value)
 }
 
 // TestEgressSidecarContainer_RecordMode: a RECORD-CAPABLE sidecar (M78, ADR 0071 §1/C1) gets
@@ -142,9 +139,9 @@ func TestEgressSidecarContainer_RecordMode(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "http://ts",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, true, nil, nil, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, objectStoreEnv(true, newPlatformServices("")), nil, nil, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar carries RECORD_CAPABLE")
@@ -167,9 +164,9 @@ func TestEgressSidecarContainer_RecordCapableNoDevDataPlane(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "http://ts",
 	}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, false, nil, nil, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", true, objectStoreEnv(false, newPlatformServices("")), nil, nil, nil, nil)
 
 	rec, ok := envValue(c, "RECORD_CAPABLE")
 	require.True(t, ok, "record-capable sidecar still carries RECORD_CAPABLE")
@@ -181,6 +178,29 @@ func TestEgressSidecarContainer_RecordCapableNoDevDataPlane(t *testing.T) {
 	}
 }
 
+// TestDevObjectStore_FollowsTheBundledStore: the object-store env reaches agent pods only when the
+// dev data plane is on AND its object store is deployed. With the store turned off the env is absent,
+// so record mode and blob offload treat it as feature-off instead of dialling a missing Service.
+func TestDevObjectStore_FollowsTheBundledStore(t *testing.T) {
+	for _, tc := range []struct {
+		devDataPlane, storeOff, want bool
+	}{
+		{devDataPlane: true, storeOff: false, want: true},
+		{devDataPlane: true, storeOff: true, want: false},
+		{devDataPlane: false, storeOff: false, want: false},
+		{devDataPlane: false, storeOff: true, want: false},
+	} {
+		r := &AgentDeploymentReconciler{DevDataPlane: tc.devDataPlane, DevObjectStoreOff: tc.storeOff}
+		assert.Equal(t, tc.want, r.devObjectStore(), "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
+		env := objectStoreEnv(r.devObjectStore(), r.platformServices())
+		if tc.want {
+			assert.Len(t, env, 3, "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
+		} else {
+			assert.Empty(t, env, "devDataPlane=%t storeOff=%t", tc.devDataPlane, tc.storeOff)
+		}
+	}
+}
+
 // TestEgressSidecarContainer_ToolPolicyMount: when the controller passes a tool-policy mount + env
 // (M82, ADR 0074 §1), the sidecar container carries TOOL_POLICY_FILE (static, never valueFrom) and
 // the read-only policy volume mount — the DELIVERY plumbing (permissive; not yet enforced).
@@ -189,11 +209,11 @@ func TestEgressSidecarContainer_ToolPolicyMount(t *testing.T) {
 		SidecarImage:           "egress-sidecar:test",
 		CapabilityPublicKeyB64: "PUBKEY",
 		CapabilityAudience:     "aud",
-		CredentialNamespace:    "ae-credentials",
+		TokenServiceURL:        "http://ts",
 	}
 	mount := &corev1.VolumeMount{Name: toolPolicyVolumeName, MountPath: toolPolicyMountPath, ReadOnly: true}
 	env := []corev1.EnvVar{{Name: envToolPolicyFile, Value: toolPolicyMountPath + "/" + toolPolicyConfigMapKey}}
-	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, false, mount, env, nil, nil)
+	c := egressSidecarContainer(cfg, "team-alpha", "team-alpha/support", "r:squad-a", "[]", false, nil, mount, env, nil, nil)
 
 	e, ok := envValue(c, envToolPolicyFile)
 	require.True(t, ok, "a tool-policy agent's sidecar carries TOOL_POLICY_FILE")
@@ -264,12 +284,12 @@ func TestEgressSidecar_TimeoutEnvIsSetOnlyWhenConfigured(t *testing.T) {
 	const routesJSON = `[{"name":"echo"}]`
 	withTimeouts := egressSidecarContainer(OBOEgressConfig{
 		SidecarImage: "img", ResponseHeaderTimeout: "30s", StreamIdleTimeout: "45s",
-	}, "ns", "ns/agent", "", routesJSON, false, false, nil, nil, nil, nil)
+	}, "ns", "ns/agent", "", routesJSON, false, nil, nil, nil, nil, nil)
 	env := envByNameC(withTimeouts.Env)
 	assert.Equal(t, "30s", env["EGRESS_RESPONSE_HEADER_TIMEOUT"])
 	assert.Equal(t, "45s", env["EGRESS_STREAM_IDLE_TIMEOUT"])
 
-	bare := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img"}, "ns", "ns/agent", "", routesJSON, false, false, nil, nil, nil, nil)
+	bare := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img"}, "ns", "ns/agent", "", routesJSON, false, nil, nil, nil, nil, nil)
 	bareEnv := envByNameC(bare.Env)
 	_, hasHeader := bareEnv["EGRESS_RESPONSE_HEADER_TIMEOUT"]
 	_, hasIdle := bareEnv["EGRESS_STREAM_IDLE_TIMEOUT"]
@@ -283,4 +303,67 @@ func envByNameC(env []corev1.EnvVar) map[string]string {
 		out[e.Name] = e.Value
 	}
 	return out
+}
+
+// GOMEMLIMIT must sit below the memory limit, or the kernel kills the sidecar before Go's collector
+// ever runs against the limit.
+func TestEgressSidecarContainer_LimitsAndGoMemLimit(t *testing.T) {
+	c := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img", TokenServiceURL: "http://ts"},
+		"ns", "ns/a", "", "[]", false, nil, nil, nil, nil, nil)
+	limit := c.Resources.Limits.Memory()
+	require.False(t, limit.IsZero(), "the egress sidecar has a memory limit")
+	require.False(t, c.Resources.Limits.Cpu().IsZero(), "the egress sidecar has a CPU limit")
+	assert.True(t, c.Resources.Requests.Memory().Cmp(*limit) < 0, "request below limit")
+
+	e, ok := envValue(c, "GOMEMLIMIT")
+	require.True(t, ok, "GOMEMLIMIT is set")
+	soft, err := resource.ParseQuantity(strings.TrimSuffix(e.Value, "B"))
+	require.NoError(t, err, "GOMEMLIMIT %q is a byte quantity", e.Value)
+	assert.True(t, soft.Cmp(*limit) < 0, "GOMEMLIMIT %s must be below the memory limit %s", e.Value, limit)
+}
+
+// restrictedViolations lists what keeps a container from the restricted Pod Security Standard's
+// container-level rules (privilege escalation, capabilities, non-root, seccomp). A pod is judged by its
+// worst container, so one injected container failing these refuses the whole agent.
+func restrictedViolations(c corev1.Container) []string {
+	sc := c.SecurityContext
+	if sc == nil {
+		return []string{"no securityContext"}
+	}
+	var v []string
+	if sc.Privileged != nil && *sc.Privileged {
+		v = append(v, "privileged")
+	}
+	if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		v = append(v, "allowPrivilegeEscalation is not false")
+	}
+	if sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot {
+		v = append(v, "runAsNonRoot is not true")
+	}
+	if sc.RunAsUser != nil && *sc.RunAsUser == 0 {
+		v = append(v, "runAsUser is 0")
+	}
+	if sc.Capabilities == nil || !slices.Contains(sc.Capabilities.Drop, capabilityAll) {
+		v = append(v, "capabilities do not drop ALL")
+	} else {
+		for _, add := range sc.Capabilities.Add {
+			if add != "NET_BIND_SERVICE" {
+				v = append(v, "adds capability "+string(add))
+			}
+		}
+	}
+	if sc.SeccompProfile == nil ||
+		(sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault && sc.SeccompProfile.Type != corev1.SeccompProfileTypeLocalhost) {
+		v = append(v, "seccompProfile is not RuntimeDefault or Localhost")
+	}
+	return v
+}
+
+func TestEgressSidecarContainer_RestrictedPodSecurity(t *testing.T) {
+	c := egressSidecarContainer(OBOEgressConfig{SidecarImage: "img", TokenServiceURL: "http://ts"},
+		"ns", "ns/a", "", "[]", false, nil, nil, nil, nil, nil)
+	assert.Empty(t, restrictedViolations(c))
+	require.NotNil(t, c.SecurityContext.ReadOnlyRootFilesystem)
+	assert.True(t, *c.SecurityContext.ReadOnlyRootFilesystem, "the sidecar writes no file")
+	assert.Nil(t, c.SecurityContext.RunAsUser, "the uid is the image's (Dockerfile.egress-sidecar)")
 }

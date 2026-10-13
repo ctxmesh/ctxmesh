@@ -5,7 +5,6 @@
 # the full runtime contract + a mock gateway (MOCK_OK):
 #
 #   make docker-build-example        # builds echo-agent:latest
-#   make docker-build-discovery      # builds the tool-discovery sidecar
 #   ctxmesh dev -f examples/echo-agent/agent.yaml
 #
 # Then POST to the printed /invoke URL; the mock gateway answers MOCK_OK.

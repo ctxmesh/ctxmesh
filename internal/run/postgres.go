@@ -55,7 +55,7 @@ var errRunConflict = errors.New("run: optimistic-concurrency conflict")
 // runStoreMaxRetries bounds the Update read-modify-write retry loop under contention.
 const runStoreMaxRetries = 8
 
-// runSchemaDDL creates the two run tables. Applied idempotently at open (matches the credstore
+// runSchemaDDL creates the two run tables. Applied idempotently at open (matches the credpostgres
 // pattern). runs holds one row per run (the checkpoint: status + messages + pending action);
 // run_events is the append-only event log the SSE stream replays.
 const runSchemaDDL = `
@@ -175,6 +175,9 @@ CREATE INDEX IF NOT EXISTS runs_root ON runs (root_run_id) WHERE root_run_id <> 
 -- to '' for runs not yet traced, so a PARTIAL index on the non-empty values keeps it small (most
 -- rows early in a run's life have no trace yet) — mirroring the runs_root partial-index pattern.
 CREATE INDEX IF NOT EXISTS runs_trace_id ON runs (trace_id) WHERE trace_id <> '';
+-- The console's Runs list without a trace store (ListRoots): one agent's root runs, newest first, read
+-- in index order. A list over several agents uses it per agent and sorts the union.
+CREATE INDEX IF NOT EXISTS runs_roots_by_agent ON runs (namespace, agent, created_at DESC, id DESC) WHERE parent_run_id = '';
 -- The AUTHORITATIVE aggregate spawn-budget counter (M64, ADR 0057): one row per spawn TREE (keyed by
 -- root run id), incremented atomically as the BFF admits each sub-run. The BFF keys it on the root it
 -- derived from the VERIFIED parent, so it cannot be re-keyed by an agent for a fresh budget.
@@ -184,7 +187,7 @@ CREATE TABLE IF NOT EXISTS spawn_counters (
 );`
 
 // NewPostgresStore opens a durable Postgres-backed run store over an open *sql.DB, applying the
-// schema idempotently. The caller owns the DB's lifecycle (open/close), matching credstore.
+// schema idempotently. The caller owns the DB's lifecycle (open/close), matching credpostgres.
 func NewPostgresStore(ctx context.Context, db *sql.DB) (Store, error) {
 	if _, err := db.ExecContext(ctx, runSchemaDDL); err != nil {
 		return nil, fmt.Errorf("run: apply schema: %w", err)
@@ -290,14 +293,13 @@ func (p *pgStore) Get(id string) (*Run, error) {
 	return r, err
 }
 
-// GetByTraceID looks up a run by its trace_id column. Returns (nil, nil) when no row matches —
-// not an error, just "not found by trace id". The share mint calls this as a FALLBACK when
-// runStore.Get(id) returns ErrNotFound (the UI's trace-detail page keys by traceId, not run.ID).
-// Note: adding an index on trace_id would speed this up at scale — deferred as a follow-up since
-// share minting is a rare, user-initiated action and an unindexed scan over the runs table is
-// acceptable for now.
+// GetByTraceID looks up a run by its trace_id column (indexed by runs_trace_id). Returns (nil, nil) when no
+// row matches — not an error, just "not found by trace id". Callers resolve an id that may be a trace id
+// (the trace page keys by traceId, not run.ID), and authorize the trace through the run returned.
 func (p *pgStore) GetByTraceID(traceID string) (*Run, error) {
-	const sel = `SELECT id FROM runs WHERE trace_id = $1 LIMIT 1`
+	// Sub-runs share their parent's trace and a handoff starts a new root on it: a trace means its earliest root.
+	const sel = `SELECT id FROM runs WHERE trace_id = $1
+		ORDER BY (parent_run_id = '') DESC, created_at, id LIMIT 1`
 	var id string
 	err := p.db.QueryRowContext(context.Background(), sel, traceID).Scan(&id)
 	switch {
@@ -1206,47 +1208,70 @@ func (p *pgStore) ListWaitingApproval(ctx context.Context, namespace string, kin
 	return out, nil
 }
 
-// ListByEndUser — see the Store interface (M137/EU1c, ADR 0107). The end-user "my runs" list: a
-// `caller_username=$1 AND namespace=$2 AND agent=$3` read, newest-updated first, bounded by limit. The
-// three-part WHERE is the ownership+host isolation boundary (never a client filter); a blank
-// callerUsername/namespace/agent returns nothing (fail-closed — the server always fills all three from
-// the VERIFIED principal + the HOST, never the request body). Read-only; a query/scan error is returned.
-func (p *pgStore) ListByEndUser(ctx context.Context, callerUsername, namespace, agent string, limit int) ([]EndUserRun, error) {
-	if callerUsername == "" || namespace == "" || agent == "" {
+// ListRoots — see the Store interface. The (namespace, agent) pairs travel as two parallel arrays and are
+// matched with unnest, so the allow-set is enforced in the query and a page is never short because rows
+// were filtered out after the LIMIT.
+func (p *pgStore) ListRoots(ctx context.Context, f RootListFilter) ([]RootRun, error) {
+	if len(f.Agents) == 0 {
 		return nil, nil
 	}
-	q := `SELECT id, status, conversation_id, created_at, updated_at
-		FROM runs WHERE caller_username=$1 AND namespace=$2 AND agent=$3 ORDER BY updated_at DESC`
-	args := []any{callerUsername, namespace, agent}
-	if limit > 0 {
-		q += ` LIMIT $4`
-		args = append(args, limit)
+	namespaces := make([]string, len(f.Agents))
+	agents := make([]string, len(f.Agents))
+	for i, a := range f.Agents {
+		namespaces[i], agents[i] = a.Namespace, a.Name
+	}
+	q := `SELECT id, namespace, agent, trace_id, status, created_at, updated_at FROM runs
+		WHERE parent_run_id = '' AND ingestion_ref = '' AND export_ref = ''
+		  AND (namespace, agent) IN (SELECT * FROM unnest($1::text[], $2::text[]))`
+	args := []any{namespaces, agents}
+	if len(f.Agents) == 1 {
+		// One agent (its page, ?agent=, a team's supervisor): equality lets Postgres walk the index in
+		// order and stop at the LIMIT, where the unnest form sorts every run the agent has.
+		q = `SELECT id, namespace, agent, trace_id, status, created_at, updated_at FROM runs
+			WHERE parent_run_id = '' AND ingestion_ref = '' AND export_ref = '' AND namespace = $1 AND agent = $2`
+		args = []any{f.Agents[0].Namespace, f.Agents[0].Name}
+	}
+	if !f.From.IsZero() {
+		args = append(args, f.From)
+		q += fmt.Sprintf(` AND created_at >= $%d`, len(args))
+	}
+	if !f.To.IsZero() {
+		args = append(args, f.To)
+		q += fmt.Sprintf(` AND created_at <= $%d`, len(args))
+	}
+	if f.Before != nil {
+		args = append(args, f.Before.CreatedAt, f.Before.ID)
+		q += fmt.Sprintf(` AND (created_at, id) < ($%d, $%d)`, len(args)-1, len(args))
+	}
+	q += ` ORDER BY created_at DESC, id DESC`
+	if f.Limit > 0 {
+		args = append(args, f.Limit)
+		q += fmt.Sprintf(` LIMIT $%d`, len(args))
 	}
 	rows, err := p.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("run: list by end-user: %w", err)
+		return nil, fmt.Errorf("run: list roots: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var out []EndUserRun
+	var out []RootRun
 	for rows.Next() {
 		var (
-			e       EndUserRun
+			r       RootRun
 			status  string
 			created time.Time
 			updated time.Time
 		)
-		// conversation_id is NOT NULL DEFAULT '' (scanned as a plain string, as the Get path does).
-		if err := rows.Scan(&e.ID, &status, &e.ConversationID, &created, &updated); err != nil {
-			return nil, fmt.Errorf("run: list by end-user scan: %w", err)
+		if err := rows.Scan(&r.ID, &r.Namespace, &r.Agent, &r.TraceID, &status, &created, &updated); err != nil {
+			return nil, fmt.Errorf("run: list roots scan: %w", err)
 		}
-		e.Status = Status(status)
-		e.CreatedAt = created.UTC()
-		e.UpdatedAt = updated.UTC()
-		out = append(out, e)
+		r.Status = Status(status)
+		r.CreatedAt = created.UTC()
+		r.UpdatedAt = updated.UTC()
+		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("run: list by end-user rows: %w", err)
+		return nil, fmt.Errorf("run: list roots rows: %w", err)
 	}
 	return out, nil
 }
@@ -1386,11 +1411,23 @@ func (p *pgStore) Subscribe(id string, fromSeq int) (<-chan Event, func(), error
 	ch := make(chan Event, subBuffer)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// If already terminal, deliver the backlog once and close — no live events will follow.
+	// If already terminal, read the backlog now, so a failed read is this call's error rather than a
+	// stream that ends early and looks complete, then deliver it and close.
 	if r.Status.IsTerminal() {
+		backlog, err := p.eventsAfter(ctx, id, fromSeq)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
 		go func() {
 			defer close(ch)
-			_ = p.drain(ctx, id, fromSeq, ch)
+			for _, ev := range backlog {
+				select {
+				case ch <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
 		}()
 		return ch, cancel, nil
 	}
@@ -1433,31 +1470,13 @@ func (p *pgStore) tail(ctx context.Context, id string, fromSeq int, ch chan<- Ev
 	}
 }
 
-// drain delivers the backlog after the cursor once (used for an already-terminal run).
-func (p *pgStore) drain(ctx context.Context, id string, fromSeq int, ch chan<- Event) error {
-	_, err := p.deliverAfter(ctx, id, fromSeq, ch)
-	return err
-}
-
 // deliverAfter fetches events with seq > cursor and sends them on ch, returning the new cursor.
 func (p *pgStore) deliverAfter(ctx context.Context, id string, cursor int, ch chan<- Event) (int, error) {
-	const q = `SELECT seq, kind, data, at FROM run_events WHERE run_id=$1 AND seq>$2 ORDER BY seq`
-	rows, err := p.db.QueryContext(ctx, q, id, cursor)
+	events, err := p.eventsAfter(ctx, id, cursor)
 	if err != nil {
-		return cursor, fmt.Errorf("run: query events: %w", err)
+		return cursor, err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var (
-			ev   Event
-			kind string
-			at   time.Time
-		)
-		if err := rows.Scan(&ev.Seq, &kind, &ev.Data, &at); err != nil {
-			return cursor, fmt.Errorf("run: scan event: %w", err)
-		}
-		ev.Kind = EventKind(kind)
-		ev.Time = at.UTC()
+	for _, ev := range events {
 		select {
 		case ch <- ev:
 			cursor = ev.Seq
@@ -1465,10 +1484,36 @@ func (p *pgStore) deliverAfter(ctx context.Context, id string, cursor int, ch ch
 			return cursor, ctx.Err()
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return cursor, fmt.Errorf("run: iterate events: %w", err)
-	}
 	return cursor, nil
+}
+
+// eventsAfter reads the run's events with seq > cursor, in order. It reads them all before returning, so
+// the connection is released before a slow subscriber is sent anything.
+func (p *pgStore) eventsAfter(ctx context.Context, id string, cursor int) ([]Event, error) {
+	const q = `SELECT seq, kind, data, at FROM run_events WHERE run_id=$1 AND seq>$2 ORDER BY seq`
+	rows, err := p.db.QueryContext(ctx, q, id, cursor)
+	if err != nil {
+		return nil, fmt.Errorf("run: query events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []Event
+	for rows.Next() {
+		var (
+			ev   Event
+			kind string
+			at   time.Time
+		)
+		if err := rows.Scan(&ev.Seq, &kind, &ev.Data, &at); err != nil {
+			return nil, fmt.Errorf("run: scan event: %w", err)
+		}
+		ev.Kind = EventKind(kind)
+		ev.Time = at.UTC()
+		out = append(out, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("run: iterate events: %w", err)
+	}
+	return out, nil
 }
 
 // isTerminal reports whether the run's persisted status is terminal.

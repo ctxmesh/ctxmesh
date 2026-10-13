@@ -25,7 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 )
 
@@ -65,7 +65,7 @@ const (
 // exercise it) this is a no-op — never a panic. A cpDB write error is logged but NOT surfaced as a reconcile
 // error: the online-scoring config is an out-of-band signal for the BFF worker, and blocking the deploy
 // reconcile on a cpDB blip would be wrong (the worker safely defaults to judge-OFF on a missing/stale row).
-func (r *AgentDeploymentReconciler) reconcileOnlineScoreConfig(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) {
+func (r *AgentDeploymentReconciler) reconcileOnlineScoreConfig(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) {
 	if r.OnlineConfig == nil {
 		return // writer unwired (dev without cpDB / envtest) — nothing to publish.
 	}
@@ -94,12 +94,12 @@ func (r *AgentDeploymentReconciler) reconcileOnlineScoreConfig(ctx context.Conte
 // block (all ⇒ judge OFF, the fail-safe); Skip on a transient API read error (leave the prior row untouched,
 // never delete a live policy on a blip). Parsing is lenient (mirrors the worker's "bad config ⇒ default,
 // never a panic" discipline): a malformed sampleRate or window parses to 0.
-func (r *AgentDeploymentReconciler) resolveOnlineConfig(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) (onlinescore.OnlineConfig, onlineConfigAction) {
+func (r *AgentDeploymentReconciler) resolveOnlineConfig(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) (onlinescore.OnlineConfig, onlineConfigAction) {
 	if deploy.Spec.EvalSuiteRef == "" {
 		return onlinescore.OnlineConfig{}, onlineConfigClear // no gate/policy — clear (judge OFF).
 	}
 
-	var suite agentsv1alpha1.EvalSuite
+	var suite agentsv1beta1.EvalSuite
 	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Spec.EvalSuiteRef}, &suite); err != nil {
 		if apierrors.IsNotFound(err) {
 			return onlinescore.OnlineConfig{}, onlineConfigClear // dangling ref — clear (judge OFF), not a hard error.

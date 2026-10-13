@@ -30,7 +30,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -55,8 +54,7 @@ const (
 const (
 	// envGuardrailPolicyFile is the STATIC env var carrying the in-container PATH to the mounted
 	// guardrail-policy file (K3). Its presence forces the launcher's :2996 model proxy on and is
-	// the source the launcher reads + fsnotify-watches. NEVER valueFrom — the m5.7 Knative ksvc
-	// landmine (the webhook rejects valueFrom in a ksvc pod template); the VALUE is a static path.
+	// the source the launcher reads + fsnotify-watches. The VALUE is a static path.
 	envGuardrailPolicyFile = "GUARDRAIL_POLICY_FILE"
 
 	// guardrailConfigMapSuffix names the per-agent, STABLE-named ConfigMap that materialises the
@@ -142,7 +140,7 @@ type resolvedGuardrail struct {
 func resolveGuardrail(
 	ctx context.Context,
 	c client.Client,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (resolvedGuardrail, error) {
 	ref := deploy.Spec.GuardrailPolicyRef
 	if ref == "" {
@@ -225,7 +223,7 @@ func firstUncompilablePattern(spec *agentsv1beta1.GuardrailPolicySpec) (string, 
 // the static FILE PATH (no valueFrom — the m5.7 Knative ksvc landmine).
 func (r *AgentDeploymentReconciler) reconcileGuardrailConfigMap(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	gr resolvedGuardrail,
 ) (vol *corev1.Volume, mount *corev1.VolumeMount, env []corev1.EnvVar, err error) {
 	if !gr.referenced {
@@ -272,9 +270,10 @@ func guardrailPresenceDigest(referenced bool) string {
 	if !referenced {
 		return ""
 	}
-	// A stable, arbitrary token (the sha256 of a fixed marker, truncated to 8 hex). Its VALUE never
-	// changes; only its presence/absence toggles the roll — exactly the presence semantics we want.
-	h := sha256.Sum256([]byte("guardrail:referenced"))
+	// The sha256 of a fixed marker, truncated to 8 hex: its presence toggles the roll. The marker names
+	// the pod shape a guarded agent gets, so it changes only when that shape does — the BFF pod token
+	// (m184.7) was such a change.
+	h := sha256.Sum256([]byte("guardrail:referenced:bff-pod-token"))
 	return fmt.Sprintf("%x", h[:])[:8]
 }
 

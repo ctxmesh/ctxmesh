@@ -173,7 +173,51 @@ func TestProxySharedScope(t *testing.T) {
 			map[string]string{memoryScopeHeader: "shared"}).Code)
 	keys := mr.Keys()
 	require.Len(t, keys, 1)
-	assert.Equal(t, "mem:shared:reg-1:c1", keys[0], "shared scope keys under the SA-derived registry")
+	assert.Equal(t, "mem:shared:team-alpha/reg-1:c1", keys[0], "shared scope keys under the SA-derived registry")
+}
+
+// A registry id is chosen by its author, so another namespace can copy it. Its agents must not
+// read or write this namespace's scratchpad.
+func TestProxySharedScopeIsolatesNamespacesWithTheSameRegistryID(t *testing.T) {
+	resolver := fakeRegistryResolver{byNsSA: map[string]string{
+		"team-alpha/agent-support-agent": "reg-1",
+		"team-beta/agent-intruder":       "reg-1",
+	}}
+	s, mr, auth := newTestProxy(t, func(o *Options) { o.RegistryResolver = resolver })
+	victim := podToken(auth, "team-alpha/support-agent")
+	intruder := podToken(auth, "team-beta/intruder")
+	shared := map[string]string{memoryScopeHeader: "shared"}
+
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/memory/c1/append", victim, `{"role":"user","content":"alpha-secret"}`, shared).Code)
+
+	rec := do(t, s, "GET", "/memory/c1", intruder, "", shared)
+	assert.NotContains(t, rec.Body.String(), "alpha-secret", "another namespace's registry of the same id reads nothing")
+	require.Equal(t, http.StatusNoContent,
+		do(t, s, "POST", "/memory/c1/append", intruder, `{"role":"user","content":"beta"}`, shared).Code)
+	assert.ElementsMatch(t, []string{"mem:shared:team-alpha/reg-1:c1", "mem:shared:team-beta/reg-1:c1"}, mr.Keys())
+
+	rec = do(t, s, "GET", "/memory/c1", victim, "", shared)
+	assert.Contains(t, rec.Body.String(), "alpha-secret", "the namespace's own agent still reads its scratchpad")
+	assert.NotContains(t, rec.Body.String(), "beta")
+}
+
+// The shared scope is only ever the caller's own namespace: a registry boundary naming another
+// namespace (or the pre-namespace "r:<id>" form) falls back to the private scope.
+func TestScopeFromAgentSharedStaysInTheCallersNamespace(t *testing.T) {
+	sc, err := scopeFromAgent("team-alpha/support", "r:team-beta/reg-1", true)
+	require.NoError(t, err)
+	assert.Equal(t, "mem:team-alpha/support:", sc.prefix)
+	assert.False(t, sc.shared)
+
+	sc, err = scopeFromAgent("team-alpha/support", "r:reg-1", true)
+	require.NoError(t, err)
+	assert.Equal(t, "mem:team-alpha/support:", sc.prefix)
+
+	sc, err = scopeFromAgent("team-alpha/support", "r:team-alpha/reg-1", true)
+	require.NoError(t, err)
+	assert.Equal(t, "mem:shared:team-alpha/reg-1:", sc.prefix)
+	assert.True(t, sc.shared)
 }
 
 // Shared requested but the agent is NOT a registry member (no registry resolves) → the
@@ -239,7 +283,7 @@ func TestProxyPerUserNeverAppliesToShared(t *testing.T) {
 	require.Equal(t, http.StatusNoContent,
 		do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"team"}`,
 			map[string]string{memoryScopeHeader: "shared", memoryUserHeader: "aaaa1111"}).Code)
-	require.Equal(t, "mem:shared:reg-1:c1", mr.Keys()[0], "shared scope ignores X-Memory-User")
+	require.Equal(t, "mem:shared:team-alpha/reg-1:c1", mr.Keys()[0], "shared scope ignores X-Memory-User")
 }
 
 // A malformed X-Memory-User (non-hex, ':' injection, or oversized) is rejected 400 — the
@@ -280,7 +324,7 @@ func TestProxyRejectedToken(t *testing.T) {
 }
 
 // An agent literally named "shared" keys its PRIVATE memory under mem:{ns}/shared: — the
-// "/" separator keeps it disjoint from the shared-scratchpad space mem:shared:{reg}:, so
+// "/" separator keeps it disjoint from the shared-scratchpad space mem:shared:{ns}/{reg}:, so
 // the name can never collide across the private/shared key spaces (ADR 0052 §C6 nit N3).
 func TestProxyAgentNamedSharedNoCollision(t *testing.T) {
 	s, mr, auth := newTestProxy(t)
@@ -288,7 +332,7 @@ func TestProxyAgentNamedSharedNoCollision(t *testing.T) {
 	require.Equal(t, http.StatusNoContent,
 		do(t, s, "POST", "/memory/c1/append", tok, `{"role":"user","content":"x"}`, nil).Code)
 	require.Equal(t, "mem:team-x/shared:c1", mr.Keys()[0],
-		"a private agent named 'shared' keys under mem:{ns}/shared:, disjoint from mem:shared:{reg}:")
+		"a private agent named 'shared' keys under mem:{ns}/shared:, disjoint from mem:shared:{ns}/{reg}:")
 }
 
 // A verified pod token that is NOT a per-agent identity SA (e.g. the namespace default

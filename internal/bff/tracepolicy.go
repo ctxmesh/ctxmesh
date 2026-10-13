@@ -24,7 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // The redaction-policy editor (m18.13, ADR 0019). An agent's spec.tracePolicy is
@@ -59,7 +59,7 @@ func (s *Server) handleGetTracePolicy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(),
 		client.ObjectKey{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
@@ -89,7 +89,7 @@ func (s *Server) handleUpdateTracePolicy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	if err := caller.Get(r.Context(),
 		client.ObjectKey{Namespace: r.PathValue("ns"), Name: r.PathValue("name")}, &ad); err != nil {
 		s.writeGetError(w, err, "agent")
@@ -97,9 +97,9 @@ func (s *Server) handleUpdateTracePolicy(w http.ResponseWriter, r *http.Request)
 	}
 
 	// nil when empty so clearing the last detector removes the block entirely.
-	detectors := make([]agentsv1alpha1.CustomDetector, 0, len(req.CustomDetectors))
+	detectors := make([]agentsv1beta1.CustomDetector, 0, len(req.CustomDetectors))
 	for _, d := range req.CustomDetectors {
-		detectors = append(detectors, agentsv1alpha1.CustomDetector{
+		detectors = append(detectors, agentsv1beta1.CustomDetector{
 			Name:    strings.TrimSpace(d.Name),
 			Pattern: d.Pattern,
 		})
@@ -107,7 +107,7 @@ func (s *Server) handleUpdateTracePolicy(w http.ResponseWriter, r *http.Request)
 	if len(detectors) == 0 {
 		ad.Spec.TracePolicy = nil
 	} else {
-		ad.Spec.TracePolicy = &agentsv1alpha1.TracePolicy{CustomDetectors: detectors}
+		ad.Spec.TracePolicy = &agentsv1beta1.TracePolicy{CustomDetectors: detectors}
 	}
 
 	if err := caller.Update(r.Context(), &ad); err != nil {
@@ -119,7 +119,7 @@ func (s *Server) handleUpdateTracePolicy(w http.ResponseWriter, r *http.Request)
 }
 
 // tracePolicyResponse projects an agent's spec.tracePolicy onto the DTO.
-func tracePolicyResponse(ad *agentsv1alpha1.AgentDeployment) TracePolicyResponse {
+func tracePolicyResponse(ad *agentsv1beta1.AgentDeployment) TracePolicyResponse {
 	out := TracePolicyResponse{CustomDetectors: make([]CustomDetectorDTO, 0)}
 	if ad.Spec.TracePolicy != nil {
 		for _, d := range ad.Spec.TracePolicy.CustomDetectors {

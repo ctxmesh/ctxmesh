@@ -111,7 +111,7 @@ func (s *Server) handleReadSpawnedRun(w http.ResponseWriter, r *http.Request) {
 	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
 	capab, capErr := s.verifyRuncapWithProof(r)
 	if capErr != nil {
-		writeError(w, http.StatusUnauthorized, capErr.Error())
+		writeRuncapError(w, capErr)
 		return
 	}
 	sub, err := s.runStore.Get(r.PathValue("id"))
@@ -231,7 +231,7 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
 	capab, capErr := s.verifyRuncapWithProof(r)
 	if capErr != nil {
-		writeError(w, http.StatusUnauthorized, capErr.Error())
+		writeRuncapError(w, capErr)
 		return
 	}
 
@@ -283,7 +283,12 @@ func (s *Server) handleSpawnRun(w http.ResponseWriter, r *http.Request) {
 	// not in exploitation. The sub-agent's address is a function of (namespace, name), and both are now
 	// authoritative: the name passed the fence above, the namespace comes from the VERIFIED parent run. So
 	// there is nothing the caller needs to tell us — and a field we do not read cannot be abused.
-	subEndpoint := s.agentEndpoint(req.SubAgent, parent.Namespace)
+	subEndpoint, err := s.agentAddress(r.Context(), parent.Namespace, req.SubAgent)
+	if err != nil {
+		s.log.Error(err, "spawn: resolving the sub-agent's address failed")
+		writeError(w, http.StatusServiceUnavailable, "the sub-agent's address could not be resolved; retry")
+		return
+	}
 
 	// (4) Lineage + the deterministic sub-run id, both AUTHORITATIVE (derived from the VERIFIED parent,
 	// never the request body). A root parent (no RootRunID) roots the tree at itself.

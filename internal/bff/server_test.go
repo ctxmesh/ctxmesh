@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
@@ -33,7 +34,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -41,7 +41,6 @@ func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(s))
-	require.NoError(t, agentsv1alpha1.AddToScheme(s))
 	require.NoError(t, agentsv1beta1.AddToScheme(s))
 	return s
 }
@@ -151,10 +150,10 @@ func TestListAgentsEmpty(t *testing.T) {
 }
 
 func TestListAgentsProjection(t *testing.T) {
-	ready := &agentsv1alpha1.AgentDeployment{
+	ready := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: "prod"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "echo:1.2.3"},
-		Status: agentsv1alpha1.AgentDeploymentStatus{
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "echo:1.2.3"},
+		Status: agentsv1beta1.AgentDeploymentStatus{
 			Conditions: []metav1.Condition{{
 				Type:   "Ready",
 				Status: metav1.ConditionTrue,
@@ -162,15 +161,15 @@ func TestListAgentsProjection(t *testing.T) {
 			}},
 		},
 	}
-	pending := &agentsv1alpha1.AgentDeployment{
+	pending := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "wip", Namespace: "staging"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "wip:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "wip:latest"},
 		// No conditions → Pending.
 	}
-	notReady := &agentsv1alpha1.AgentDeployment{
+	notReady := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "broken", Namespace: "staging"},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "broken:0"},
-		Status: agentsv1alpha1.AgentDeploymentStatus{
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "broken:0"},
+		Status: agentsv1beta1.AgentDeploymentStatus{
 			Conditions: []metav1.Condition{{
 				Type:    "Ready",
 				Status:  metav1.ConditionFalse,
@@ -215,6 +214,22 @@ func TestListAgentsProjection(t *testing.T) {
 	// A Ready agent carries no reason/message (they are only meaningful when down).
 	assert.Empty(t, byName["echo"].Reason)
 	assert.Empty(t, byName["echo"].Message)
+}
+
+// TestAgentSummaryCreatedAt proves the list carries each agent's creation time, so the console can
+// find the agent a person just created; an unset timestamp is omitted rather than sent as zero.
+func TestAgentSummaryCreatedAt(t *testing.T) {
+	at := metav1.NewTime(time.Date(2026, 10, 11, 9, 30, 0, 0, time.FixedZone("x", 3600)))
+	created := newAgentSummary(&agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS, CreationTimestamp: at},
+	})
+	assert.Equal(t, "2026-10-11T08:30:00Z", created.CreatedAt)
+
+	unset := newAgentSummary(&agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "echo"}})
+	assert.Empty(t, unset.CreatedAt)
+	raw, err := json.Marshal(unset)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "createdAt")
 }
 
 func TestListAgentsClientError(t *testing.T) {

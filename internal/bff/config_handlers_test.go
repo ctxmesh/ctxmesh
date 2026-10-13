@@ -37,7 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
@@ -135,7 +135,7 @@ func TestCreateAgentHandlerCreatesCRD(t *testing.T) {
 	assert.Equal(t, "prod", resp.Created[0].Namespace)
 
 	// The object really landed in the (fake) cluster.
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo-agent", Namespace: "prod"}, &got))
 	assert.Equal(t, "ghcr.io/ctxmesh/echo:v1", got.Spec.Image)
 }
@@ -145,7 +145,7 @@ func TestCreateAgentHandlerCreatesCRD(t *testing.T) {
 // references THAT route (via the MODEL_ROUTE env expand emits) — the user picked a model,
 // the platform managed the route.
 func TestCreateAgentHandlerModelPickEnsuresRoute(t *testing.T) {
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(connectRoute("prod", "anthropic", "anthropic")).Build()
 	s := newConfigServer(t, c)
 
 	reqBody, _ := json.Marshal(CreateAgentRequest{
@@ -159,7 +159,7 @@ func TestCreateAgentHandlerModelPickEnsuresRoute(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 
 	// The ensured ModelRoute was created for the picked (provider, model).
-	var mr agentsv1alpha1.ModelRoute
+	var mr agentsv1beta1.ModelRoute
 	require.NoError(t, c.Get(context.Background(),
 		client.ObjectKey{Name: "anthropic-claude-sonnet-5", Namespace: "prod"}, &mr))
 	require.Len(t, mr.Spec.Providers, 1)
@@ -167,7 +167,7 @@ func TestCreateAgentHandlerModelPickEnsuresRoute(t *testing.T) {
 	assert.Equal(t, "anthropic", mr.Spec.Providers[0].SecretBindingRef)
 
 	// The created agent references THAT route (MODEL_ROUTE env from expand).
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(),
 		client.ObjectKey{Name: "echo-agent", Namespace: "prod"}, &agent))
 	var route string
@@ -178,6 +178,42 @@ func TestCreateAgentHandlerModelPickEnsuresRoute(t *testing.T) {
 	}
 	assert.Equal(t, "anthropic-claude-sonnet-5", route,
 		"the agent must reference the platform-ensured route for the picked model")
+}
+
+// TestCreateAgentHandlerUnknownConnectionIsRefused: a model-first create naming a connection the
+// namespace does not have is refused with a 400 naming it, and nothing is created, while the same
+// request naming a connection that exists creates the agent on that connection.
+func TestCreateAgentHandlerUnknownConnectionIsRefused(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(connectRoute("prod", "team-llm", "openai")).Build()
+	s := newConfigServer(t, c)
+	create := func(connection string) *httptest.ResponseRecorder {
+		reqBody, err := json.Marshal(CreateAgentRequest{
+			AgentYAML: sampleAgentYAML,
+			Namespace: "prod",
+			Model:     &ModelPick{Connection: connection, Provider: "custom", Model: "mock-large"},
+		})
+		require.NoError(t, err)
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
+		return rec
+	}
+
+	rec := create("no-such-llm")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `connection \"no-such-llm\" does not exist`)
+	var routes agentsv1beta1.ModelRouteList
+	require.NoError(t, c.List(context.Background(), &routes, client.InNamespace("prod")))
+	assert.Len(t, routes.Items, 1, "only the existing connection's route")
+	var agents agentsv1beta1.AgentDeploymentList
+	require.NoError(t, c.List(context.Background(), &agents, client.InNamespace("prod")))
+	assert.Empty(t, agents.Items)
+
+	rec = create("team-llm")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var mr agentsv1beta1.ModelRoute
+	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "team-llm-mock-large", Namespace: "prod"}, &mr))
+	assert.Equal(t, "openai", mr.Spec.Providers[0].Provider, "the connection's provider, not the request's")
+	assert.Equal(t, "team-llm", mr.Spec.Providers[0].SecretBindingRef)
 }
 
 func TestCreateAgentHandlerMultiDoc(t *testing.T) {
@@ -215,7 +251,7 @@ prompt:
 	assert.Equal(t, []string{"PromptVersion", "EvalSuite", "AgentDeployment"}, kinds)
 
 	// EvalSuite is a CRD (fake client); the PromptVersion is in the Postgres store (no CRD).
-	var es agentsv1alpha1.EvalSuite
+	var es agentsv1beta1.EvalSuite
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "quality", Namespace: "prod"}, &es))
 	storedPV, err := s.promptStore.Get(context.Background(), "prod", "system-prompt")
 	require.NoError(t, err)
@@ -282,7 +318,7 @@ func TestCreateAgentHandlerRBACForbiddenIs403(t *testing.T) {
 
 func TestCreateAgentHandlerAlreadyExistsIs409(t *testing.T) {
 	// Pre-create the object so the second create collides.
-	existing := &agentsv1alpha1.AgentDeployment{}
+	existing := &agentsv1beta1.AgentDeployment{}
 	existing.Name = "echo-agent"
 	existing.Namespace = "prod"
 	existing.Spec.Image = "old:1"
@@ -304,8 +340,26 @@ tools:
   - echo_tool
 `
 
+// toolStoreWith is a ToolRegistry store holding one team-visible MCP server in ns that
+// offers tools — what a managed agent's tools must resolve to for its create to succeed.
+func toolStoreWith(t *testing.T, ns string, tools ...string) toolregistry.Store {
+	t.Helper()
+	entries := make([]toolregistry.ToolEntry, 0, len(tools))
+	for _, name := range tools {
+		entries = append(entries, toolregistry.ToolEntry{Name: name, URL: "https://tools.example/mcp"})
+	}
+	store := toolregistry.NewMemStore()
+	_, err := store.Upsert(context.Background(), toolregistry.ToolRegistry{Namespace: ns, Name: "team-tools", Tools: entries})
+	require.NoError(t, err)
+	return store
+}
+
+// postAgent creates idemAgentYAML in "prod", where a registered server offers echo_tool.
 func postAgent(t *testing.T, s *Server) *httptest.ResponseRecorder {
 	t.Helper()
+	if s.toolRegistryStore == nil {
+		s.toolRegistryStore = toolStoreWith(t, "prod", "echo_tool")
+	}
 	reqBody, _ := json.Marshal(CreateAgentRequest{AgentYAML: idemAgentYAML, Namespace: "prod"})
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
@@ -321,12 +375,12 @@ func TestCreateAgentIdempotentAdoptsLeftoverBinding(t *testing.T) {
 	s := newConfigServer(t, c)
 
 	require.Equal(t, http.StatusCreated, postAgent(t, s).Code, "first create")
-	var bindings agentsv1alpha1.MCPToolBindingList
+	var bindings agentsv1beta1.MCPToolBindingList
 	require.NoError(t, c.List(context.Background(), &bindings, client.InNamespace("prod")))
 	require.Len(t, bindings.Items, 1, "the managed agent generated one binding")
 
 	// Orphan the binding: delete the AgentDeployment, leave the binding behind.
-	require.NoError(t, c.Delete(context.Background(), &agentsv1alpha1.AgentDeployment{
+	require.NoError(t, c.Delete(context.Background(), &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "idem-agent", Namespace: "prod"},
 	}))
 
@@ -362,7 +416,7 @@ func TestCreateAgentStampsSourceSpec(t *testing.T) {
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "echo-agent", Namespace: "prod"}, &got))
 
 	stored, ok := got.Annotations[expand.AnnotationSourceSpec]
@@ -405,11 +459,11 @@ prompt:
 	s.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/agents", bytes.NewReader(reqBody)))
 	require.Equal(t, http.StatusCreated, rec.Code)
 
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "rich-agent", Namespace: "prod"}, &ad))
 	assert.Contains(t, ad.Annotations, expand.AnnotationSourceSpec, "primary AgentDeployment carries the annotation")
 
-	var es agentsv1alpha1.EvalSuite
+	var es agentsv1beta1.EvalSuite
 	require.NoError(t, c.Get(context.Background(), client.ObjectKey{Name: "quality", Namespace: "prod"}, &es))
 	assert.NotContains(t, es.Annotations, expand.AnnotationSourceSpec, "generated EvalSuite must NOT carry the annotation")
 
@@ -442,7 +496,7 @@ apiKey: sk-super-secret-value
 	assert.Contains(t, rec.Body.String(), "inline secrets are not allowed")
 
 	// Nothing landed: the reject happens before any create.
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	err := c.Get(context.Background(), client.ObjectKey{Name: "leaky-agent", Namespace: "prod"}, &got)
 	assert.True(t, apierrors.IsNotFound(err), "no AgentDeployment must be created when the spec is rejected")
 }
@@ -465,7 +519,7 @@ func TestCreateAgentOversizeSpecRejected(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "too large")
 
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	err := c.Get(context.Background(), client.ObjectKey{Name: "big-agent", Namespace: "prod"}, &got)
 	assert.True(t, apierrors.IsNotFound(err), "no AgentDeployment must be created when the spec is oversize")
 }
@@ -564,7 +618,8 @@ func TestBindingRegistryResolution(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	idx := toolRegistryIndex(context.Background(), store, "default")
+	idx, err := toolRegistryIndex(context.Background(), store, "default", "")
+	require.NoError(t, err)
 	assert.Equal(t, "scalekit-mcp-server", idx["create_organization"].registry)
 	assert.Equal(t, "https://mcp.scalekit.com/", idx["create_organization"].url)
 	assert.Equal(t, "acme-mcp", idx["search"].registry)
@@ -572,14 +627,14 @@ func TestBindingRegistryResolution(t *testing.T) {
 	// A binding expand generated with the wrong default + placeholder URL is rewritten
 	// to the real registry AND the registry's pinned URL (so the controller pin check
 	// passes, not RegistryMismatch).
-	good := &agentsv1alpha1.MCPToolBinding{
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+	good := &agentsv1beta1.MCPToolBinding{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			ToolName: "create_organization", RegistryRef: "default-tools", Mode: "remote",
-			Server: agentsv1alpha1.ToolServer{URL: "http://create-organization.mcp.svc.cluster.local/mcp"},
+			Server: agentsv1beta1.ToolServer{URL: "http://create-organization.mcp.svc.cluster.local/mcp"},
 		},
 	}
-	unknown := &agentsv1alpha1.MCPToolBinding{
-		Spec: agentsv1alpha1.MCPToolBindingSpec{ToolName: "nope", RegistryRef: "default-tools"},
+	unknown := &agentsv1beta1.MCPToolBinding{
+		Spec: agentsv1beta1.MCPToolBindingSpec{ToolName: "nope", RegistryRef: "default-tools"},
 	}
 	rewriteBindingRegistries([]decodedObject{
 		{obj: good, kind: mcpToolBindingKind},

@@ -72,12 +72,19 @@ func main() {
 	// registry member (AGENT_REGISTRY_ID injected). nil otherwise, so a
 	// non-mesh agent's /invoke path is unchanged.
 	var guard inboundGuard
+	var ampG *ampGuard
 	if cfg.AMPEnabled() {
-		guard = newAMPGuard(cfg.AMP, tracer)
+		verifier, vErr := capabilityVerifierFromEnv(os.Getenv)
+		if vErr != nil {
+			fmt.Fprintf(os.Stderr, "launcher: AMP: %v; attested calls and run capabilities are refused\n", vErr)
+		}
+		ampG = newAMPGuard(cfg.AMP, tracer, verifier, processLoopbackSecret())
+		guard = ampG
 	}
 
 	// Async AMP consumer (eventing path): wired when the agent is a registry
-	// member (a Trigger can deliver CloudEvents to it). The seen-set reuses the
+	// member (a Trigger can deliver CloudEvents to it). The guard admits a delivery
+	// only with the platform's attestation of its sender. The seen-set reuses the
 	// M5 Valkey (MEMORY_BACKEND_ADDR); when that is absent the consumer still
 	// runs but dedupe is fail-open by construction (no store to consult). The
 	// production invoker POSTs the decoded payload back through the launcher's own
@@ -117,7 +124,9 @@ func main() {
 			seen:    seen,
 			tracer:  tracer,
 			offload: off,
-			invoke:  newProxyInvoker(cfg.ProxyPort, &http.Client{Timeout: ampRequestTimeout, CheckRedirect: refuseRedirect}),
+			invoke: newProxyInvoker(cfg.ProxyPort, processLoopbackSecret(),
+				&http.Client{Timeout: ampRequestTimeout, CheckRedirect: refuseRedirect}),
+			guard: ampG,
 		}
 	}
 	handler := buildHandler(tracer, prop, upstreamURL, cfg, guard, consumer)
@@ -180,6 +189,17 @@ func main() {
 	// disabled → agents without feedback wiring are unchanged.
 	fbSrv := buildFeedbackServer(cfg)
 
+	// ── Tool discovery (:2999) ────────────────────────────────────────────
+	// Started ONLY when the agent has a tool binding (TOOLS_JSON_PATH injected): serves the mounted
+	// manifest and follows its changes. nil otherwise.
+	discSrv, disc := buildDiscoveryServer(os.Getenv, func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, format+"\n", args...)
+	})
+	discStop := make(chan struct{})
+	if disc != nil {
+		go disc.watch(discStop)
+	}
+
 	// ── Child process ─────────────────────────────────────────────────────
 	child, err := startChild(cfg)
 	if err != nil {
@@ -216,6 +236,7 @@ func main() {
 	startBestEffort(delSrv, "delegate")
 	startBestEffort(gwSrv, "gateway")
 	startBestEffort(fbSrv, "feedback")
+	startBestEffort(discSrv, "discovery")
 
 	// ── Wait for child to exit, then shut down cleanly ────────────────────
 	exitCode := <-childExitCh
@@ -223,7 +244,8 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	for _, listener := range []*http.Server{srv, memSrv, ampSrv, delSrv, gwSrv, fbSrv} {
+	close(discStop)
+	for _, listener := range []*http.Server{srv, memSrv, ampSrv, delSrv, gwSrv, fbSrv, discSrv} {
 		if listener != nil {
 			_ = listener.Shutdown(shutCtx)
 		}
@@ -234,7 +256,8 @@ func main() {
 }
 
 // startBestEffort runs an optional listener in a goroutine, logging a real bind failure without taking
-// the agent down (each side listener — memory / AMP / delegate / gateway / feedback — is best-effort). A
+// the agent down (each side listener — memory / AMP / delegate / gateway / feedback / discovery — is
+// best-effort). A
 // nil server is a no-op (the feature is disabled).
 func startBestEffort(srv *http.Server, name string) {
 	if srv == nil {

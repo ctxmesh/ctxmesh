@@ -45,7 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -60,7 +60,7 @@ const callerConnectNS = "consumer-ns"
 // an optional namespaceTenantStore. It returns the server and the store (seeded with
 // the given origin registries), plus the backing client so tests can assert what
 // K8s objects were (not) created.
-func newMCPConnectServer(t *testing.T, nsStore namespacetenant.Store, origins ...*agentsv1alpha1.ToolRegistry) (*Server, toolregistry.Store, client.Client) {
+func newMCPConnectServer(t *testing.T, nsStore namespacetenant.Store, origins ...*agentsv1beta1.ToolRegistry) (*Server, toolregistry.Store, client.Client) {
 	t.Helper()
 	// The backing fake client is what createMCPObjects' K8s creates (Secret / NetworkPolicy)
 	// land on — tests inspect it to assert NO token Secret was written for the copy. We stub
@@ -104,8 +104,8 @@ func connectReq(t *testing.T, body MCPConnectRequest) *http.Request {
 // carrying a URL, one tool with an inputSchema, the OAuth auth-type annotation, the
 // non-secret OAuth CLIENT config annotations, and — critically — NO secret reference of
 // its own that connect would ever read (connect never touches a Secret regardless).
-func oauthOrigin(ns, name, visibility string) *agentsv1alpha1.ToolRegistry {
-	return &agentsv1alpha1.ToolRegistry{
+func oauthOrigin(ns, name, visibility string) *agentsv1beta1.ToolRegistry {
+	return &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -118,7 +118,7 @@ func oauthOrigin(ns, name, visibility string) *agentsv1alpha1.ToolRegistry {
 			Annotations: map[string]string{
 				annMCPURL:                "https://192.0.2.20/mcp",
 				annMCPAuthType:           oauthAuthType,
-				annMCPStatus:             agentsv1alpha1.ApprovalApproved,
+				annMCPStatus:             agentsv1beta1.ApprovalApproved,
 				annMCPOAuthAuthEndpoint:  "https://auth.example.com/authorize",
 				annMCPOAuthTokenEndpoint: "https://auth.example.com/token",
 				annMCPOAuthClientID:      "publisher-client-id",
@@ -126,8 +126,8 @@ func oauthOrigin(ns, name, visibility string) *agentsv1alpha1.ToolRegistry {
 				annMCPOAuthRedirectURI:   "https://console.example/api/mcp/oauth/callback",
 			},
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{
-			Tools: []agentsv1alpha1.ToolEntry{{
+		Spec: agentsv1beta1.ToolRegistrySpec{
+			Tools: []agentsv1beta1.ToolEntry{{
 				Name:        "search",
 				Description: "search the corpus",
 				URL:         "https://192.0.2.20/mcp",
@@ -138,7 +138,7 @@ func oauthOrigin(ns, name, visibility string) *agentsv1alpha1.ToolRegistry {
 }
 
 // publicOrigin builds a public no-auth origin.
-func publicOrigin(ns, name string) *agentsv1alpha1.ToolRegistry {
+func publicOrigin(ns, name string) *agentsv1beta1.ToolRegistry {
 	o := oauthOrigin(ns, name, visibilityPublic)
 	o.Labels[labelMCPCredentialSource] = credSourceNone
 	delete(o.Annotations, annMCPAuthType)

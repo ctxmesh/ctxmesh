@@ -23,23 +23,23 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // TestNextCanaryStep pins the step selector: the next step is the first scheduled percent strictly
 // greater than current, with an empty schedule meaning the implicit single 100% step (ADR 0113 §1).
 func TestNextCanaryStep(t *testing.T) {
-	steps := func(pcts ...int32) []agentsv1alpha1.CanaryStep {
-		out := make([]agentsv1alpha1.CanaryStep, len(pcts))
+	steps := func(pcts ...int32) []agentsv1beta1.CanaryStep {
+		out := make([]agentsv1beta1.CanaryStep, len(pcts))
 		for i, p := range pcts {
-			out[i] = agentsv1alpha1.CanaryStep{Percent: p}
+			out[i] = agentsv1beta1.CanaryStep{Percent: p}
 		}
 		return out
 	}
 	cases := []struct {
 		name    string
 		current int32
-		steps   []agentsv1alpha1.CanaryStep
+		steps   []agentsv1beta1.CanaryStep
 		want    int32
 	}{
 		{"empty schedule below 100 ⇒ 100", 10, nil, 100},
@@ -69,16 +69,16 @@ func TestDecideAutoProgress(t *testing.T) {
 		dwell = time.Hour
 	)
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
-	steps := func(pcts ...int32) []agentsv1alpha1.CanaryStep {
-		out := make([]agentsv1alpha1.CanaryStep, len(pcts))
+	steps := func(pcts ...int32) []agentsv1beta1.CanaryStep {
+		out := make([]agentsv1beta1.CanaryStep, len(pcts))
 		for i, p := range pcts {
-			out[i] = agentsv1alpha1.CanaryStep{Percent: p}
+			out[i] = agentsv1beta1.CanaryStep{Percent: p}
 		}
 		return out
 	}
 	// prior builds a rollout state pinned to cand at the given percent, last advanced `ago` before now.
-	prior := func(pct int32, ago time.Duration) *agentsv1alpha1.RolloutStatus {
-		return &agentsv1alpha1.RolloutStatus{
+	prior := func(pct int32, ago time.Duration) *agentsv1beta1.RolloutStatus {
+		return &agentsv1beta1.RolloutStatus{
 			CandidateRevision: cand,
 			CurrentPercent:    pct,
 			LastAdvanceAt:     &metav1.Time{Time: now.Add(-ago)},
@@ -97,7 +97,7 @@ func TestDecideAutoProgress(t *testing.T) {
 	})
 
 	t.Run("stale candidate resets progression to base (no inherited percent)", func(t *testing.T) {
-		stale := &agentsv1alpha1.RolloutStatus{
+		stale := &agentsv1beta1.RolloutStatus{
 			CandidateRevision: other, CurrentPercent: 50,
 			LastAdvanceAt: &metav1.Time{Time: now.Add(-2 * dwell)},
 		}

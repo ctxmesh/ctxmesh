@@ -1,0 +1,42 @@
+# Token-service ingress (ADR 0154). Defence in depth only: the gate is the token review every request
+# passes, and this policy does nothing on a cluster whose CNI does not enforce NetworkPolicy (kindnet,
+# for one). Where it is enforced, the platform namespace's other workloads cannot reach the service at
+# all, and agents reach it from their own namespaces. It cannot tell an agent's sidecar from its code,
+# since both share the pod. An agent placed in the install namespace is therefore blocked, and its tool
+# calls, memory and knowledge searches time out rather than being refused: no label on a pod there
+# proves it is an agent. The chart can turn it off (tokenService.networkPolicy.enabled).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: token-service-ingress
+  namespace: system
+  labels:
+    control-plane: token-service
+    app.kubernetes.io/name: ctxmesh
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: token-service
+  policyTypes:
+    - Ingress
+  ingress:
+    # The BFF: grant writes and the knowledge test query.
+    - from:
+        - podSelector:
+            matchLabels:
+              control-plane: bff
+      ports:
+        - protocol: TCP
+          port: 8443
+    # Agent pods, in any namespace but the platform's: the egress sidecar and the launcher.
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: NotIn
+                values:
+                  - ctxmesh
+      ports:
+        - protocol: TCP
+          port: 8443

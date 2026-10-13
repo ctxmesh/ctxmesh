@@ -110,14 +110,20 @@ func TestBoundaryKeying(t *testing.T) {
 	userHash := UserHash(nil, "alice@example.com")
 
 	// Boundary constructors + hashing.
-	assert.Equal(t, "", RegistryBoundary(""), "empty registry ⇒ unscoped")
-	assert.Equal(t, "r:reg-a", RegistryBoundary("reg-a"))
+	assert.Equal(t, "", RegistryBoundary("ns1", ""), "empty registry ⇒ unscoped")
+	assert.Equal(t, "", RegistryBoundary("", "reg-a"), "no namespace ⇒ unscoped, never a cross-namespace key")
+	assert.Equal(t, "r:ns1/reg-a", RegistryBoundary("ns1", "reg-a"))
 	assert.Equal(t, "a:ns1/agent-x", AgentBoundary("ns1", "agent-x"))
 	assert.Equal(t, "", BoundaryHash(""), "empty boundary hashes to empty (legacy key)")
-	assert.NotEqual(t, BoundaryHash("r:reg-a"), BoundaryHash("r:reg-b"))
+	assert.NotEqual(t, BoundaryHash("r:ns1/reg-a"), BoundaryHash("r:ns1/reg-b"))
 
-	regA := RegistryBoundary("reg-a")
-	regB := RegistryBoundary("reg-b")
+	regA := RegistryBoundary("ns1", "reg-a")
+	regB := RegistryBoundary("ns1", "reg-b")
+	// A registry in another namespace that copied reg-a's id is another boundary.
+	assert.NotEqual(t, regA, RegistryBoundary("ns2", "reg-a"))
+	assert.NotEqual(t, BoundaryHash(regA), BoundaryHash(RegistryBoundary("ns2", "reg-a")))
+	// A registry boundary never equals an agent boundary of the same path.
+	assert.NotEqual(t, BoundaryHash(regA), BoundaryHash(AgentBoundary("ns1", "reg-a")))
 
 	// Empty boundary ⇒ the exact legacy name (backward compatible).
 	assert.Equal(t, SecretName("weather", userHash, ""), SecretName("weather", userHash, BoundaryHash("")))
@@ -133,4 +139,28 @@ func TestBoundaryKeying(t *testing.T) {
 	lb := SecretLabels("weather", userHash, "", BoundaryHash(regB))
 	assert.Equal(t, BoundaryHash(regA), la[LabelGrantBoundary])
 	assert.NotEqual(t, la[LabelGrantBoundary], lb[LabelGrantBoundary], "different registries ⇒ different boundary label")
+}
+
+func TestParseRegistryBoundary(t *testing.T) {
+	ns, id, ok := ParseRegistryBoundary(RegistryBoundary("team-a", "squad"))
+	assert.True(t, ok)
+	assert.Equal(t, "team-a", ns)
+	assert.Equal(t, "squad", id)
+
+	for _, b := range []string{"", "r:squad", "r:/squad", "r:team-a/", "r:a/b/c", "a:team-a/agent", "team-a/squad"} {
+		_, _, ok := ParseRegistryBoundary(b)
+		assert.False(t, ok, "%q is not a namespaced registry boundary", b)
+	}
+}
+
+func TestParseAgentBoundary(t *testing.T) {
+	ns, agent, ok := ParseAgentBoundary(AgentBoundary("team-a", "helper"))
+	assert.True(t, ok)
+	assert.Equal(t, "team-a", ns)
+	assert.Equal(t, "helper", agent)
+
+	for _, b := range []string{"", "a:helper", "a:/helper", "a:team-a/", "a:a/b/c", "r:team-a/squad", "team-a/helper"} {
+		_, _, ok := ParseAgentBoundary(b)
+		assert.False(t, ok, "%q is not an agent boundary", b)
+	}
 }

@@ -51,17 +51,13 @@ const (
 	skillVolumeName = "agent-skills"
 )
 
-// injectSkills adds the SKILL_REFS env to the user container.
+// injectSkills adds the SKILL_REFS and SKILL_DESCRIPTIONS env to the user container and, when
+// bodiesMounted, SKILL_DIR and the read-only mount of the skill-body volume (skillVolume).
 //
-// Only the REFS travel this way, not the bodies. That is the progressive-disclosure contract
-// made concrete: the launcher fetches a skill's description up front (cheap, and always in
-// context) and its body only when the model asks for it. Mounting every attached body into the
-// pod would defeat the entire point — the reason skills exist rather than a longer prompt is
-// that context is scarce.
-//
-// It is also why this is env rather than a mounted ConfigMap like the prompt: a prompt is one
-// blob that is always used, so caching it per revision is right; a skill's body may never be
-// read at all in a given run.
+// Only the refs and descriptions travel in env: they are what GET /skills answers on every run.
+// A body travels as a file and enters the model's context only when the agent calls load() —
+// that is the progressive-disclosure contract, and the reason skills exist rather than a longer
+// prompt. The caller adds the volume itself, because the pod's volumes are assembled there.
 func injectSkills(
 	containers []corev1.Container,
 	resolvedSkills []string,

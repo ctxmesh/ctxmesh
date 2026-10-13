@@ -50,7 +50,7 @@ import re, sys
 text = open(sys.argv[1]).read()
 # repository: <value> lines that are NOT already host-qualified upstream images.
     # `repository:` keys AND bare image-ref values. The controller-injected images
-    # (injectedImages.collector / .discovery, oboEgress.sidecarImage) are PLAIN STRINGS, not
+    # (injectedImages.collector, oboEgress.sidecarImage) are PLAIN STRINGS, not
     # repository blocks, so a repository-only scan was structurally blind to them — which is
     # exactly how three images an install needs shipped unpublished while this gate stayed green.
 for m in re.finditer(r'^\s*[a-zA-Z][a-zA-Z0-9_]*:\s*([^\s#]+)', text, re.M):
@@ -84,7 +84,7 @@ chart_images="$(python3 - "$VALUES" <<'PY'
 import re, sys
 text = open(sys.argv[1]).read()
 # `repository:` keys AND bare image-ref VALUES. The controller-injected images
-# (injectedImages.collector / .discovery, oboEgress.sidecarImage) are plain strings, not
+# (injectedImages.collector, oboEgress.sidecarImage) are plain strings, not
 # repository blocks, so a repository-only scan was structurally BLIND to them — which is exactly
 # how three images an install needs shipped unpublished while this gate stayed green.
 for m in re.finditer(r'^\s*[a-zA-Z][a-zA-Z0-9_]*:\s*([^\s#]+)', text, re.M):

@@ -28,7 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 )
 
@@ -36,15 +36,16 @@ import (
 // label, and returns it. The agent is a plain serving agent otherwise — registration must not depend on
 // any other feature being configured.
 func mkDescribedAgent(
-	t *testing.T, name, namespace string, labels map[string]string, desc *agentsv1alpha1.CapabilityDescriptor,
-) *agentsv1alpha1.AgentDeployment {
+	t *testing.T, name, namespace string, labels map[string]string, desc *agentsv1beta1.CapabilityDescriptor,
+) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
+			Role:           "reviewer",
 			Capabilities:   desc,
 		},
 	}
@@ -66,7 +67,7 @@ func TestReconcile_RegistersCapabilityDescriptor(t *testing.T) {
 	r.AgentCapabilityStore = store
 
 	mkDescribedAgent(t, "cap-summarizer", ns, map[string]string{"team": "capability-discovery"},
-		&agentsv1alpha1.CapabilityDescriptor{
+		&agentsv1beta1.CapabilityDescriptor{
 			Description: "Summarizes long documents and extracts action items.",
 			Tags:        []string{"summarization", "pdf"},
 		})
@@ -81,6 +82,52 @@ func TestReconcile_RegistersCapabilityDescriptor(t *testing.T) {
 	assert.Equal(t, []string{"summarization", "pdf"}, got[0].Tags)
 	assert.Equal(t, "cap-registry", got[0].RegistryID,
 		"registration is scoped by AgentRegistry membership (the AMP trust boundary), not by namespace alone")
+	assert.Equal(t, "reviewer", got[0].Role, "the member's spec.role is recorded for the BFF to attest (ADR 0153)")
+	assert.Equal(t, "http://cap-summarizer.default.svc.cluster.local", got[0].Endpoint,
+		"a serving agent receives async deliveries at its Knative route")
+}
+
+// Eventing and job agents take part in the mesh: each registry member gets a row carrying its registry and
+// role, which the BFF needs before it attests the agent as a sender or accepts its async publishes, and the
+// address its deliveries go to. An eventing agent serves at its <agent>-eventing Service; a job agent has no
+// Service, so it records none. Leaving the registry removes the row.
+func TestReconcile_EventingAndJobAgentsAreRegistered(t *testing.T) {
+	const ns = "default"
+	createRegistry(t, "cap-reg-models", ns, "models-registry", "team", "models")
+
+	store := agentcapability.NewMemStore()
+	r := newReconciler()
+	r.AgentCapabilityStore = store
+
+	for _, tc := range []struct {
+		name, model, role, endpoint string
+	}{
+		{"cap-eventing", "eventing", "consumer", "http://cap-eventing-eventing.default.svc.cluster.local"},
+		{"cap-job", "job", "reporter", ""},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			deploy := createExecAgent(t, tc.name, ns, tc.model, map[string]string{"team": "models"})
+			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+			deploy.Spec.Role = tc.role
+			require.NoError(t, k8sClient.Update(testCtx, deploy))
+			reconcileNN(t, r, tc.name, ns)
+
+			row, ok, err := store.Get(testCtx, ns, tc.name)
+			require.NoError(t, err)
+			require.True(t, ok, "a %s agent in a registry is registered", tc.model)
+			assert.Equal(t, "models-registry", row.RegistryID)
+			assert.Equal(t, tc.role, row.Role, "its role is recorded for the BFF to attest")
+			assert.Equal(t, tc.endpoint, row.Endpoint)
+
+			require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
+			deploy.Labels = nil
+			require.NoError(t, k8sClient.Update(testCtx, deploy))
+			reconcileNN(t, r, tc.name, ns)
+			_, ok, err = store.Get(testCtx, ns, tc.name)
+			require.NoError(t, err)
+			assert.False(t, ok, "a %s agent that leaves the registry loses its row", tc.model)
+		})
+	}
 }
 
 // An agent with NO descriptor is never registered — it stays reachable by name but is not semantically
@@ -115,7 +162,7 @@ func TestReconcile_CapabilityRegistrationIsOptInAndPruned(t *testing.T) {
 
 	// (2) A descriptor is added ⇒ it registers.
 	deploy := mkDescribedAgent(t, "cap-described", ns, map[string]string{"team": "optin"},
-		&agentsv1alpha1.CapabilityDescriptor{Description: "Answers questions about SQL schemas."})
+		&agentsv1beta1.CapabilityDescriptor{Description: "Answers questions about SQL schemas."})
 	reconcileNN(t, r, "cap-described", ns)
 	got, err = store.List(testCtx, ns, "optin-registry")
 	require.NoError(t, err)
@@ -133,7 +180,7 @@ func TestReconcile_CapabilityRegistrationIsOptInAndPruned(t *testing.T) {
 
 	// (4) A deleted agent is de-registered too (the row is a Postgres mirror, not K8s-owned — no GC).
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
-	deploy.Spec.Capabilities = &agentsv1alpha1.CapabilityDescriptor{Description: "Answers questions about SQL schemas."}
+	deploy.Spec.Capabilities = &agentsv1beta1.CapabilityDescriptor{Description: "Answers questions about SQL schemas."}
 	require.NoError(t, k8sClient.Update(testCtx, deploy))
 	reconcileNN(t, r, "cap-described", ns)
 	got, err = store.List(testCtx, ns, "optin-registry")

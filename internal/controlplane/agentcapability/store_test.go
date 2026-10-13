@@ -58,7 +58,8 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		assert.Empty(t, got, "an empty registry has no discoverable agents")
 
 		want := agentcapability.AgentCapability{
-			Namespace: "ns1", Agent: "summarizer", RegistryID: "team-a",
+			Namespace: "ns1", Agent: "summarizer", RegistryID: "team-a", Role: "worker",
+			Endpoint:    "http://summarizer.ns1.svc.cluster.local",
 			Description: "Summarizes long documents and extracts action items.",
 			Tags:        []string{"summarization", "pdf"}, Ready: true,
 		}
@@ -68,7 +69,10 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		require.Len(t, got, 1)
 		assert.Equal(t, want, got[0], "the registration round-trips verbatim (descriptor + tags + readiness)")
 
-		// Re-registering the same agent REPLACES its descriptor (a spec edit, not a duplicate row).
+		// Re-registering the same agent REPLACES its descriptor, role and address (a spec edit, not a
+		// duplicate row) — an execution-model change moves where it receives deliveries.
+		want.Role = "reviewer"
+		want.Endpoint = "http://summarizer-eventing.ns1.svc.cluster.local"
 		want.Description = "Answers questions about SQL schemas."
 		want.Tags = nil
 		want.Ready = false
@@ -84,6 +88,9 @@ func TestStore_RegistrationRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok)
 		assert.Equal(t, "team-a", self.RegistryID, "the caller's own row supplies its discovery scope")
+		assert.Equal(t, "reviewer", self.Role, "and the role the BFF attests for it")
+		assert.Equal(t, "http://summarizer-eventing.ns1.svc.cluster.local", self.Endpoint,
+			"and the address the async dispatcher delivers to")
 		_, ok, err = s.Get(ctx, "ns1", "nobody")
 		require.NoError(t, err)
 		assert.False(t, ok, "an unregistered agent has no scope (fail-closed)")
@@ -136,7 +143,7 @@ func TestStore_MembershipOnlyRowScopesButIsNotACandidate(t *testing.T) {
 	eachStore(t, func(t *testing.T, s agentcapability.Store) {
 		ctx := context.Background()
 		require.NoError(t, s.Set(ctx, agentcapability.AgentCapability{
-			Namespace: "ns1", Agent: "supervisor", RegistryID: "team-a", Ready: true, // no description
+			Namespace: "ns1", Agent: "supervisor", RegistryID: "team-a", Role: "orchestrator", Ready: true, // no description
 		}))
 		require.NoError(t, s.Set(ctx, agentcapability.AgentCapability{
 			Namespace: "ns1", Agent: "worker", RegistryID: "team-a",
@@ -147,11 +154,39 @@ func TestStore_MembershipOnlyRowScopesButIsNotACandidate(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, ok, "a member registers even with nothing advertised — it still needs a scope")
 		assert.Equal(t, "team-a", self.RegistryID)
+		assert.Equal(t, "orchestrator", self.Role, "a member's role is recorded with nothing advertised")
 		assert.Empty(t, self.Description)
 
 		got, err := s.List(ctx, "ns1", "team-a")
 		require.NoError(t, err)
 		require.Len(t, got, 1, "only the DESCRIBED agent is a candidate")
 		assert.Equal(t, "worker", got[0].Agent)
+	})
+}
+
+// ListMembers is every agent in a registry, across namespaces and whether or not it advertises anything:
+// the agents a hop can be sent to, each of which the async dispatcher keeps a queue for. An agent in no
+// registry is not one.
+func TestStore_ListMembersSpansNamespacesAndSkipsNonMembers(t *testing.T) {
+	eachStore(t, func(t *testing.T, s agentcapability.Store) {
+		ctx := context.Background()
+		for _, a := range []agentcapability.AgentCapability{
+			{Namespace: "ns2", Agent: "writer", RegistryID: "team-b", Endpoint: "http://writer-eventing.ns2.svc.cluster.local"},
+			{Namespace: "ns1", Agent: "worker", RegistryID: "team-a", Description: "Extracts tables."},
+			{Namespace: "ns1", Agent: "batch", RegistryID: "team-a"}, // a job: a member with no address
+			{Namespace: "ns1", Agent: "loner", Description: "Belongs to no registry."},
+		} {
+			require.NoError(t, s.Set(ctx, a))
+		}
+
+		got, err := s.ListMembers(ctx)
+		require.NoError(t, err)
+		names := make([]string, 0, len(got))
+		for _, a := range got {
+			names = append(names, a.Namespace+"/"+a.Agent)
+		}
+		assert.Equal(t, []string{"ns1/batch", "ns1/worker", "ns2/writer"}, names,
+			"every member, ordered by namespace and name; the agent in no registry is left out")
+		assert.Equal(t, "http://writer-eventing.ns2.svc.cluster.local", got[2].Endpoint, "rows round-trip")
 	})
 }

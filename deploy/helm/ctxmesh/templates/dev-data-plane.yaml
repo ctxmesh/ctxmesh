@@ -3,56 +3,10 @@
 # DO NOT EDIT BY HAND. Change config/ then run `make helm-generate`.
 # No-drift is enforced by `make helm-verify` (chart == kustomize).
 # ============================================================================
-# The bundled in-cluster Valkey (statelayer) + MinIO (objectstore) are for
-# DEV / TRIAL ONLY (PRD §23). Deterministic dev creds, never real secrets.
+# The bundled in-cluster Postgres, Valkey (statelayer), SeaweedFS (objectstore) and NATS
+# are for DEV / TRIAL ONLY (PRD §23). Deterministic dev creds, never real secrets.
 # Production sets devDataPlane.enabled=false and brings its own data plane.
 {{- if .Values.devDataPlane.enabled }}
-apiVersion: v1
-data:
-  nats.conf: |
-    port: 4222
-    http: 8222
-    jetstream {
-      store_dir: "/data"
-      # Bounded so a runaway producer fills a quota rather than the node's disk.
-      max_memory_store: 256MB
-      max_file_store: 4GB
-    }
-kind: ConfigMap
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: nats
-  name: ctxmesh-nats-config
-  namespace: {{ .Values.namespace }}
----
-apiVersion: v1
-kind: Secret
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: objectstore
-  name: ctxmesh-objectstore-dev
-  namespace: {{ .Values.namespace }}
-stringData:
-  rootPassword: ctxmesh-dev-secret
-  rootUser: ctxmesh-dev
-  s3.json: |
-    {
-      "identities": [
-        {
-          "name": "ctxmesh-dev",
-          "credentials": [
-            { "accessKey": "ctxmesh-dev", "secretKey": "ctxmesh-dev-secret" }
-          ],
-          "actions": ["Admin", "Read", "Write", "List", "Tagging"]
-        }
-      ]
-    }
-type: Opaque
----
 apiVersion: v1
 kind: Secret
 metadata:
@@ -67,54 +21,6 @@ stringData:
   password: ctxmesh-dev-secret
   username: ctxmesh
 type: Opaque
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: nats
-  name: ctxmesh-nats
-  namespace: {{ .Values.namespace }}
-spec:
-  ports:
-  - name: client
-    port: 4222
-    protocol: TCP
-    targetPort: 4222
-  - name: monitor
-    port: 8222
-    protocol: TCP
-    targetPort: 8222
-  selector:
-    app.kubernetes.io/name: ctxmesh
-    control-plane: nats
-  type: ClusterIP
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: objectstore
-  name: ctxmesh-objectstore
-  namespace: {{ .Values.namespace }}
-spec:
-  ports:
-  - name: s3
-    port: 9000
-    protocol: TCP
-    targetPort: 9000
-  - name: console
-    port: 9001
-    protocol: TCP
-    targetPort: 9001
-  selector:
-    app.kubernetes.io/name: ctxmesh
-    control-plane: objectstore
-  type: ClusterIP
 ---
 apiVersion: v1
 kind: Service
@@ -162,22 +68,6 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/name: ctxmesh
-    control-plane: nats
-  name: ctxmesh-nats-data
-  namespace: {{ .Values.namespace }}
-spec:
-  accessModes:
-  - ReadWriteOnce
-  resources:
-    requests:
-      storage: 4Gi
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
     control-plane: postgres
   name: ctxmesh-postgres-data
   namespace: {{ .Values.namespace }}
@@ -187,168 +77,6 @@ spec:
   resources:
     requests:
       storage: 8Gi
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: nats
-  name: ctxmesh-nats
-  namespace: {{ .Values.namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: ctxmesh
-      control-plane: nats
-  strategy:
-    type: Recreate
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: ctxmesh
-        control-plane: nats
-    spec:
-      containers:
-      - args:
-        - --config
-        - /etc/nats/nats.conf
-        image: nats:2.11-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: 8222
-          initialDelaySeconds: 15
-          periodSeconds: 15
-        name: nats
-        ports:
-        - containerPort: 4222
-          name: client
-          protocol: TCP
-        - containerPort: 8222
-          name: monitor
-          protocol: TCP
-        readinessProbe:
-          httpGet:
-            path: /healthz
-            port: 8222
-          initialDelaySeconds: 3
-          periodSeconds: 5
-        resources:
-          {{- toYaml .Values.devDataPlane.nats.resources | nindent 10 }}
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-        startupProbe:
-          failureThreshold: 30
-          httpGet:
-            path: /healthz
-            port: 8222
-          periodSeconds: 10
-        volumeMounts:
-        - mountPath: /etc/nats
-          name: config
-        - mountPath: /data
-          name: data
-      securityContext:
-        fsGroup: 1000
-        runAsNonRoot: true
-        runAsUser: 1000
-        seccompProfile:
-          type: RuntimeDefault
-      volumes:
-      - configMap:
-          name: ctxmesh-nats-config
-        name: config
-      - name: data
-        persistentVolumeClaim:
-          claimName: ctxmesh-nats-data
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: objectstore
-  name: ctxmesh-objectstore
-  namespace: {{ .Values.namespace }}
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: ctxmesh
-      control-plane: objectstore
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: ctxmesh
-        control-plane: objectstore
-    spec:
-      containers:
-      - args:
-        - server
-        - -dir=/data
-        - -s3
-        - -s3.port=9000
-        - -s3.config=/etc/seaweedfs/s3.json
-        image: chrislusf/seaweedfs:3.80@sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
-        livenessProbe:
-          failureThreshold: 3
-          httpGet:
-            path: /healthz
-            port: 9000
-          periodSeconds: 15
-        name: objectstore
-        ports:
-        - containerPort: 9000
-          name: s3
-          protocol: TCP
-        readinessProbe:
-          failureThreshold: 3
-          httpGet:
-            path: /healthz
-            port: 9000
-          periodSeconds: 5
-        resources:
-          {{- toYaml .Values.devDataPlane.objectstore.resources | nindent 10 }}
-        securityContext:
-          allowPrivilegeEscalation: false
-          capabilities:
-            drop:
-            - ALL
-        startupProbe:
-          failureThreshold: 30
-          httpGet:
-            path: /healthz
-            port: 9000
-          periodSeconds: 10
-        volumeMounts:
-        - mountPath: /data
-          name: data
-        - mountPath: /etc/seaweedfs
-          name: s3-config
-          readOnly: true
-      securityContext:
-        fsGroup: 10001
-        runAsNonRoot: true
-        runAsUser: 10001
-        seccompProfile:
-          type: RuntimeDefault
-      terminationGracePeriodSeconds: 10
-      volumes:
-      - emptyDir: {}
-        name: data
-      - name: s3-config
-        secret:
-          items:
-          - key: s3.json
-            path: s3.json
-          secretName: ctxmesh-objectstore-dev
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -372,7 +100,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: postgres
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - env:
         - name: POSTGRES_USER
@@ -392,7 +120,7 @@ spec:
               name: ctxmesh-postgres-dev
         - name: PGDATA
           value: /var/lib/postgresql/data/pgdata
-        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        image: {{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.postgres) }}
         livenessProbe:
           exec:
             command:
@@ -471,7 +199,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         control-plane: statelayer
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       containers:
       - args:
         - --appendonly
@@ -487,6 +215,12 @@ spec:
         - ~a2a:seen:*
         - ~spawn:*
         - ~agent:*
+        - ~runcap:*
+        - ~run:*
+        - ~ns:*
+        - ~fleet:*
+        - ~user:*
+        - ~conv:*
         - +@all
         - -flushall
         - -flushdb
@@ -494,7 +228,7 @@ spec:
         - -debug
         - -shutdown
         - -swapdb
-        image: valkey/valkey:8.1.3
+        image: {{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.valkey) }}
         livenessProbe:
           failureThreshold: 3
           periodSeconds: 15
@@ -524,60 +258,6 @@ spec:
       volumes:
       - emptyDir: {}
         name: data
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: nats
-  name: ctxmesh-nats-ingress
-  namespace: {{ .Values.namespace }}
-spec:
-  ingress:
-  - from:
-    - podSelector:
-        matchExpressions:
-        - key: control-plane
-          operator: Exists
-    ports:
-    - port: 4222
-      protocol: TCP
-    - port: 8222
-      protocol: TCP
-  podSelector:
-    matchLabels:
-      control-plane: nats
-  policyTypes:
-  - Ingress
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  labels:
-    app.kubernetes.io/managed-by: kustomize
-    app.kubernetes.io/name: ctxmesh
-    control-plane: objectstore
-  name: ctxmesh-objectstore-ingress
-  namespace: {{ .Values.namespace }}
-spec:
-  ingress:
-  - from:
-    - podSelector:
-        matchExpressions:
-        - key: control-plane
-          operator: Exists
-    ports:
-    - port: 9000
-      protocol: TCP
-    - port: 9001
-      protocol: TCP
-  podSelector:
-    matchLabels:
-      control-plane: objectstore
-  policyTypes:
-  - Ingress
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -625,4 +305,344 @@ spec:
       control-plane: statelayer
   policyTypes:
   - Ingress
+{{- if .Values.devDataPlane.objectstore.enabled }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: objectstore
+  name: ctxmesh-objectstore-dev
+  namespace: {{ .Values.namespace }}
+stringData:
+  rootPassword: ctxmesh-dev-secret
+  rootUser: ctxmesh-dev
+  s3.json: |
+    {
+      "identities": [
+        {
+          "name": "ctxmesh-dev",
+          "credentials": [
+            { "accessKey": "ctxmesh-dev", "secretKey": "ctxmesh-dev-secret" }
+          ],
+          "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+        }
+      ]
+    }
+type: Opaque
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: objectstore
+  name: ctxmesh-objectstore
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - name: s3
+    port: 9000
+    protocol: TCP
+    targetPort: 9000
+  - name: console
+    port: 9001
+    protocol: TCP
+    targetPort: 9001
+  selector:
+    app.kubernetes.io/name: ctxmesh
+    control-plane: objectstore
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: objectstore
+  name: ctxmesh-objectstore
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ctxmesh
+      control-plane: objectstore
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ctxmesh
+        control-plane: objectstore
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
+      containers:
+      - args:
+        - server
+        - -dir=/data
+        - -s3
+        - -s3.port=9000
+        - -s3.config=/etc/seaweedfs/s3.json
+        image: {{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.seaweedfs) }}
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 9000
+          periodSeconds: 15
+        name: objectstore
+        ports:
+        - containerPort: 9000
+          name: s3
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /healthz
+            port: 9000
+          periodSeconds: 5
+        resources:
+          {{- toYaml .Values.devDataPlane.objectstore.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz
+            port: 9000
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: /data
+          name: data
+        - mountPath: /etc/seaweedfs
+          name: s3-config
+          readOnly: true
+      securityContext:
+        fsGroup: 10001
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 10
+      volumes:
+      - emptyDir: {}
+        name: data
+      - name: s3-config
+        secret:
+          items:
+          - key: s3.json
+            path: s3.json
+          secretName: ctxmesh-objectstore-dev
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: objectstore
+  name: ctxmesh-objectstore-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: control-plane
+          operator: Exists
+    ports:
+    - port: 9000
+      protocol: TCP
+    - port: 9001
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: objectstore
+  policyTypes:
+  - Ingress
+{{- end }}
+{{- if .Values.devDataPlane.nats.enabled }}
+---
+apiVersion: v1
+data:
+  nats.conf: |
+    port: 4222
+    http: 8222
+    jetstream {
+      store_dir: "/data"
+      # Bounded so a runaway producer fills a quota rather than the node's disk.
+      max_memory_store: 256MB
+      max_file_store: 4GB
+    }
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats-config
+  namespace: {{ .Values.namespace }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats
+  namespace: {{ .Values.namespace }}
+spec:
+  ports:
+  - name: client
+    port: 4222
+    protocol: TCP
+    targetPort: 4222
+  - name: monitor
+    port: 8222
+    protocol: TCP
+    targetPort: 8222
+  selector:
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats-data
+  namespace: {{ .Values.namespace }}
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ctxmesh
+      control-plane: nats
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ctxmesh
+        control-plane: nats
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
+      containers:
+      - args:
+        - --config
+        - /etc/nats/nats.conf
+        image: {{ include "ctxmesh.thirdPartyImage" (list $ .Values.thirdPartyImages.nats) }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8222
+          initialDelaySeconds: 15
+          periodSeconds: 15
+        name: nats
+        ports:
+        - containerPort: 4222
+          name: client
+          protocol: TCP
+        - containerPort: 8222
+          name: monitor
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8222
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        resources:
+          {{- toYaml .Values.devDataPlane.nats.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz
+            port: 8222
+          periodSeconds: 10
+        volumeMounts:
+        - mountPath: /etc/nats
+          name: config
+        - mountPath: /data
+          name: data
+      securityContext:
+        fsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - configMap:
+          name: ctxmesh-nats-config
+        name: config
+      - name: data
+        persistentVolumeClaim:
+          claimName: ctxmesh-nats-data
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/name: ctxmesh
+    control-plane: nats
+  name: ctxmesh-nats-ingress
+  namespace: {{ .Values.namespace }}
+spec:
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+        - key: control-plane
+          operator: Exists
+    ports:
+    - port: 4222
+      protocol: TCP
+    - port: 8222
+      protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Values.devDataPlane.nats.kedaOperator.namespace }}
+      podSelector:
+        matchLabels:
+          {{- toYaml .Values.devDataPlane.nats.kedaOperator.podLabels | nindent 10 }}
+    ports:
+    - port: 8222
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      control-plane: nats
+  policyTypes:
+  - Ingress
+{{- end }}
 {{- end }}

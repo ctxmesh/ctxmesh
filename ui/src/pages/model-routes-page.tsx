@@ -23,8 +23,9 @@ import {
   type NextStepTone,
   type StatusTone,
 } from "@/components/kit";
-import { api, ApiError, type ModelRouteSummary } from "@/lib/api";
-import { useCapabilities } from "@/lib/capabilities";
+import { api, type ModelRouteSummary } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
+import { useCapabilities, useCapabilitiesIn } from "@/lib/capabilities";
 import { useNamespace } from "@/lib/namespace";
 import { RES_ROUTES } from "@/lib/nav";
 
@@ -195,17 +196,18 @@ export function closingLine(rows: Triaged[], complete: boolean): string | null {
 // (faint icons that firm up on hover) instead of hidden.
 function RowActions({
   route,
-  canEdit,
-  canDelete,
   onEdit,
   onDelete,
 }: {
   route: ModelRouteSummary;
-  canEdit: boolean;
-  canDelete: boolean;
   onEdit: (r: ModelRouteSummary) => void;
   onDelete: (r: ModelRouteSummary) => void;
 }) {
+  // Edit and Delete act in the route's own namespace, which under "All workspaces" is not the
+  // shell's.
+  const { can } = useCapabilitiesIn(route.namespace);
+  const canEdit = can(RES_ROUTES, "update");
+  const canDelete = can(RES_ROUTES, "delete");
   if (!canEdit && !canDelete) return null;
   return (
     <div
@@ -247,11 +249,6 @@ function RowActions({
   );
 }
 
-type Load =
-  | { kind: "loading" }
-  | { kind: "ready"; items: ModelRouteSummary[]; nextCursor: string }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 export function ModelRoutesPage() {
   const navigate = useNavigate();
   const { namespace } = useNamespace();
@@ -263,45 +260,23 @@ export function ModelRoutesPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<ViewId>("all");
   const [pageStack, setPageStack] = useState<string[]>([""]);
-  const [state, setState] = useState<Load>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
 
   const cursor = pageStack[pageStack.length - 1] ?? "";
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .listModelRoutes(
+  const fetchPage = useCallback(
+    (signal: AbortSignal) =>
+      api.listModelRoutes(
         {
           limit: PAGE_LIMIT,
           cursor: cursor || undefined,
           q: query || undefined,
           namespace: namespace || undefined,
         },
-        controller.signal,
-      )
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", items: res.items, nextCursor: res.nextCursor });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        const forbidden = err instanceof ApiError && err.isForbidden;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden,
-        });
-      });
-  }, [cursor, query, namespace]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+        signal,
+      ),
+    [cursor, query, namespace],
+  );
+  const { state, reload } = useLoad(fetchPage);
 
   const resetPaging = useCallback(() => setPageStack([""]), []);
 
@@ -318,8 +293,8 @@ export function ModelRoutesPage() {
     }
   }, [namespace, resetPaging]);
 
-  const items = state.kind === "ready" ? state.items : [];
-  const nextCursor = state.kind === "ready" ? state.nextCursor : "";
+  const items = state.kind === "ready" ? state.data.items : [];
+  const nextCursor = state.kind === "ready" ? state.data.nextCursor : "";
   const hasNext = nextCursor !== "";
   const hasPrev = pageStack.length > 1;
   const pageNumber = pageStack.length;
@@ -369,7 +344,7 @@ export function ModelRoutesPage() {
           message: state.message,
           forbidden: state.forbidden,
           resource: "model routes",
-          onRetry: state.forbidden ? undefined : load,
+          onRetry: state.forbidden ? undefined : () => reload(),
         }
       : null;
 
@@ -552,15 +527,14 @@ export function ModelRoutesPage() {
         rangeLabel={`Page ${pageNumber}`}
         ariaLabel="Model routes"
         onRowClick={(t) => navigate(routePath(t.route))}
-        // The actions column only appears when the caller can edit or delete.
-        // A viewer sees a clean table with no dead or greyed-out buttons.
+        // The actions column only appears when the caller can edit or delete in the selected
+        // workspace; under "All workspaces" each row decides by its own namespace. A viewer sees
+        // a clean table with no dead or greyed-out buttons.
         rowActions={
-          canEdit || canDelete
+          namespace === "" || canEdit || canDelete
             ? (t) => (
                 <RowActions
                   route={t.route}
-                  canEdit={canEdit}
-                  canDelete={canDelete}
                   onEdit={(r) => navigate(routePath(r, "?edit=1"))}
                   onDelete={(r) => navigate(routePath(r, "?delete=1"))}
                 />

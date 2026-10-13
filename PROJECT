@@ -16,33 +16,70 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: AgentDeployment
-  path: github.com/ctxmesh/ctxmesh/api/v1alpha1
-  version: v1alpha1
-- api:
-    crdVersion: v1
-    namespaced: true
-  domain: ctxmesh.ai
-  group: agents
-  kind: AgentVersion
-  path: github.com/ctxmesh/ctxmesh/api/v1alpha1
-  version: v1alpha1
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
   domain: ctxmesh.ai
   group: agents
-  kind: ModelRoute
-  path: github.com/ctxmesh/ctxmesh/api/v1alpha1
-  version: v1alpha1
+  kind: AgentRegistry
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: AgentScalingPolicy
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: AgentTeam
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: AlertPolicy
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
 - api:
     crdVersion: v1
     namespaced: true
   domain: ctxmesh.ai
   group: agents
-  kind: SecretBinding
-  path: github.com/ctxmesh/ctxmesh/api/v1alpha1
-  version: v1alpha1
+  kind: EvalSuite
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: GuardrailPolicy
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: KnowledgeBase
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
 - api:
     crdVersion: v1
     namespaced: true
@@ -50,15 +87,40 @@ resources:
   domain: ctxmesh.ai
   group: agents
   kind: MCPToolBinding
-  path: github.com/ctxmesh/ctxmesh/api/v1alpha1
-  version: v1alpha1
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
   domain: ctxmesh.ai
   group: agents
-  kind: MemoryBinding
-  path: github.com/ctxmesh/ctxmesh/api/v1alpha1
-  version: v1alpha1
+  kind: ModelRoute
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: SecretBinding
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+  controller: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: Tenant
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: ctxmesh.ai
+  group: agents
+  kind: Workflow
+  path: github.com/ctxmesh/ctxmesh/api/v1beta1
+  version: v1beta1
 version: "3"

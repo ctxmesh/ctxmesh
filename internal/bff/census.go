@@ -75,7 +75,7 @@ func (s *Server) handleAgentCensus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := censusScan(r.Context(), caller, r.URL.Query().Get("namespace"))
+	resp, err := censusScan(r.Context(), s.acrossWorkspaces(caller), r.URL.Query().Get("namespace"))
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)

@@ -1,0 +1,11 @@
+# The Rust SDK's conformance probe: run by hack/sdk-conformance against a real launcher. Not
+# published, and not part of the SDK crate, so the SDK never depends on it.
+[package]
+name = "conformance-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ctxmesh = { path = "../../../../sdk/rust" }
+serde_json = "1"

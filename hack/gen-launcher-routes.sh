@@ -17,18 +17,28 @@ cd "$(dirname "$0")/.."
 LAUNCHER="cmd/launcher"
 OUT="sdk/launcher-routes.json"
 
-routes="$(grep -rhoE 'mux\.Handle(Func)?\("(GET |POST |PUT |DELETE |PATCH )?[^"]+"' "$LAUNCHER"/*.go \
-  | grep -v '_test' \
+# Test files are excluded by NAME. The previous filter was a `grep -v '_test'` on grep -h output, which
+# carries no filenames, so it filtered nothing, and a test's fake BFF read as launcher routes.
+routes="$(grep -rhoE --exclude='*_test.go' 'mux\.Handle(Func)?\("(GET |POST |PUT |DELETE |PATCH )?[^"]+"' "$LAUNCHER"/*.go \
   | sed -E 's/.*mux\.Handle(Func)?\("//; s/"$//' \
   | grep -v '/healthz' \
   | sort -u)"
 [ -n "$routes" ] || { echo "FAIL: read no routes out of $LAUNCHER" >&2; exit 1; }
 
-json="$(python3 - <<PY
-import json
-raw = """$routes"""
+# The script owns each route's IDENTITY only (method, path, listener, portEnv, defaultPort). Every
+# other key (the SDK tier that owes the route, waivers, schemas, goldens) is written by hand and
+# carried across a regeneration by route key, so a new route lands with nothing hand-written and a
+# removed route takes its keys with it.
+json="$(ROUTES="$routes" OUT="$OUT" python3 - <<'PY'
+import json, os
+existing = {}
+if os.path.exists(os.environ["OUT"]):
+    with open(os.environ["OUT"]) as f:
+        existing = json.load(f)
+by_key = {(r["method"], r["path"]): r for r in existing.get("routes", [])}
+identity = ("method", "path", "listener", "portEnv", "defaultPort")
 out = []
-for line in raw.strip().splitlines():
+for line in os.environ["ROUTES"].strip().splitlines():
     line = line.strip()
     if not line:
         continue
@@ -46,12 +56,26 @@ for line in raw.strip().splitlines():
         listener, env, port = "delegate", "DELEGATE_PORT", 2994
     elif path == "/feedback":
         listener, env, port = "feedback", "FEEDBACK_PORT", 2995
+    elif path in ("/tools", "/events"):
+        # Tool discovery binds a FIXED port that no env var names, so portEnv is null rather than
+        # an invented variable an SDK would read and the launcher would ignore.
+        listener, env, port = "discovery", None, 2999
     else:
         listener, env, port = "memory", "MEMORY_PORT", 2998   # memory, knowledge and skills share one mux
-    out.append({"method": method, "path": path, "listener": listener,
-                "portEnv": env, "defaultPort": port})
+    route = {"method": method, "path": path, "listener": listener, "portEnv": env, "defaultPort": port}
+    for k, v in by_key.get((method, path), {}).items():
+        if k not in identity:
+            route[k] = v
+    out.append(route)
 out.sort(key=lambda r: (r["path"], r["method"]))
-print(json.dumps({"routes": out}, indent=2))
+doc = {k: v for k, v in existing.items() if k != "routes"}
+result = {}
+for k in ("description",):
+    if k in doc:
+        result[k] = doc.pop(k)
+result["routes"] = out
+result.update(doc)
+print(json.dumps(result, indent=2, ensure_ascii=False))
 PY
 )"
 

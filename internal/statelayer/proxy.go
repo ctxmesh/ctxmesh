@@ -37,6 +37,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
 const (
@@ -172,16 +174,17 @@ func (s *redisStore) Append(ctx context.Context, key string, entry json.RawMessa
 // caller may touch and the authoritative agent name for attribution. Everything
 // here comes from the VERIFIED token — never from caller input.
 type Scope struct {
-	prefix string // e.g. "mem:team-alpha/support-agent:" or "mem:shared:reg-1:"
+	prefix string // e.g. "mem:team-alpha/support-agent:" or "mem:shared:team-alpha/reg-1:"
 	agent  string // the agent name (private-scope), for server-authoritative attribution
 	shared bool   // true for the shared team scratchpad — per-user keying (M98) NEVER applies to shared
 }
 
-// scopeFromAgent derives the private-memory scope from a capability's Agent claim
+// scopeFromAgent derives the private-memory scope from the caller's agent
 // ("<namespace>/<agent>", ADR 0033). requestedShared selects the shared team
-// scratchpad, keyed under the token's registry boundary (bnd "r:<registry>"); a
-// shared request without a registry boundary falls back to private (a visible
-// misconfig, never a cross-tenant leak).
+// scratchpad, keyed under the registry boundary ("r:<namespace>/<registryId>"), so two
+// namespaces whose registries share an id never share a scratchpad. A shared request
+// without a registry boundary in the caller's own namespace falls back to private (a
+// visible misconfig, never a cross-tenant leak).
 func scopeFromAgent(agent, boundary string, requestedShared bool) (Scope, error) {
 	agent = strings.TrimSpace(agent)
 	if agent == "" || !strings.Contains(agent, "/") {
@@ -193,10 +196,10 @@ func scopeFromAgent(agent, boundary string, requestedShared bool) (Scope, error)
 		return Scope{}, fmt.Errorf("token agent claim %q has an empty namespace or name", agent)
 	}
 	if requestedShared {
-		if reg, ok := strings.CutPrefix(strings.TrimSpace(boundary), "r:"); ok && reg != "" {
-			return Scope{prefix: "mem:shared:" + reg + ":", agent: name, shared: true}, nil
+		if regNS, reg, ok := credresolve.ParseRegistryBoundary(strings.TrimSpace(boundary)); ok && regNS == ns {
+			return Scope{prefix: "mem:shared:" + regNS + "/" + reg + ":", agent: name, shared: true}, nil
 		}
-		// shared requested but no registry boundary → private fallback.
+		// shared requested but no registry boundary in the caller's namespace → private fallback.
 	}
 	return Scope{prefix: "mem:" + ns + "/" + name + ":", agent: name}, nil
 }

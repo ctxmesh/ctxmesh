@@ -45,8 +45,9 @@ func runEnsureCapabilityKey(ctx context.Context) int {
 	sec := &clientSecretOps{cs: cs}
 	dep := &clientDeployOps{cs: cs}
 	// The env consumers of bff-capability (bff.yaml / control-plane.yaml / run-worker.yaml). run-worker
-	// may be absent (dep tolerates NotFound).
-	consumers := []string{"ctxmesh-bff", "ctxmesh-controller-manager", "run-worker"}
+	// may be absent (dep tolerates NotFound). The token service verifies capabilities with the public key
+	// and refuses credential resolution until it has it (ADR 0154).
+	consumers := []string{"ctxmesh-bff", "ctxmesh-controller-manager", "ctxmesh-token-service", "run-worker"}
 
 	cctx, cancel := context.WithTimeout(logf.IntoContext(ctx, logger), 60*time.Second)
 	defer cancel()

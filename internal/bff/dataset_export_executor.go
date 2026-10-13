@@ -86,6 +86,8 @@ type exportCursor struct {
 	Documents int `json:"documents,omitempty"`
 	// Cases is the running count of cases appended across completed pages.
 	Cases int `json:"cases,omitempty"`
+	// Withheld is the running count of traces not copied because the exporter was not shown to read them.
+	Withheld int `json:"withheld,omitempty"`
 }
 
 func parseExportCursor(raw string) (*exportCursor, error) {
@@ -131,8 +133,12 @@ type ExportOutcome struct {
 	DatasetID string `json:"datasetId,omitempty"`
 	// Documents is the number of production traces the export covered.
 	Documents int `json:"documents"`
-	// Cases is the number of dataset cases appended (== Documents unless a trace was skipped for having no payload).
+	// Cases is the number of dataset cases appended (== Documents unless a trace was skipped for having no payload
+	// or withheld).
 	Cases int `json:"cases"`
+	// Withheld is the number of traces not copied because a run maps them that the exporter was not shown to
+	// read (exportMayCopy).
+	Withheld int `json:"withheld,omitempty"`
 	// AgentTag echoes the exported agent identity (provenance).
 	AgentTag string `json:"agentTag,omitempty"`
 	// Message is a human-readable summary (e.g. the failure reason) for the console / audit — never machine-parsed.
@@ -200,6 +206,13 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 		return
 	}
 
+	agentNs, agentName := splitAgentKey(spec.AgentTag)
+	if agentNs == "" || agentName == "" {
+		// The agent tag is what authorized the copy (handleExportDataset), so an export without one copies nothing.
+		s.failExport(ctx, runID, "export spec names no agent")
+		return
+	}
+
 	cursor, err := parseExportCursor(rn.Cursor)
 	if err != nil {
 		s.failExport(ctx, runID, fmt.Sprintf("corrupt export cursor: %v", err))
@@ -238,6 +251,16 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 		}
 
 		for _, r := range page.Runs {
+			mapped, mErr := s.findRun(r.TraceID)
+			if mErr != nil {
+				s.failExport(ctx, runID, fmt.Sprintf("resolving the run behind trace %q: %v", r.TraceID, mErr))
+				return
+			}
+			if mapped != nil && !exportMayCopy(mapped, rn.CallerUsername, agentNs, agentName) {
+				cursor.Documents++
+				cursor.Withheld++
+				continue
+			}
 			appended, aErr := s.exportOneTrace(ctx, ds.ID, r.TraceID, detectors)
 			if aErr != nil {
 				s.failExport(ctx, runID, fmt.Sprintf("exporting trace %q: %v", r.TraceID, aErr))
@@ -262,6 +285,21 @@ func (s *Server) executeDatasetExport(ctx context.Context, runID string) {
 
 	// (3) All pages done → record the terminal outcome ON THE RUN + succeed.
 	s.completeExport(ctx, runID, spec, ds.ID, cursor)
+}
+
+// exportMayCopy applies authorizeTraceRead's rule for a trace a run maps to what handleExportDataset proved
+// about the exporter: their identity, and read access to the agent agentNs/agentName. A trace a run maps is
+// readable by that run's creator, or through RBAC on the run's backing resource (authorizeResolvedRun), so it
+// is copied only when the exporter created the run or the backing resource is that same agent. A handoff,
+// delegation or workflow node shares its parent's trace, and the trace then belongs to the parent's run. A
+// trace no run maps is authorized by its agent tag, which the export's query already selected on.
+func exportMayCopy(mapped *run.Run, exporter, agentNs, agentName string) bool {
+	if exporter != "" && mapped.CallerUsername == exporter {
+		return true
+	}
+	return mapped.WorkflowRef == "" && mapped.Agent != inlineWorkflowAgentLabel &&
+		!mapped.IsDatasetExportJob() && !mapped.IsIngestionJob() &&
+		mapped.Namespace == agentNs && mapped.Agent == agentName
 }
 
 // exportOneTrace fetches ONE trace's detail from Langfuse, extracts its input + output (the ROOT span's payload —
@@ -374,8 +412,10 @@ func (s *Server) completeExport(ctx context.Context, runID string, spec ExportSp
 		DatasetID: datasetID,
 		Documents: cursor.Documents,
 		Cases:     cursor.Cases,
+		Withheld:  cursor.Withheld,
 		AgentTag:  spec.AgentTag,
-		Message:   fmt.Sprintf("exported %d trace(s) → %d case(s) into %s/%s", cursor.Documents, cursor.Cases, spec.DatasetNamespace, spec.DatasetName),
+		Message: fmt.Sprintf("exported %d trace(s) → %d case(s) into %s/%s (%d withheld)",
+			cursor.Documents, cursor.Cases, spec.DatasetNamespace, spec.DatasetName, cursor.Withheld),
 	}
 	outcomeJSON, err := json.Marshal(outcome)
 	if err != nil {
@@ -409,6 +449,7 @@ func (s *Server) failExport(ctx context.Context, runID, message string) {
 		if cur, cErr := parseExportCursor(rn.Cursor); cErr == nil {
 			outcome.Documents = cur.Documents
 			outcome.Cases = cur.Cases
+			outcome.Withheld = cur.Withheld
 		}
 		var spec ExportSpec
 		if json.Unmarshal([]byte(rn.ExportSpec), &spec) == nil {

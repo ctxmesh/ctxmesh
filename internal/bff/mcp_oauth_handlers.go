@@ -18,15 +18,19 @@ package bff
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"maps"
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // Console SPA routes the OAuth callback (a BROWSER redirect target, not an API call)
@@ -93,19 +97,38 @@ func oauthCallbackConnected(w http.ResponseWriter, r *http.Request, serverName, 
 // Caller-scoping (ADR 0011): the caller's bearer token is captured into the
 // pending flow here so the callback's Secret/CRD writes run as the SAME user. A
 // token-less caller is already rejected at callerClient (401) before this runs.
-func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Request, req RegisterMCPServerRequest, name, ns string) {
+func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Request, caller client.Client, req RegisterMCPServerRequest, name, ns string) {
+	// The server this flow registers is private to the registrant (ADR 0067 §2), so the
+	// registrant's identity is its owner. Resolved now, while the caller is on the request:
+	// a private server stored without an owner is visible to nobody, the registrant included.
+	username, uErr := callerUsername(r.Context(), caller)
+	if uErr != nil {
+		if status, msg, isRBAC := classifyReadError(uErr); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(uErr, "resolve caller identity for MCP OAuth registration failed")
+		writeError(w, http.StatusInternalServerError, "failed to resolve caller identity")
+		return
+	}
+
+	// The redirect_uri is server-controlled (ADR 0040), as on the grant path: the binding cookie
+	// protects a flow only if the code comes back to the callback in the browser that holds it.
+	// A caller-chosen redirect_uri could deliver the code anywhere. The request's value is ignored.
+	redirectURI := s.canonicalOrigin(r) + mcpOAuthCallbackPath
+
 	var cfg mcpOAuthConfig
 	if req.Auth.AutoDiscover {
 		// Zero-config OAuth (ADR 0028, m24.7): discover the authorize/token/
 		// registration endpoints from the MCP server's spec metadata and register an
-		// ephemeral client via DCR — the caller supplies NO endpoints/client id, only
-		// the redirect URI. A discovery/DCR failure is a connect-validation outcome
+		// ephemeral client via DCR — the caller supplies NO endpoints/client id. A
+		// discovery/DCR failure is a connect-validation outcome
 		// (ADR 0027) → 422 shown inline, never a bare 401/500.
 		discovered, dErr := discoverMCPOAuthConfig(
 			r.Context(), nil,
 			strings.TrimSpace(req.URL),
 			strings.TrimSpace(req.Auth.ResourceMetadataURL),
-			strings.TrimSpace(req.Auth.RedirectURI),
+			redirectURI,
 		)
 		if dErr != nil {
 			writeError(w, http.StatusUnprocessableEntity, dErr.Error())
@@ -118,7 +141,7 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 			TokenEndpoint:         strings.TrimSpace(req.Auth.TokenEndpoint),
 			ClientID:              strings.TrimSpace(req.Auth.ClientID),
 			Scope:                 strings.TrimSpace(req.Auth.Scope),
-			RedirectURI:           strings.TrimSpace(req.Auth.RedirectURI),
+			RedirectURI:           redirectURI,
 		}
 	}
 	if cErr := cfg.validate(); cErr != nil {
@@ -132,12 +155,13 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 	// handler), so this is always non-empty.
 	callerToken := bearerToken(r)
 
-	authURL, state, err := s.startOAuthFlow(cfg, pendingOAuthFlow{
-		callerToken: callerToken,
-		serverName:  name,
-		namespace:   ns,
-		serverURL:   strings.TrimSpace(req.URL),
-		status:      s.mcpApprovalStatus(),
+	authURL, state, err := s.startOAuthFlow(r.Context(), cfg, pendingOAuthFlow{
+		callerToken:    callerToken,
+		registrantHash: userGrantHash(username),
+		serverName:     name,
+		namespace:      ns,
+		serverURL:      strings.TrimSpace(req.URL),
+		status:         s.mcpApprovalStatus(),
 	})
 	if err != nil {
 		// A crypto/rand failure or an unparseable endpoint (already validated) is a
@@ -149,8 +173,9 @@ func (s *Server) beginMCPOAuthRegistration(w http.ResponseWriter, r *http.Reques
 
 	// 202 Accepted: the registration is pending consent. The SPA reads
 	// AuthorizationURL and redirects the browser. No secret material here.
+	setOAuthBindingCookie(w, r, state)
 	writeJSON(w, http.StatusAccepted, OAuthPendingResponse{
-		Status:           "authorization_required",
+		Status:           oauthStatusAuthorizationRequired,
 		AuthorizationURL: authURL,
 		State:            state,
 		Server: MCPServerSummary{
@@ -186,7 +211,7 @@ func (s *Server) handleMCPOAuthClientMetadata(w http.ResponseWriter, r *http.Req
 // URIs are the externally-reachable ones the auth server will use.
 func requestOrigin(r *http.Request) string {
 	scheme := schemeHTTP
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), schemeHTTPS) {
+	if requestIsHTTPS(r) {
 		scheme = schemeHTTPS
 	}
 	return scheme + "://" + r.Host
@@ -247,9 +272,98 @@ func originsShareBaseDomain(opener, console string) bool {
 	return oh == base || strings.HasSuffix(oh, "."+base)
 }
 
+// oauthBindingCookiePrefix names the cookie that binds a pending OAuth flow to the browser that
+// began it (RFC 6749 §10.12). The state alone is not enough: whoever begins a flow can hand its
+// authorization URL to someone else, and that person's consent would complete the flow as the
+// one who began it, storing their upstream tokens under the beginner's identity. The response
+// that starts a flow sets this cookie in the beginning browser; the callback refuses a state
+// that browser does not hold. The name carries part of the state's digest so several flows in
+// one browser each keep their own.
+//
+// The binding holds only because the redirect_uri is the server-controlled callback, so the
+// code arrives in a browser at the origin whose cookie is checked: the cookie value is no
+// secret from whoever began the flow.
+const oauthBindingCookiePrefix = "ctxmesh_oauth_"
+
+// oauthHostCookiePrefix is the __Host- prefix: a browser accepts such a cookie only from the host
+// itself, Secure, with Path=/ and no Domain, so a sibling host under the same parent domain
+// cannot plant one (cookie tossing). It needs TLS; over plain HTTP the name is unprefixed.
+const oauthHostCookiePrefix = "__Host-"
+
+// oauthStateDigest is the value of a flow's binding cookie: the state itself stays out of it.
+func oauthStateDigest(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// oauthBindingCookieName is the cookie name for state: __Host- prefixed over TLS.
+func oauthBindingCookieName(state string, secure bool) string {
+	name := oauthBindingCookiePrefix + oauthStateDigest(state)[:16]
+	if secure {
+		return oauthHostCookiePrefix + name
+	}
+	return name
+}
+
+// oauthBindingCookiePath is "/" over TLS, as the __Host- prefix requires, and the callback path
+// otherwise.
+func oauthBindingCookiePath(secure bool) string {
+	if secure {
+		return "/"
+	}
+	return mcpOAuthCallbackPath
+}
+
+// requestIsHTTPS reports whether the browser reached this request over TLS, directly or through a
+// TLS-terminating proxy.
+func requestIsHTTPS(r *http.Request) bool {
+	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), schemeHTTPS)
+}
+
+// setOAuthBindingCookie binds a just-started flow to the browser that started it. HttpOnly, so
+// no script reads it; SameSite=Lax, so the authorization server's top-level redirect back to the
+// callback carries it. Call before the response is written.
+func setOAuthBindingCookie(w http.ResponseWriter, r *http.Request, state string) {
+	secure := requestIsHTTPS(r)
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthBindingCookieName(state, secure),
+		Value:    oauthStateDigest(state),
+		Path:     oauthBindingCookiePath(secure),
+		MaxAge:   int(pendingFlowTTL / time.Second),
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// clearOAuthBindingCookie expires a flow's binding cookie once its callback has been handled.
+func clearOAuthBindingCookie(w http.ResponseWriter, r *http.Request, state string) {
+	secure := requestIsHTTPS(r)
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthBindingCookieName(state, secure),
+		Path:     oauthBindingCookiePath(secure),
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// oauthBindingCookieMatches reports whether this request comes from the browser that began the
+// flow for state. Over TLS only the __Host- cookie counts.
+func oauthBindingCookieMatches(r *http.Request, state string) bool {
+	c, err := r.Cookie(oauthBindingCookieName(state, requestIsHTTPS(r)))
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(c.Value), []byte(oauthStateDigest(state))) == 1
+}
+
 // handleMCPOAuthCallback serves GET /api/mcp/oauth/callback?code=&state=. It:
 //  1. validates `state` against the SERVER-SIDE pending-flow store (CSRF): an
-//     unknown/expired/mismatched state → a teaching 4xx with NO token exchange;
+//     unknown/expired/mismatched state → a teaching 4xx with NO token exchange; and
+//     requires the binding cookie of the browser that began the flow (RFC 6749 §10.12),
+//     refusing without an exchange when it is missing or does not match;
 //  2. exchanges the code + the PKCE code_verifier for tokens at the MCP token
 //     endpoint SERVER-SIDE (a wrong verifier / bad code → an honest 4xx);
 //  3. stores the access + refresh tokens in a Secret (the m14.6 Secret pattern);
@@ -271,7 +385,9 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// the pending flow. The error code is sanitized before it enters the message.
 	if oauthErr := strings.TrimSpace(q.Get("error")); oauthErr != "" {
 		if state != "" {
-			s.oauthFlows.take(state) // consume the abandoned flow
+			if _, _, err := s.oauthFlows.take(r.Context(), state); err != nil { // consume the abandoned flow
+				s.log.Error(err, "discard declined MCP OAuth flow failed; it expires on its own")
+			}
 		}
 		oauthCallbackError(w, r, "the OAuth authorization was not granted ("+oauthErrorCode(oauthErr)+")")
 		return
@@ -289,11 +405,24 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 	// (1) CSRF: resolve + CONSUME the pending flow by state. An unknown/expired/
 	// mismatched state finds no flow → a 400, and NO token exchange happens. take()
 	// removes the flow so a replayed callback (same state) cannot re-exchange.
-	flow, ok := s.oauthFlows.take(state)
+	flow, ok, err := s.oauthFlows.take(r.Context(), state)
+	if err != nil {
+		s.log.Error(err, "read pending MCP OAuth flow failed")
+		oauthCallbackError(w, r, "could not read this connection's state (start the connection again)")
+		return
+	}
 	if !ok {
 		oauthCallbackError(w, r, "unknown or expired OAuth state (start the connection again)")
 		return
 	}
+	if !oauthBindingCookieMatches(r, state) {
+		// The code is never sent on from here: the cookie is no secret from whoever began the
+		// flow, so the only protection is that the code is redeemed nowhere but in the browser
+		// that holds it, at the registered redirect_uri.
+		oauthCallbackError(w, r, "this connection was not started in this browser at this address (start it again from the console)")
+		return
+	}
+	clearOAuthBindingCookie(w, r, state)
 
 	// (2) Exchange the code + PKCE verifier for tokens SERVER-SIDE. The verifier
 	// proves this BFF started the flow; a wrong verifier or a bad/expired code is
@@ -348,12 +477,12 @@ func (s *Server) handleMCPOAuthCallback(w http.ResponseWriter, r *http.Request) 
 		// Persist the OAuth client config (non-secret) so a per-user grant can later be
 		// begun from just {server, ns} (ADR 0031). Token material stays in oauthSecretData.
 		oauthConfig: flow.oauth,
-		// An OAuth server is personal to the consenting registrant (ADR 0029 §1/§3); the
-		// owner is the caller's HMAC'd identity, already captured on the flow at consent-begin.
+		// An OAuth server is personal to the registrant (ADR 0029 §1/§3); the owner is the
+		// registrant's HMAC'd identity, captured on the flow at register.
 		// ADR 0067 §2: also stamp the two new axes (private, byo-oauth) alongside the legacy
 		// scope=personal for rollback aid — consistent with the bearer-key register path.
 		scope:            scopePersonal,
-		owner:            flow.grantUserHash,
+		owner:            flow.registrantHash,
 		visibility:       visibilityPrivate,
 		credentialSource: credSourceByoOAuth,
 	}); crErr != nil {
@@ -450,6 +579,6 @@ func (s *Server) refreshMCPOAuthToken(ctx context.Context, c client.Client, ns, 
 // mcpServerSummaryAuthType reads the non-secret auth-type annotation off a
 // register-managed ToolRegistry ("" when absent — a key/open server). Kept beside
 // the summary projection so the list surfaces the tier without touching a Secret.
-func mcpServerSummaryAuthType(tr *agentsv1alpha1.ToolRegistry) string {
+func mcpServerSummaryAuthType(tr *agentsv1beta1.ToolRegistry) string {
 	return tr.Annotations[annMCPAuthType]
 }

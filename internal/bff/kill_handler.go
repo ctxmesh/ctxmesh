@@ -24,7 +24,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
@@ -115,7 +115,7 @@ func (s *Server) authorizeKill(ctx context.Context, caller client.Client, sc kil
 	}
 	return s.authorizer.Authorize(ctx, caller, authz.Action{
 		Verb:        verbKill,
-		Group:       agentsv1alpha1.GroupVersion.Group,
+		Group:       agentsv1beta1.GroupVersion.Group,
 		Resource:    resourceAgentDeployments,
 		Subresource: subresourceKill,
 		Namespace:   ns,
@@ -206,7 +206,7 @@ func (s *Server) handleUnkill(w http.ResponseWriter, r *http.Request) {
 func (s *Server) canReadAgents(ctx context.Context, caller client.Client, ns string) bool {
 	return s.authorizer.Authorize(ctx, caller, authz.Action{
 		Verb:      verbList,
-		Group:     agentsv1alpha1.GroupVersion.Group,
+		Group:     agentsv1beta1.GroupVersion.Group,
 		Resource:  resourceAgentDeployments,
 		Namespace: ns,
 	}) == nil

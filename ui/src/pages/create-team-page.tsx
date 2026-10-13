@@ -108,13 +108,13 @@ interface CreateFailure {
 export function CreateTeamPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { namespace } = useNamespace();
+  const { namespace, workingNamespace } = useNamespace();
 
   const [registries, setRegistries] = React.useState<AgentRegistrySummary[]>([]);
   const [registryLoad, setRegistryLoad] = React.useState<RegistryLoad>("loading");
   const [registryRef, setRegistryRef] = React.useState("");
   const [description, setDescription] = React.useState("");
-  const [targetNs, setTargetNs] = React.useState(namespace || "default");
+  const [targetNs, setTargetNs] = React.useState(namespace || workingNamespace || "default");
 
   const [current, setCurrent] = React.useState(STEP_DESCRIBE);
   const [phase, setPhase] = React.useState<Phase>("idle");
@@ -125,11 +125,12 @@ export function CreateTeamPage() {
   );
   const [team, setTeam] = React.useState<AgentTeamSummary | null>(null);
 
-  // Load available registries so the user picks one instead of typing a ref.
+  // Load available registries so the user picks one instead of typing a ref. A team's
+  // registry is in its own namespace, so the list follows the target workspace.
   React.useEffect(() => {
     const controller = new AbortController();
     api
-      .listAgentRegistries(undefined, controller.signal)
+      .listAgentRegistries({ namespace: targetNs }, controller.signal)
       .then((res) => {
         if (controller.signal.aborted) return;
         setRegistries(res.items);
@@ -144,7 +145,7 @@ export function CreateTeamPage() {
         if (!controller.signal.aborted) setRegistryLoad("error");
       });
     return () => controller.abort();
-  }, []);
+  }, [targetNs]);
 
   React.useEffect(() => {
     if (namespace) setTargetNs(namespace);

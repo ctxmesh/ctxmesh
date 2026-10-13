@@ -6,12 +6,23 @@ name: Nightly
 on:
   schedule:
     - cron: "17 3 * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      stranger_version:
+        description: run the stranger path against this published release (vX.Y.Z) instead of the newest
+        type: string
+        required: false
+        default: ""
+      stranger_only:
+        description: run only the stranger path, not the full e2e
+        type: boolean
+        required: false
+        default: false
 
 permissions: {}
 
 jobs:
-  # The published path, first. The 21 slices below run on a dev cluster with
+  # The published path, first. The slices below run on a dev cluster with
   # locally-built images, which is not a shape any user is in: across M177-M179
   # not one of the twelve defects found came from any gate of that kind. This
   # job walks what a stranger walks -- the published chart, the published
@@ -26,15 +37,89 @@ jobs:
   # image pulls went unnoticed until someone ran the gate by hand at a milestone close.
   # There is no expected-red state here: either this passes, or something is wrong and is fixed.
   stranger:
-    name: nightly-stranger-path
+    uses: ./.github/workflows/stranger.yml
+    permissions:
+      contents: read
+    with:
+      # Brain ref mirrors the engine branch (nightly runs on main <-> main).
+      brain_ref: ${{ github.ref_name }}
+      # Empty on the schedule: the newest CHANGELOG release, checked against the published site.
+      version: ${{ inputs.stranger_version }}
+      install_doc: site
+    secrets:
+      BRAIN_CHECKOUT_TOKEN: ${{ secrets.BRAIN_CHECKOUT_TOKEN }}
+
+  # Every third-party image the chart renders, pulled anonymously (hack/chart-images-pullable.sh).
+  # Upstream registries change without a commit here, so this runs on the schedule as well as in CI.
+  images:
+    name: nightly-images
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.3
+      - name: Install PyYAML (the image lister parses the render)
+        run: python3 -m pip install --quiet pyyaml
+      - name: Pull every third-party image the chart renders, anonymously
+        run: ./hack/chart-images-pullable.sh
+      # main is the last release, so a clone of it must pull the images its Chart.yaml names.
+      - name: Pull every first-party image a clone of main renders, anonymously
+        run: ./hack/chart-images-pullable.sh --first-party
+
+  # Every SDK, through its public API, against a real launcher built from main. CI runs the same
+  # suite on every push; the nightly catches drift that arrives without a commit here, such as a
+  # toolchain or registry dependency moving under an SDK.
+  sdk-conformance:
+    name: nightly-sdk-conformance
+    if: ${{ !inputs.stranger_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: ruby/setup-ruby@a2bbe5b1b236842c1cb7dd11e8e3b51e0a616acc # v1.202.0
+        with:
+          ruby-version: "3.3"
+      - name: SDK conformance (one contract, six SDKs, a real launcher)
+        run: make sdk-conformance
+
+  # Upgrade from the newest published release to this tree, on a cluster carrying real data: the
+  # upgrade every user makes next (m184.17). Red until a published release installs (beta.8's
+  # bundled MinIO image can no longer be pulled), which is the truth about that upgrade path.
+  upgrade:
+    name: nightly-upgrade
+    if: ${{ !inputs.stranger_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the tags: the newest one is the release a user upgrades from
       - name: Check out agent-brain (harness owns e2e — ADR 0004)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -43,14 +128,6 @@ jobs:
           path: agent-brain
           persist-credentials: false
           ref: ${{ github.ref_name }}
-      - name: Check out the public docs site (docs-site-truth reads it)
-        # Public repo, so no token. Without this the gate SKIPs, a SKIP is exit 3, and the job
-        # dies here having proven nothing -- which is what happened 30 nights running.
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: ctxmesh/ctxmesh.github.io
-          path: ctxmesh.github.io
-          persist-credentials: false
       - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
         with:
           go-version-file: go.mod
@@ -61,37 +138,23 @@ jobs:
           sudo mv ./kind /usr/local/bin/kind
           kind version
       - name: Install helm and kubectl explicitly
-        # The gate SKIPs if either is missing, and a SKIP is one of the four
-        # escapes close gate (d) forbids -- so do not rely on the runner image.
         run: |
           command -v helm >/dev/null || curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
           command -v kubectl >/dev/null || {
             curl -fsSLo kubectl "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/$(go env GOARCH)/kubectl"
             chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
           }
-          helm version --short && kubectl version --client=true 2>/dev/null | head -1
-      - name: Published artifacts must match what the release claims
+      - name: Upgrade from the newest published release to this tree, with real data
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        run: ./hack/release-truth.sh
-      - name: The public site must name only installable versions
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
-          DOCS_SITE: ${{ github.workspace }}/ctxmesh.github.io
-        run: make -C agent-brain/harness docs-site-truth
-      - name: Close gate (d) — a stranger's path, end to end
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
-        # No COLD_IMAGES=local here on purpose: local images are the escape that
-        # let this gate report PASS for five releases against a version nobody
-        # was running.
-        run: make -C agent-brain/harness stranger
+        run: agent-brain/harness/scripts/e2e-upgrade.sh
 
   full-e2e:
     name: nightly-full-e2e
+    if: ${{ !inputs.stranger_only }}
     runs-on: ubuntu-latest
     # Bumped 45→60 (m5-memory), 60→75 (m6-mesh), 75→120 (m7-eventing + the
-    # heavier M=7 stack: Calico + KEDA + Eventing + MinIO install on top of m3-m6),
+    # heavier M=7 stack: Calico + KEDA + Eventing + object store install on top of m3-m6),
     # 120→150 (m12-helm + m12-ui: helm install + kind-load bff/echo + a headless
     # Playwright browser run + a live Playground agent invocation).
     timeout-minutes: 150
@@ -119,13 +182,18 @@ jobs:
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
           kind version
-      - name: Bring up the harness cluster (M=7 full stack — Calico + Knative Serving/Eventing + KEDA + MinIO + Langfuse)
+      - name: Bring up the harness cluster (M=7 full stack — Calico + Knative Serving/Eventing + KEDA + object store + Langfuse)
+        id: devup
         # M=7 ⊇ M=1..M6: the m7-eventing slice needs KEDA + Knative Eventing +
-        # MinIO, so the whole nightly runs on the M=7 stack. The earlier slices
+        # the object store, so the whole nightly runs on the M=7 stack. The earlier slices
         # tolerate it (Calico enforces the m6 NetworkPolicy as a bonus). Heavy
         # for one CI job — split at the CI-revisit pass if the runner can't fit it.
         run: make -C agent-brain/harness dev-up M=7
+      # Every slice below runs even when an earlier one failed. The job still fails, but one run
+      # reports every red instead of the first: for weeks this job showed one failure and hid the
+      # rest behind it.
       - name: M3 observability e2e (light — collector debug sink, no Langfuse)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Per ADR 0006 the full Langfuse tier3 M=3 is local-only (won't fit the
@@ -133,12 +201,14 @@ jobs:
         # runs, spans flow, asserted via the collector's debug exporter.
         run: make -C agent-brain/harness tier2 SLICE=m3-trace
       - name: M4 MCP tools e2e (bind, call, hot-swap without restart)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Reuses the same cluster; asserts tool_version v1→v2 on an unchanged
         # pod UID + the mcp_word_count TOOL span via the collector debug sink.
         run: make -C agent-brain/harness tier2 SLICE=m4-tools
       - name: M5 session-memory e2e (context survives scale-to-zero)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Reuses the same cluster; the State-Layer Valkey is deployed by the
@@ -150,6 +220,7 @@ jobs:
         # as the m3-trace / m4-tools slices.
         run: make -C agent-brain/harness tier2 SLICE=m5-memory
       - name: M6 mesh e2e (A2A, cross-registry isolation, guards, child span)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Reuses the same M=1 cluster. Deploys two AgentRegistries + three
@@ -161,19 +232,19 @@ jobs:
         # registryId check — ADR 0007 addendum). On the M=7 stack Calico also
         # enforces the NetworkPolicy defense-in-depth layer (bonus vs the M=1 run).
         run: make -C agent-brain/harness tier2 SLICE=m6-mesh
-      - name: M7 async eventing e2e (event→trigger, DLQ, cron/job, scaling mechanism)
+      - name: M7 async eventing e2e (event→trigger, DLQ, cron/job, queue-depth scaling)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        # Needs the M=7 stack (KEDA + Knative Eventing + MinIO). Deploys an
-        # eventing agent (plain Deployment + Trigger), a job + a CronJob batch
-        # agent, and a queue-depth AgentScalingPolicy. Asserts: CloudEvent →
-        # trigger (agent.invoke span), poison → per-registry DLQ, CronJob/Job
-        # complete (native-sidecar collector), and the KEDA scaling MECHANISM
-        # (ScaledObject accepted + HPA created + target resolves). Live
-        # queue-depth scale-up is a documented phase-2 limitation (the in-memory
-        # channel exposes no queue_depth metric) — specs/eventing-scaling.md.
+        # Needs the M=7 stack (KEDA + Knative Eventing + object store + NATS). Deploys an
+        # eventing agent (plain Deployment + Trigger), a job + a CronJob batch agent, and
+        # queue-depth AgentScalingPolicies. Asserts: CloudEvent → trigger (agent.invoke span),
+        # poison → per-registry DLQ, CronJob/Job complete, the honest refusal of queue-depth
+        # scaling on the Knative backend, and on JetStream that 30 queued hops scale the agent
+        # 0 → >1 → 0 (specs/eventing-scaling.md).
         run: make -C agent-brain/harness tier2 SLICE=m7-eventing
       - name: M8 cost-governance e2e (per-agent budget — soft alert, hard-breach halt, traced)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs only M=3 infra (Knative + Langfuse + the gateway) but tolerates
@@ -189,6 +260,7 @@ jobs:
         # X-Conversation-Id on its LLM call) — specs/cost-governance.md.
         run: make -C agent-brain/harness tier2 SLICE=m8-budget
       - name: M9 eval/prompts/feedback e2e (deploy-gate, prompt-only swap, feedback→trace)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs only M=3 infra (Knative + Langfuse) but tolerates the M=7 stack.
@@ -204,6 +276,7 @@ jobs:
         # specs/eval-prompts-feedback.md, ADR 0008.
         run: make -C agent-brain/harness tier2 SLICE=m9-eval
       - name: M10 Python SDK e2e (no-framework loop → step→tool→model tree in Langfuse)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs only M=3 infra (Knative + Langfuse) but tolerates the M=7 stack.
@@ -217,6 +290,7 @@ jobs:
         # 307-follow fix (tools.call reaches FastMCP /mcp/). specs/python-sdk.md.
         run: make -C agent-brain/harness tier2 SLICE=m10-sdk
       - name: M11 trace-governance + security e2e (redaction / authz / audit / egress)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
         # Needs M=6+ (Calico for the egress NetworkPolicy) — the M=7 nightly stack
@@ -233,28 +307,35 @@ jobs:
         # not e2e'd. specs/trace-governance-security.md, ADR 0009.
         run: make -C agent-brain/harness tier2 SLICE=m11-security
       - name: M12 helm install e2e (helm lint + install brings the platform + UI Ready)
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         # Pure install-smoke, no browser: `helm lint` + `helm install` the chart
         # (ui.enabled=true) onto the M=7 cluster → controller + BFF Deployments
         # Ready, /api/health 200, the SPA shell served, and the auth floor rejects
         # an anonymous /api call (401). The slice builds + `kind load`s bff:latest
         # itself (IfNotPresent, no registry — a forgotten load = ImagePullBackOff).
-        # FRESH CI cluster: the namespace is NOT kustomize-owned, so `helm install`
-        # adopts nothing — the m12.8b control-plane-conflict deferral is closed and
-        # this runs WITHOUT UIE2E_RESET_CONTROL_PLANE. specs/ui.md, ADR 0010/0011.
+        # The M3-M11 slices above deploy the control plane with kustomize into the
+        # same namespace, and helm cannot adopt it, so this first helm slice removes
+        # it (UIE2E_RESET_CONTROL_PLANE=1). This comment used to say the cluster was
+        # fresh here; it was not, and helm's ownership refusal read as "not Ready".
+        env:
+          AGENT_ENGINE: ${{ github.workspace }}
+          UIE2E_RESET_CONTROL_PLANE: "1"
         run: make -C agent-brain/harness tier2 SLICE=m12-helm
       # The m12-ui slice drives the DEPLOYED UI headless via Playwright; its
       # toolchain is nvm-pinned to harness/ui-e2e/.nvmrc (Node 22), sourced by
       # e2e-m12.sh. setup-node puts Node on PATH but the harness sources nvm
       # explicitly (non-interactive make shell), so install nvm into $NVM_DIR.
       - name: Install nvm for the Playwright UI toolchain (harness ui-e2e/.nvmrc)
+        # Guarded like the slices: an earlier red must not skip the toolchain every UI slice needs.
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         run: |
           curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh \
             | PROFILE=/dev/null bash
           test -s "$HOME/.nvm/nvm.sh"
       - name: M12 deployed-UI e2e (topology / config-builder / Playground + caller-scoped 403)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m12-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # Drives the helm-installed UI headless (Playwright/chromium) over the BFF
         # port-forward: the 3 🧪 (topology renders live agents, the config-builder
@@ -270,7 +351,9 @@ jobs:
         # agent run). specs/ui.md, ADR 0010/0011.
         run: make -C agent-brain/harness tier2 SLICE=m12-ui
       - name: M13 console-foundation e2e (token login / RBAC chrome / forced-403)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m13-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The v2 console foundation (ADR 0012): 50-login drives the REAL login
         # form (paste a persona token → whoami → console + who-am-I; wrong token
@@ -281,7 +364,9 @@ jobs:
         # m12-ui, minting developer/operator/viewer persona tokens at runtime.
         run: make -C agent-brain/harness tier2 SLICE=m13-ui
       - name: M14 first-agent aha e2e (connect → describe → create → run → tool span)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m14-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The aha (§28-30): connect a provider → add a keyed BYO-MCP (auth both
         # directions) → describe an agent → generate/review/create → land on the
@@ -295,7 +380,9 @@ jobs:
         # current CRD. Runs LAST (heaviest: 4 images + 2 mock upstreams + browser).
         run: make -C agent-brain/harness tier2 SLICE=m14-ui
       - name: M15 fleet-management e2e (grouped topology at 200 agents + CRUD round-trips)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m15-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The fleet-management 🧪 (§31): seeds a 200-agent scale fixture across 3
         # namespaces × 3 registries (min-scale=0, no pods spin), then drives the
@@ -311,7 +398,9 @@ jobs:
         # test --list + shellcheck. (ADR 0004 gate-and-skip-gracefully applies.)
         run: make -C agent-brain/harness tier2 SLICE=m15-ui
       - name: M16 observability-depth e2e (native trace explorer + feedback + cost)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m16-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The observability-depth 🧪 (§31, spec observability-depth-ui): reuses the
         # M14 bring-up (helm + persona RBAC + fixture MCP + tool-mock + Langfuse),
@@ -328,7 +417,9 @@ jobs:
         # the Langfuse-fed legs skip when the adapter/runs are absent.)
         run: make -C agent-brain/harness tier2 SLICE=m16-ui
       - name: M17 authoring-depth e2e (OAuth MCP + tool hot-swap + approval queue)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m17-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The authoring-depth 🧪 (§28.2/§31, spec authoring-depth-ui): reuses the
         # M16 bring-up + deploys the OAuth-fixture MCP (harness/fixtures/m17,
@@ -343,7 +434,9 @@ jobs:
         # test --list + shellcheck + the fixture contract test. ADR 0004 gate-and-skip.
         run: make -C agent-brain/harness tier2 SLICE=m17-ui
       - name: M18 console-cohesion e2e (personas — providers/compose/fleet/redaction)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m18-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The console-cohesion 🧪 (§28–31, spec console-cohesion): reuses the M16/M17
         # bring-up shape (M18 adds NO new fixture server) + seeds a connected-provider
@@ -354,8 +447,14 @@ jobs:
         # ADR 0006: full headless slice on a FRESH CI cluster; locally provable —
         # tier0 + tsc --noEmit + playwright test --list + shellcheck.
         run: make -C agent-brain/harness tier2 SLICE=m18-ui
+      - name: Activate pnpm for the dev-ui slice (corepack, pinned by ui/package.json)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
+        working-directory: ui
+        run: corepack enable && corepack prepare --activate
       - name: M19 dev-ui smoke (ctxmesh dev --ui — NO cluster, Docker Compose)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
+          UI_E2E_OUTPUT_DIR: test-results/m19-ui
           AGENT_ENGINE: ${{ github.workspace }}
         # The dev-ui 🧪 (ADR 0021, spec dev-ui-and-sso): the ONLY slice with NO
         # cluster. It brings up `ctxmesh dev --ui` (the local Compose inner loop
@@ -367,14 +466,37 @@ jobs:
         # ADR 0006: locally provable — tier0 + tsc --noEmit + playwright --list +
         # shellcheck; the full Compose run is deferred like the other slices.
         run: make -C agent-brain/harness tier2 SLICE=m19-ui
-      - name: M19 console OIDC login (Auth-Code + PKCE via Dex)
-        env:
-          AGENT_ENGINE: ${{ github.workspace }}
-        # The console SSO 🧪 (ADR 0020, spec dev-ui-and-sso): drives the REAL Auth-Code
-        # + PKCE flow — login page → Dex login → /auth/callback exchange → the console
-        # as the OIDC identity (RBAC bound via the demo binding), Playwright spec 111.
-        # The load-bearing apiserver-OIDC-trust is a DEDICATED-cluster setup (not the
-        # shared dev cluster), so the slice gate-gracefully SKIPs unless
-        # UI_E2E_OIDC_CONTEXT names such a cluster (ADR 0004). ADR 0006: locally
-        # provable — tsc --noEmit + playwright --list + shellcheck; live run deferred.
-        run: make -C agent-brain/harness tier2 SLICE=m19-oidc
+      # Every console spec skips when its slice lacks its environment, so every UI slice above can be
+      # green while a spec executes in none of them. The census reads each slice's JSON report and fails
+      # on such a spec unless harness/ui-e2e/census-allowlist.txt says where it runs instead. The slices
+      # it expects are the UI_E2E_OUTPUT_DIR values in this file, so a new UI slice is counted unasked.
+      - name: Console spec census (every spec executed in some UI slice, or is allowlisted)
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
+        run: |
+          set -o pipefail
+          mkdir -p agent-brain/harness/ui-e2e/test-results
+          agent-brain/harness/scripts/uie2e-census.sh agent-brain/harness/ui-e2e/test-results \
+            --expect-from .github/workflows/nightly.yml \
+            | tee agent-brain/harness/ui-e2e/test-results/census.txt
+      # The census table and the reports it read, kept on every run: small, and the record of what ran.
+      - name: Keep the console spec census
+        if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: uie2e-census
+          path: |
+            agent-brain/harness/ui-e2e/test-results/census.txt
+            agent-brain/harness/ui-e2e/test-results/*.json
+          if-no-files-found: warn
+          retention-days: 14
+      # A red UI slice left nothing to look at. Each slice writes its screenshots and traces to its own
+      # directory (UI_E2E_OUTPUT_DIR) and its JSON report beside it, and they go up whenever the job
+      # did not pass.
+      - name: Keep the Playwright results of the UI slices
+        if: ${{ !cancelled() && failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-results
+          path: agent-brain/harness/ui-e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 14

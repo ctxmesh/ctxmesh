@@ -43,12 +43,12 @@ func (s *pgStore) Set(ctx context.Context, a AgentCapability) error {
 		return fmt.Errorf("agentcapability: encoding tags for %s/%s: %w", a.Namespace, a.Agent, err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO agent_capabilities (namespace, agent, registry_id, description, tags, ready, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, now())
+		`INSERT INTO agent_capabilities (namespace, agent, registry_id, role, endpoint, description, tags, ready, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
 		 ON CONFLICT (namespace, agent) DO UPDATE SET
-		   registry_id = EXCLUDED.registry_id, description = EXCLUDED.description,
-		   tags = EXCLUDED.tags, ready = EXCLUDED.ready, updated_at = now()`,
-		a.Namespace, a.Agent, a.RegistryID, a.Description, tags, a.Ready); err != nil {
+		   registry_id = EXCLUDED.registry_id, role = EXCLUDED.role, endpoint = EXCLUDED.endpoint,
+		   description = EXCLUDED.description, tags = EXCLUDED.tags, ready = EXCLUDED.ready, updated_at = now()`,
+		a.Namespace, a.Agent, a.RegistryID, a.Role, a.Endpoint, a.Description, tags, a.Ready); err != nil {
 		return fmt.Errorf("agentcapability: set %s/%s: %w", a.Namespace, a.Agent, err)
 	}
 	return nil
@@ -66,8 +66,9 @@ func (s *pgStore) Get(ctx context.Context, namespace, agent string) (AgentCapabi
 	out := AgentCapability{Namespace: namespace, Agent: agent}
 	var tags []byte
 	err := s.db.QueryRowContext(ctx,
-		`SELECT registry_id, description, tags, ready FROM agent_capabilities WHERE namespace = $1 AND agent = $2`,
-		namespace, agent).Scan(&out.RegistryID, &out.Description, &tags, &out.Ready)
+		`SELECT registry_id, role, endpoint, description, tags, ready FROM agent_capabilities
+		 WHERE namespace = $1 AND agent = $2`,
+		namespace, agent).Scan(&out.RegistryID, &out.Role, &out.Endpoint, &out.Description, &tags, &out.Ready)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AgentCapability{}, false, nil // unregistered ⇒ no discovery scope (fail-closed)
 	}
@@ -86,7 +87,7 @@ func (s *pgStore) List(ctx context.Context, namespace, registryID string) ([]Age
 	}
 	// description <> '' excludes membership-only rows: an agent that advertises nothing is not a candidate.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT agent, description, tags, ready FROM agent_capabilities
+		`SELECT agent, role, endpoint, description, tags, ready FROM agent_capabilities
 		 WHERE namespace = $1 AND registry_id = $2 AND description <> '' ORDER BY agent`, namespace, registryID)
 	if err != nil {
 		return nil, fmt.Errorf("agentcapability: list %s/%s: %w", namespace, registryID, err)
@@ -97,7 +98,7 @@ func (s *pgStore) List(ctx context.Context, namespace, registryID string) ([]Age
 	for rows.Next() {
 		a := AgentCapability{Namespace: namespace, RegistryID: registryID}
 		var tags []byte
-		if err := rows.Scan(&a.Agent, &a.Description, &tags, &a.Ready); err != nil {
+		if err := rows.Scan(&a.Agent, &a.Role, &a.Endpoint, &a.Description, &tags, &a.Ready); err != nil {
 			return nil, fmt.Errorf("agentcapability: scanning %s/%s: %w", namespace, registryID, err)
 		}
 		if a.Tags, err = unmarshalTags(tags); err != nil {
@@ -107,6 +108,34 @@ func (s *pgStore) List(ctx context.Context, namespace, registryID string) ([]Age
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("agentcapability: list %s/%s: %w", namespace, registryID, err)
+	}
+	return out, nil
+}
+
+func (s *pgStore) ListMembers(ctx context.Context) ([]AgentCapability, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, agent, registry_id, role, endpoint, description, tags, ready FROM agent_capabilities
+		 WHERE registry_id <> '' ORDER BY namespace, agent`)
+	if err != nil {
+		return nil, fmt.Errorf("agentcapability: list registry members: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AgentCapability
+	for rows.Next() {
+		var a AgentCapability
+		var tags []byte
+		if err := rows.Scan(&a.Namespace, &a.Agent, &a.RegistryID, &a.Role, &a.Endpoint, &a.Description,
+			&tags, &a.Ready); err != nil {
+			return nil, fmt.Errorf("agentcapability: scanning registry members: %w", err)
+		}
+		if a.Tags, err = unmarshalTags(tags); err != nil {
+			return nil, fmt.Errorf("agentcapability: decoding tags for %s/%s: %w", a.Namespace, a.Agent, err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agentcapability: list registry members: %w", err)
 	}
 	return out, nil
 }

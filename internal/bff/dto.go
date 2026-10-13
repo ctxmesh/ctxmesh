@@ -33,7 +33,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // Agent lifecycle phases the BFF projects onto the UI DTO, derived from the
@@ -97,6 +97,9 @@ type AgentSummary struct {
 	// until published via POST /api/agents/{ns}/{name}/publish. Omitted (false)
 	// on the wire for non-draft agents — backward-compatible.
 	IsDraft bool `json:"isDraft,omitempty"`
+	// CreatedAt is metadata.creationTimestamp (RFC3339), so the console can find the agent a person
+	// just created. Omitted when unset.
+	CreatedAt string `json:"createdAt,omitempty"`
 }
 
 // AgentListResponse is returned by GET /api/agents. It carries the list-contract
@@ -160,7 +163,7 @@ type AgentBinding struct {
 // AgentDetailResponse is returned by GET /api/agents/{ns}/{name}. It is the full
 // agent-landing projection: identity, the spec summary (image, executionModel,
 // scaling, role), the live status (conditions + Knative URL + readiness/phase),
-// the bindings referencing this agent, and the AgentVersion history names.
+// the bindings referencing this agent, and the agent's version names, newest first.
 // Bindings and Versions and Conditions are non-nil on the wire ([] not null).
 type AgentDetailResponse struct {
 	Name           string `json:"name"`
@@ -229,6 +232,11 @@ type AgentDetailResponse struct {
 	// the badge vanished on reload). nil when the agent is not published (or the store is unavailable
 	// — a best-effort read that degrades to no-badge, never a 500).
 	Published *PublishedRef `json:"published,omitempty"`
+	// Dependencies is what the agent references (model route, the secret bindings its route uses,
+	// guardrail policy, tool bindings, knowledge bases, memory, approval rules and approvers,
+	// feedback sources), each resolved as the caller. A reference that does not resolve is listed
+	// as missing. Non-nil on the wire, except null when the request asked for none (?dependencies=0).
+	Dependencies []AgentDependency `json:"dependencies"`
 }
 
 // PublishedRef is the durable published-template state on the agent detail (U13): the visibility +
@@ -344,6 +352,10 @@ type CapabilitiesResponse struct {
 type NamespaceSummary struct {
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName,omitempty"`
+	// Platform marks a namespace the platform or Kubernetes itself occupies (the control-plane
+	// namespace, kube-*, knative-*, *-system). It is set only on the cluster-wide list, so the
+	// console's first visit opens a workspace a user works in, never one of these.
+	Platform bool `json:"platform,omitempty"`
 }
 
 // SetNamespaceDisplayNameRequest is the body for
@@ -540,6 +552,9 @@ type CostBreakdownResponse struct {
 	// Notice — see CostResponse.Notice: a calm degrade message when the trace store
 	// is transiently unavailable. Omitted on the normal path (backward-compatible).
 	Notice string `json:"notice,omitempty"`
+	// Namespaces is set when a breakdown given no tenant covers only the caller's workspaces:
+	// the namespaces where they may read cost. Total then sums the rows. Omitted otherwise.
+	Namespaces []string `json:"namespaces,omitempty"`
 }
 
 // --- Recent runs (GET /api/runs) --------------------------------------------
@@ -644,8 +659,8 @@ type SpanSummary struct {
 	// ParentID is the parent observation id, or "" for a root span. The UI builds
 	// the tree from this; the BFF keeps the list flat (never pre-nested).
 	ParentID string `json:"parentId"`
-	// Type is the observation type: "SPAN" | "GENERATION" | "EVENT". The tool call
-	// surfaces as a SPAN/GENERATION so the panel can mark the tool span.
+	// Type is the Langfuse observation type, passed through: "GENERATION" for a
+	// model call, "TOOL" for a tool call, "SPAN", "EVENT" and the other agent types.
 	Type string `json:"type"`
 	// Name is the observation name (the step label the panel renders).
 	Name string `json:"name"`
@@ -728,6 +743,21 @@ type TraceDetailResponse struct {
 	Rollup     TraceRollup   `json:"rollup"`
 	Spans      []SpanSummary `json:"spans"`
 	RootSpanID string        `json:"rootSpanId"`
+	// Run is present when a run maps the trace. A trace no run maps (a direct /api/invoke call) has none.
+	Run *TraceRunSteps `json:"run,omitempty"`
+}
+
+// TraceRunSteps is what the run behind a trace recorded, so the console can tell a complete trace from
+// one whose spans are still arriving (the backend ingests generation and tool spans after the root).
+type TraceRunSteps struct {
+	RunID  string `json:"runId"`
+	Status string `json:"status"`
+	// EndedAt is when the run reached a terminal state (RFC3339); empty while it is running or held.
+	EndedAt string `json:"endedAt,omitempty"`
+	// ModelSteps and ToolSteps count the run's recorded step events by kind. Both are 0 until the run
+	// is terminal, and for an agent that emits no step events.
+	ModelSteps int `json:"modelSteps"`
+	ToolSteps  int `json:"toolSteps"`
 }
 
 // --- Connect a provider (ADR 0015) ------------------------------------------
@@ -873,8 +903,9 @@ type MCPAuthRequest struct {
 	ClientID string `json:"clientId"`
 	// Scope is the requested OAuth scope string (space-delimited); optional.
 	Scope string `json:"scope"`
-	// RedirectURI is the callback URL the authorization server redirects back to.
-	// It must resolve to the BFF's GET /api/mcp/oauth/callback route.
+	// RedirectURI is ignored: the BFF always uses its own canonical callback
+	// (ADR 0040), so an authorization code returns only to the browser that began
+	// the flow. Accepted for compatibility with older clients.
 	RedirectURI string `json:"redirectUri"`
 	// AutoDiscover requests ZERO-CONFIG OAuth (ADR 0028, m24.7): the BFF discovers
 	// the authorization/token/registration endpoints from the MCP server's spec
@@ -1003,6 +1034,45 @@ type MCPGrantConsentRequest struct {
 	// ns}. When supplied (a legacy server, or a single-field override) its Type, if set,
 	// must be "oauth". Carries no secret material.
 	Auth *MCPAuthRequest `json:"auth"`
+}
+
+// MCPConsentTicketRequest is the POST /api/mcp/oauth/ticket body (ADR 0040 amendment): a chatbox
+// on an agent's own hostname asks for a ticket to begin consent on the console origin. Agent is
+// required; the console accepts the ticket only from that agent's hostname.
+type MCPConsentTicketRequest struct {
+	Server    string `json:"server"`
+	Namespace string `json:"namespace"`
+	Agent     string `json:"agent"`
+}
+
+// MCPConsentTicketResponse carries a single-use consent ticket and the console page that redeems
+// it. The ticket is handed to that page by postMessage, never in a URL.
+type MCPConsentTicketResponse struct {
+	Ticket string `json:"ticket"`
+	// ConnectURL is the console's /connect page.
+	ConnectURL string `json:"connectURL"`
+	// ExpiresIn is the ticket's lifetime in seconds.
+	ExpiresIn int `json:"expiresIn"`
+}
+
+// MCPConsentRedeemRequest is the POST /api/mcp/oauth/grant/redeem body, sent by the console's
+// /connect page. OpenerOrigin is the origin of the window that delivered the ticket.
+type MCPConsentRedeemRequest struct {
+	Ticket       string `json:"ticket"`
+	OpenerOrigin string `json:"openerOrigin"`
+}
+
+// MCPConsentRedeemResponse carries the authorization URL the /connect page navigates to, and what
+// the page shows before it does: whose consent this is, for which server and agent. No token,
+// verifier or state.
+type MCPConsentRedeemResponse struct {
+	Status           string `json:"status"`
+	AuthorizationURL string `json:"authorizationURL"`
+	// Minter is the username of the caller who minted the ticket: the grant is stored as theirs.
+	Minter    string `json:"minter"`
+	Server    string `json:"server"`
+	Agent     string `json:"agent"`
+	Namespace string `json:"namespace"`
 }
 
 // MCPGrantResponse is returned by the per-user grant endpoints (m17.3). It carries
@@ -1290,10 +1360,10 @@ type FeedbackScore struct {
 	Source string `json:"source"`
 	// CreatedAt is the Langfuse score creation timestamp (RFC3339).
 	CreatedAt string `json:"createdAt"`
-	// AttributedSource is the feedback source declared by the agent's FeedbackStore for this score's name
-	// (M139, ADR 0112): "human", "external:<channel>", or "unattributed". Empty (omitted) when the agent
-	// binds no FeedbackStore — Langfuse's own Source field can't distinguish sources, so this is the CRD-
-	// driven attribution.
+	// AttributedSource is the feedback source the agent's spec.feedback declares for this score's name
+	// (ADR 0152): "human", "external:<channel>", or "unattributed". Empty (omitted) when the agent declares
+	// no spec.feedback. Langfuse's own Source field cannot distinguish sources, so this is the
+	// declaration-driven attribution.
 	AttributedSource string `json:"attributedSource,omitempty"`
 }
 
@@ -1304,12 +1374,12 @@ type FeedbackResponse struct {
 }
 
 // SubmitFeedbackRequest is the body of POST /api/feedback (M139, ADR 0112) — the console/external WRITE
-// path. The score is relayed to Langfuse (the store of record) after caller-scoped authz + the bound
-// FeedbackStore's ingestion gate. Value is numeric (NUMERIC/BOOLEAN, matching the v1 relay, ADR 0008).
+// path. The score is relayed to Langfuse (the store of record) after caller-scoped authz + the
+// gate the agent's spec.feedback declares. Value is numeric (NUMERIC/BOOLEAN, matching the v1 relay, ADR 0008).
 type SubmitFeedbackRequest struct {
 	// TraceID is the run's trace the score attaches to (required).
 	TraceID string `json:"traceId"`
-	// Name is the score dimension (required) — gated against the FeedbackStore's declared names in Enforce.
+	// Name is the score dimension (required) — gated against spec.feedback's declared names in Enforce.
 	Name string `json:"name"`
 	// Value is the numeric score value (e.g. 0..1 for a thumb; a bounded rating).
 	Value float64 `json:"value"`
@@ -1321,7 +1391,7 @@ type SubmitFeedbackRequest struct {
 // and Phase are derived from the standard "Ready" condition (which mirrors the
 // underlying Knative Service, per the CRD status contract). agents is never nil
 // on the wire — the list endpoint returns [] for "no agents".
-func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
+func newAgentSummary(ad *agentsv1beta1.AgentDeployment) AgentSummary {
 	ready := false
 	phase := phasePending
 	var reason, message string
@@ -1342,6 +1412,10 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 			message = c.Message
 		}
 	}
+	createdAt := ""
+	if !ad.CreationTimestamp.IsZero() {
+		createdAt = ad.CreationTimestamp.UTC().Format(time.RFC3339)
+	}
 	return AgentSummary{
 		Name:      ad.Name,
 		Namespace: ad.Namespace,
@@ -1350,6 +1424,7 @@ func newAgentSummary(ad *agentsv1alpha1.AgentDeployment) AgentSummary {
 		Ready:     ready,
 		Reason:    reason,
 		Message:   message,
+		CreatedAt: createdAt,
 	}
 }
 
@@ -1392,14 +1467,14 @@ type AgentGateDetail struct {
 	ScoredRevision string `json:"scoredRevision,omitempty"`
 }
 
-// newAgentDetail projects an AgentDeployment plus the bindings/versions that
-// reference it onto the flat agent-landing DTO. The caller passes the CRD lists it
-// already read caller-scoped; this helper only projects (no I/O), so it stays
+// newAgentDetail projects an AgentDeployment plus the bindings that reference it and
+// its version names (newest first) onto the flat agent-landing DTO. The caller passes
+// what it already read caller-scoped; this helper only projects (no I/O), so it stays
 // unit-testable in isolation. Every slice is non-nil on the wire.
 func newAgentDetail(
-	ad *agentsv1alpha1.AgentDeployment,
-	toolBindings []agentsv1alpha1.MCPToolBinding,
-	versions []agentsv1alpha1.AgentVersion,
+	ad *agentsv1beta1.AgentDeployment,
+	toolBindings []agentsv1beta1.MCPToolBinding,
+	versions []string,
 	managedOutsideUI bool,
 	drift bool,
 ) AgentDetailResponse {
@@ -1457,13 +1532,7 @@ func newAgentDetail(
 		})
 	}
 
-	// Versions: the AgentVersion snapshot names pinned to this deployment.
-	versionNames := make([]string, 0, len(versions))
-	for i := range versions {
-		if versions[i].Spec.DeploymentName == ad.Name {
-			versionNames = append(versionNames, versions[i].Name)
-		}
-	}
+	versionNames := append(make([]string, 0, len(versions)), versions...)
 
 	// MODEL_ROUTE env carries the agent's model route (expand: model.route → env),
 	// surfaced so the detail page can link to the ModelRoute (used-by graph).
@@ -1514,12 +1583,13 @@ func newAgentDetail(
 		Gate:               newAgentGateDetail(ad.Status.Gate),
 		NeedsRebinding:     needsRebinding,
 		ForkUnresolvedRefs: forkUnresolvedRefs,
+		Dependencies:       []AgentDependency{},
 	}
 }
 
 // newAgentGateDetail projects a *GateStatus onto the detail DTO. Returns nil
 // when gate is nil (no EvalSuite wired — the JSON field is omitted entirely).
-func newAgentGateDetail(gate *agentsv1alpha1.GateStatus) *AgentGateDetail {
+func newAgentGateDetail(gate *agentsv1beta1.GateStatus) *AgentGateDetail {
 	if gate == nil {
 		return nil
 	}
@@ -1531,7 +1601,7 @@ func newAgentGateDetail(gate *agentsv1alpha1.GateStatus) *AgentGateDetail {
 
 // newAgentRuntimeDetail projects a *RuntimeSpec onto the detail DTO. Returns nil
 // when rt is nil so the JSON field is omitted entirely — the UI renders nothing new.
-func newAgentRuntimeDetail(rt *agentsv1alpha1.RuntimeSpec) *AgentRuntimeDetail {
+func newAgentRuntimeDetail(rt *agentsv1beta1.RuntimeSpec) *AgentRuntimeDetail {
 	if rt == nil {
 		return nil
 	}

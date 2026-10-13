@@ -47,7 +47,7 @@ linters:
     rules:
       - linters:
           - lll
-          - dupl # v1beta1 conversion spokes are intentionally uniform field-copies (ADR 0037, M34)
+          - dupl # root and List types are uniform by Kubernetes API convention
         path: api/*
       - linters:
           - dupl

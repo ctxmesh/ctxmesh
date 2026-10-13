@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // evalSuiteKind is the CRD kind name for an EvalSuite (used in error messages
@@ -227,7 +227,7 @@ type GateResultDTO struct {
 	// Score is the weighted-mean score as a decimal STRING (e.g. "0.9182") — never
 	// coerced to a float here; the UI parses it. Empty ⇒ no score yet.
 	Score string `json:"score,omitempty"`
-	// ScoredRevision is the AgentVersion the score was computed against. It MAY lag
+	// ScoredRevision is the revision the score was computed against. It MAY lag
 	// the agent's current revision — the UI badges "stale"; this handler never claims
 	// freshness.
 	ScoredRevision string `json:"scoredRevision,omitempty"`
@@ -242,8 +242,8 @@ type GateResultDTO struct {
 // listEvalSuitesForCRUD lists EvalSuites via the caller-scoped client (CRUD
 // surface — distinct from any AgentReader-typed lister that might exist, to
 // avoid redeclaration conflicts when AgentReader is a narrower interface).
-func listEvalSuitesForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1alpha1.EvalSuiteList, error) {
-	var out agentsv1alpha1.EvalSuiteList
+func listEvalSuitesForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1beta1.EvalSuiteList, error) {
+	var out agentsv1beta1.EvalSuiteList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -253,7 +253,7 @@ func listEvalSuitesForCRUD(ctx context.Context, r client.Client, opts ...client.
 // --- DTO projection helpers -------------------------------------------------
 
 // newScorerSpecDTO projects a ScorerSpec onto the DTO.
-func newScorerSpecDTO(s agentsv1alpha1.ScorerSpec) ScorerSpecDTO {
+func newScorerSpecDTO(s agentsv1beta1.ScorerSpec) ScorerSpecDTO {
 	return ScorerSpecDTO{
 		Name:   s.Name,
 		Type:   s.Type,
@@ -282,7 +282,7 @@ func newEvalSuiteConditionDTOs(conds []metav1.Condition) []EvalSuiteConditionDTO
 }
 
 // newEvalSuiteSummary projects an EvalSuite onto the compact list DTO.
-func newEvalSuiteSummary(es *agentsv1alpha1.EvalSuite) EvalSuiteSummary {
+func newEvalSuiteSummary(es *agentsv1beta1.EvalSuite) EvalSuiteSummary {
 	ready, phase := phaseFromConditions(es.Status.Conditions)
 	return EvalSuiteSummary{
 		Name:       es.Name,
@@ -296,7 +296,7 @@ func newEvalSuiteSummary(es *agentsv1alpha1.EvalSuite) EvalSuiteSummary {
 }
 
 // newEvalSuiteDetail projects an EvalSuite onto the full detail DTO.
-func newEvalSuiteDetail(es *agentsv1alpha1.EvalSuite) EvalSuiteDetail {
+func newEvalSuiteDetail(es *agentsv1beta1.EvalSuite) EvalSuiteDetail {
 	ready, phase := phaseFromConditions(es.Status.Conditions)
 	scorers := make([]ScorerSpecDTO, 0, len(es.Spec.Scorers))
 	for _, s := range es.Spec.Scorers {
@@ -316,32 +316,32 @@ func newEvalSuiteDetail(es *agentsv1alpha1.EvalSuite) EvalSuiteDetail {
 }
 
 // buildEvalSuiteSpec converts a create/update request to a spec.
-func buildEvalSuiteSpec(datasetRef, threshold, gate string, scorerDTOs []ScorerSpecDTO) (agentsv1alpha1.EvalSuiteSpec, error) {
+func buildEvalSuiteSpec(datasetRef, threshold, gate string, scorerDTOs []ScorerSpecDTO) (agentsv1beta1.EvalSuiteSpec, error) {
 	if strings.TrimSpace(datasetRef) == "" {
-		return agentsv1alpha1.EvalSuiteSpec{}, fmt.Errorf("datasetRef is required")
+		return agentsv1beta1.EvalSuiteSpec{}, fmt.Errorf("datasetRef is required")
 	}
 	if strings.TrimSpace(threshold) == "" {
-		return agentsv1alpha1.EvalSuiteSpec{}, fmt.Errorf("threshold is required")
+		return agentsv1beta1.EvalSuiteSpec{}, fmt.Errorf("threshold is required")
 	}
 	if len(scorerDTOs) == 0 {
-		return agentsv1alpha1.EvalSuiteSpec{}, fmt.Errorf("scorers must have at least one entry")
+		return agentsv1beta1.EvalSuiteSpec{}, fmt.Errorf("scorers must have at least one entry")
 	}
-	scorers := make([]agentsv1alpha1.ScorerSpec, 0, len(scorerDTOs))
+	scorers := make([]agentsv1beta1.ScorerSpec, 0, len(scorerDTOs))
 	for _, dto := range scorerDTOs {
 		if strings.TrimSpace(dto.Name) == "" {
-			return agentsv1alpha1.EvalSuiteSpec{}, fmt.Errorf("each scorer must have a non-empty name")
+			return agentsv1beta1.EvalSuiteSpec{}, fmt.Errorf("each scorer must have a non-empty name")
 		}
 		if strings.TrimSpace(dto.Type) == "" {
-			return agentsv1alpha1.EvalSuiteSpec{}, fmt.Errorf("each scorer must have a non-empty type")
+			return agentsv1beta1.EvalSuiteSpec{}, fmt.Errorf("each scorer must have a non-empty type")
 		}
-		scorers = append(scorers, agentsv1alpha1.ScorerSpec{
+		scorers = append(scorers, agentsv1beta1.ScorerSpec{
 			Name:   strings.TrimSpace(dto.Name),
 			Type:   strings.TrimSpace(dto.Type),
 			Weight: dto.Weight,
 		})
 	}
-	return agentsv1alpha1.EvalSuiteSpec{
-		Dataset:   agentsv1alpha1.DatasetRef{Ref: strings.TrimSpace(datasetRef)},
+	return agentsv1beta1.EvalSuiteSpec{
+		Dataset:   agentsv1beta1.DatasetRef{Ref: strings.TrimSpace(datasetRef)},
 		Scorers:   scorers,
 		Threshold: strings.TrimSpace(threshold),
 		Gate:      gate,
@@ -400,7 +400,7 @@ func (s *Server) handleListEvalSuites(w http.ResponseWriter, r *http.Request) {
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listEvalSuitesForCRUD(r.Context(), caller, opts...)
+	list, err := listEvalSuitesForCRUD(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -445,7 +445,7 @@ func (s *Server) handleGetEvalSuite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var es agentsv1alpha1.EvalSuite
+	var es agentsv1beta1.EvalSuite
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &es); err != nil {
 		s.writeGetError(w, err, "eval suite")
 		return
@@ -493,7 +493,7 @@ func (s *Server) handleCreateEvalSuite(w http.ResponseWriter, r *http.Request) {
 		ns = defaultCreateNamespace
 	}
 
-	es := &agentsv1alpha1.EvalSuite{
+	es := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      strings.TrimSpace(req.Name),
 			Namespace: ns,
@@ -565,7 +565,7 @@ func (s *Server) handleUpdateEvalSuite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apply := &agentsv1alpha1.EvalSuite{
+	apply := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -590,7 +590,7 @@ func (s *Server) handleUpdateEvalSuite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-read the live object so the response reflects what the API server persisted.
-	var updated agentsv1alpha1.EvalSuite
+	var updated agentsv1beta1.EvalSuite
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &updated); err != nil {
 		s.log.Error(err, "re-read EvalSuite after apply failed", "name", name, "namespace", ns)
 		writeError(w, http.StatusInternalServerError, "eval suite updated but could not be re-read")
@@ -623,7 +623,7 @@ func (s *Server) handleDeleteEvalSuite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	es := &agentsv1alpha1.EvalSuite{
+	es := &agentsv1beta1.EvalSuite{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), es); err != nil {
@@ -685,7 +685,7 @@ func (s *Server) handleGetEvalSuiteResults(w http.ResponseWriter, r *http.Reques
 
 	// Always fetch the EvalSuite to get status.conditions (caller-scoped: if the
 	// caller cannot read it, they get a real 403/404 — never a confused-deputy bypass).
-	var es agentsv1alpha1.EvalSuite
+	var es agentsv1beta1.EvalSuite
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &es); err != nil {
 		s.writeGetError(w, err, "eval suite")
 		return

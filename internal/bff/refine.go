@@ -234,18 +234,12 @@ func (s *Server) refineAttempt(ctx context.Context, gen generationTarget, userMs
 	return agentYAML, manifests, nil
 }
 
-// registerRefineRoute wires POST /api/agents/refine on the authed mux. It is
-// extracted from Handler to keep Handler under the gocyclo threshold (the same
-// discipline as registerExtAuthRoutes / registerRunRoutes). Requires BOTH the
-// caller-client factory (key is resolved caller-scoped, ADR 0011) and the expand
-// adapter (rewrite validated through the one mapping, ADR 0014 sibling); either
-// missing → an honest 501.
+// registerRefineRoute wires POST /api/agents/refine on the authed mux. It needs the caller-client
+// factory (the key is resolved caller-scoped, ADR 0011) and the expand adapter (the rewrite is
+// validated through the one mapping, ADR 0014).
 func (s *Server) registerRefineRoute(mux *http.ServeMux) {
-	if s.callerClients != nil && s.adapters.Expand != nil {
-		mux.HandleFunc("POST /api/agents/refine", s.handleRefine)
-	} else {
-		mux.Handle("POST /api/agents/refine", notImplemented("pure spec-editing refine"))
-	}
+	d := s.routeDeps()
+	mux.Handle("POST /api/agents/refine", requires(s.handleRefine, d.cluster, d.expand))
 }
 
 // cappedTranscript returns the last n turns from transcript (the server-side cap).

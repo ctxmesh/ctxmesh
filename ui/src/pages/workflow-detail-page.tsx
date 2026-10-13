@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo } from "react";
 import { useParams } from "react-router-dom";
 import { ArrowRight, GitBranch, Repeat, Rows3, Shield } from "lucide-react";
 
@@ -13,11 +13,10 @@ import {
 import { Badge } from "@/components/ui/badge";
 import {
   api,
-  ApiError,
-  type WorkflowDetailResponse,
   type WorkflowGraphEdge,
   type WorkflowGraphNode,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
 import { cn } from "@/lib/utils";
 
 // WorkflowDetailPage — the DECLARED workflow DAG on the shared canvas
@@ -54,11 +53,6 @@ import { cn } from "@/lib/utils";
 // data-testid contract:
 //   workflow-detail-page / workflow-detail-loading / workflow-detail-error
 //   workflow-dag / workflow-node-{name}
-
-type LoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; detail: WorkflowDetailResponse }
-  | { kind: "error"; message: string; forbidden: boolean };
 
 // ---------------------------------------------------------------------------
 // The canvas frame (§6.1 A6, §4.6)
@@ -222,37 +216,14 @@ function WorkflowNodeCard({ node }: { node: WorkflowGraphNode }) {
 
 export function WorkflowDetailPage() {
   const { ns, name } = useParams<{ ns: string; name: string }>();
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(() => {
-    if (!ns || !name) return;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setState({ kind: "loading" });
-    api
-      .getWorkflow(ns, name, controller.signal)
-      .then((detail) => {
-        if (controller.signal.aborted) return;
-        setState({ kind: "ready", detail });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, [ns, name]);
+  const fetchWorkflow = useCallback(
+    (signal: AbortSignal) => api.getWorkflow(ns ?? "", name ?? "", signal),
+    [ns, name],
+  );
+  const { state, reload } = useLoad(fetchWorkflow);
 
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
-
-  const detail = state.kind === "ready" ? state.detail : null;
+  const detail = state.kind === "ready" ? state.data : null;
   const columns = useMemo(
     () => (detail ? columnsOf(detail.nodes) : []),
     [detail],
@@ -304,7 +275,7 @@ export function WorkflowDetailPage() {
               title="The workflow didn't load."
               description="The declaration is unaffected — only this page failed to read it."
               detail={state.message}
-              onRetry={load}
+              onRetry={() => reload()}
             />
           </div>
         )}
@@ -312,7 +283,7 @@ export function WorkflowDetailPage() {
     );
   }
 
-  const d = state.detail;
+  const d = state.data;
   const stepCount = d.nodes.length;
   const terminals = d.nodes.filter((n) => n.edges.length === 0).length;
 

@@ -35,15 +35,19 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/alertstore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/auditlog"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/costrollup"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/dataset"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/namespacetenant"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/oauthpending"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/onlinescore"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
@@ -51,13 +55,13 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 	"github.com/ctxmesh/ctxmesh/internal/ocr"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/statelayer"
 )
 
 // defaultVersion is reported by /api/health when no version is injected at
@@ -121,6 +125,10 @@ type Server struct {
 	// facts and must not collapse into one.
 	skillStore skill.Store
 
+	// agentVersionStore is agent version history (ADR 0042): the detail page's version list and the
+	// version diff. nil (no control-plane database) ⇒ an empty list and a 501 diff.
+	agentVersionStore agentversion.Store
+
 	// publishedArtifactStore is the control-plane Postgres store for published_artifacts — the
 	// immutable, versioned snapshot-at-publish table (M74, m74.1, ADR 0068 §1). POST /api/templates
 	// snapshots an agent's source-spec into it (caller-scoped GET + INSERT, no BFF-SA RBAC); a later
@@ -169,8 +177,8 @@ type Server struct {
 	// embedder embeds chunk texts via the model gateway (M68, ADR 0061 Fork 2) for the ingestion executor's
 	// direct write path (governance #8 — the trusted worker embeds + writes, agent pods do not). nil when
 	// MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly. Constructed in
-	// cmd/bff/main.go via credplane.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
-	embedder credplane.Embedder
+	// cmd/bff/main.go via embedding.NewGatewayEmbedder (the same gateway seam the token-service memory uses).
+	embedder embedding.Embedder
 	// ocr extracts text from a scanned (image-only) PDF via the offline OCR service (M140.5, ADR 0119). The
 	// ingestion executor calls it as a FALLBACK when a PDF's born-digital text is insufficient. nil (INGEST_OCR_URL
 	// unset) ⇒ a scanned PDF stays honestly PartiallyIngested (today's behaviour) — strictly additive.
@@ -183,7 +191,7 @@ type Server struct {
 	agentCapabilities agentcapability.Store
 	// discoveryReranker optionally re-scores discovery candidates with the cross-encoder (ADR 0117). nil ⇒
 	// cosine-only ranking. Fail-open by construction — a dead reranker never breaks discovery.
-	discoveryReranker credplane.Reranker
+	discoveryReranker retrieval.Reranker
 	// discoveryEmbeddingRoute names the ModelRoute the capability query + descriptors embed through (the
 	// offline embedder, ADR 0116). Empty ⇒ discovery cannot embed and the edge serves an honest 501.
 	discoveryEmbeddingRoute string
@@ -212,17 +220,21 @@ type Server struct {
 	killScopes killscope.Store
 	// killFilter memoises the expanded claim exclusion for killFilterTTL — the claim loop runs
 	// continuously and the kill set is normally empty.
-	killFilter  killFilterCache
-	runcapBind  RuncapBindStore
-	proofOnce   sync.Once
-	popVerifier *runcap.ProofVerifier
+	killFilter killFilterCache
+	runcapBind RuncapBindStore
+	podAuth    statelayer.PodAuthenticator
+	// refusedPodTokens spares the API server a TokenReview for a pod token the attestation edge has just
+	// seen rejected.
+	refusedPodTokens refusedPodTokens
+	proofOnce        sync.Once
+	popVerifier      *runcap.ProofVerifier
 	// proofSpender shares the proof-replay set across replicas (M149 m149.4). Nil ⇒ the
 	// verifier's in-process map, which is correct at one replica and silently permissive
 	// at several.
 	proofSpender             runcap.ProofSpender
 	requireProofOfPossession bool
-	// agentURL resolves an agent's in-cluster address for async delivery. nil ⇒ the cluster-DNS default;
-	// set only by tests, which point it at an httptest server.
+	// agentURL resolves a spawned sub-agent's in-cluster address. nil ⇒ the cluster-DNS default; set only
+	// by tests. Async deliveries go to the address the capability registry records instead.
 	agentURL func(agent, namespace string) string
 
 	// datasetStore is the control-plane Postgres store for eval datasets (M69, ADR 0062 Fork 1), built from
@@ -372,6 +384,10 @@ type Server struct {
 	credentialNamespace string
 	credentialClient    client.Client
 
+	// installNamespace is the namespace the BFF runs in, the control-plane namespace. GET
+	// /api/namespaces flags it as platform-owned (isPlatformNamespace).
+	installNamespace string
+
 	// capabilitySigner mints the short-lived RUN CAPABILITY (runcap, ADR 0030 §2) at an
 	// authenticated /invoke: an EdDSA-signed JWT carrying the invoking user's hashed
 	// identity that the credential plane verifies to resolve THAT user's OBO credential.
@@ -397,11 +413,10 @@ type Server struct {
 	// default / dev). Built in NewServer from TOKEN_SERVICE_URL.
 	grantStore credresolve.GrantWriter
 
-	// oauthFlows is the SERVER-SIDE, short-TTL store of in-flight MCP OAuth 2.1
-	// authorization flows (m17.2, ADR 0016), keyed by the CSRF `state`. It holds the
-	// PKCE code_verifier + the registering caller's token — NEVER surfaced to the
-	// browser. Always non-nil (initialized in NewServer) so the OAuth register +
-	// callback handlers can use it whenever MCP is enabled.
+	// oauthFlows holds in-flight MCP OAuth flows (keyed by state) and consent tickets in the
+	// control-plane store, so any replica can complete them (ADR 0040 amendment). It holds the
+	// PKCE code_verifier + the caller's token, sealed and NEVER surfaced to the browser. Always
+	// non-nil (initialized in NewServer).
 	oauthFlows *pendingOAuthStore
 
 	// promptResolver is the OPTIONAL server-side seam for resolving a git-pointer
@@ -501,6 +516,11 @@ type Options struct {
 	// grant Secret when set (m25.1b, ADR 0029 §7). Empty ⇒ legacy per-request-namespace
 	// grants. Wired from MCP_CREDENTIAL_NAMESPACE in cmd/bff/main.go.
 	MCPCredentialNamespace string
+	// InstallNamespace is the namespace the BFF runs in (the control-plane namespace). GET
+	// /api/namespaces flags it as platform-owned so the console never opens a first visit
+	// there. Wired from POD_NAMESPACE or the ServiceAccount namespace file in cmd/bff/main.go;
+	// empty outside a cluster.
+	InstallNamespace string
 	// CredentialClient is the privileged, namespace-scoped client used to write/read/
 	// delete grant Secrets in MCPCredentialNamespace (the BFF's own SA — tenants have
 	// no RBAC there). Built in cmd/bff/main.go only when MCPCredentialNamespace is set;
@@ -522,6 +542,10 @@ type Options struct {
 	// writes the grant Secret directly (kubernetes default). Built in cmd/bff/main.go from
 	// TOKEN_SERVICE_URL (a credplane.Client over mTLS).
 	GrantStore credresolve.GrantWriter
+	// OAuthPendingStore holds in-flight MCP OAuth flows and consent tickets (ADR 0040 amendment)
+	// in the control-plane DB, so a callback or redeem that reaches another replica completes. nil
+	// ⇒ in-memory, which serves one replica only. Wired from CONTROLPLANE_DSN in cmd/bff/main.go.
+	OAuthPendingStore oauthpending.Store
 	// MCPCapabilityPrivateSeedB64 is the base64-encoded Ed25519 private seed the BFF signs
 	// run capabilities with (runcap, ADR 0030 §2/§5) — a per-cluster platform Secret. Empty
 	// ⇒ capability minting is DISABLED (an /invoke carries no capability header). Wired from
@@ -557,6 +581,9 @@ type Options struct {
 	// GET /api/catalog degrades to own-ns + public only (fail-closed), never a panic.
 	NamespaceTenantStore namespacetenant.Store
 	SkillStore           skill.Store
+	// AgentVersionStore is agent version history (ADR 0042), written by the controller. Wired from
+	// CONTROLPLANE_DSN in cmd/bff/main.go.
+	AgentVersionStore agentversion.Store
 
 	// KillScopes records active emergency stops (M146, ADR 0126). Optional: nil leaves the kill switch
 	// inert rather than failing closed on every claim, so an install that never provisions it is
@@ -625,8 +652,8 @@ type Options struct {
 	RollupStore costrollup.Store
 	// Embedder embeds chunk texts via the model gateway for the ingestion executor (M68, ADR 0061 Fork 2).
 	// Optional — nil when MODEL_GATEWAY_URL is unset ⇒ the ingest endpoint + executor degrade honestly.
-	// Constructed in cmd/bff/main.go via credplane.NewGatewayEmbedder.
-	Embedder credplane.Embedder
+	// Constructed in cmd/bff/main.go via embedding.NewGatewayEmbedder.
+	Embedder embedding.Embedder
 
 	// OCR is the offline OCR service client for scanned-PDF ingestion (M140.5, ADR 0119). Optional — nil
 	// (INGEST_OCR_URL unset) ⇒ a scanned PDF stays PartiallyIngested. Constructed in cmd/bff/main.go via
@@ -638,8 +665,8 @@ type Options struct {
 	// cpDB; the CONTROLLER writes it, the BFF only reads (ADR 0011 — no new RBAC).
 	AgentCapabilities agentcapability.Store
 	// DiscoveryReranker optionally re-scores discovery candidates with the cross-encoder (ADR 0117).
-	// Optional — nil ⇒ cosine-only. Constructed in cmd/bff/main.go via credplane.NewHTTPReranker.
-	DiscoveryReranker credplane.Reranker
+	// Optional — nil ⇒ cosine-only. Constructed in cmd/bff/main.go via retrieval.NewHTTPReranker.
+	DiscoveryReranker retrieval.Reranker
 	// DiscoveryEmbeddingRoute names the ModelRoute discovery embeds through (DISCOVERY_EMBEDDING_ROUTE).
 	// Empty ⇒ the discovery edge answers 501 rather than guessing a model.
 	DiscoveryEmbeddingRoute string
@@ -654,6 +681,11 @@ type Options struct {
 	// nil ⇒ POST /api/internal/runcap/bind is not registered, so no exchange is offered that could not
 	// be made single-use. Constructed in cmd/bff/main.go over the state-layer Valkey.
 	RuncapBind RuncapBindStore
+	// PodAuth authenticates an agent pod by its projected token for the BFF audience (TokenReview).
+	// The guardrail audit edge uses it for a capability relayed over AMP, which is bound to the
+	// caller's key and so cannot be proven by the agent that enforced the block; the AMP attestation
+	// edge uses it to learn which agent is asking (ADR 0153). Nil ⇒ both paths are off.
+	PodAuth statelayer.PodAuthenticator
 	// ProofSpender shares the proof-replay set across BFF replicas (M149 m149.4). Nil ⇒
 	// the verifier's in-process map, which is correct at one replica and silently
 	// permissive at several.
@@ -689,10 +721,11 @@ func NewServer(opts Options) *Server {
 		mcpRequireApproval:       opts.MCPRequireApproval,
 		credentialNamespace:      opts.MCPCredentialNamespace,
 		credentialClient:         opts.CredentialClient,
+		installNamespace:         strings.TrimSpace(opts.InstallNamespace),
 		tokenServiceURL:          strings.TrimRight(strings.TrimSpace(opts.TokenServiceURL), "/"),
 		tokenServiceClient:       opts.TokenServiceHTTPClient,
 		grantStore:               opts.GrantStore,
-		oauthFlows:               newPendingOAuthStore(),
+		oauthFlows:               newPendingOAuthStore(opts.OAuthPendingStore, opts.Log),
 		promptResolver:           opts.PromptResolver,
 		runStore:                 opts.RunStore,
 		convStore:                opts.ConvStore,
@@ -700,6 +733,7 @@ func NewServer(opts Options) *Server {
 		toolRegistryStore:        opts.ToolRegistryStore,
 		namespaceTenantStore:     opts.NamespaceTenantStore,
 		skillStore:               opts.SkillStore,
+		agentVersionStore:        opts.AgentVersionStore,
 		endUserVerifier:          opts.EndUserVerifier,
 		saIssuer:                 strings.TrimSpace(opts.SAIssuer),
 		endUserAgentStore:        opts.EndUserAgentStore,
@@ -728,6 +762,7 @@ func NewServer(opts Options) *Server {
 		asyncPublisher:           opts.AsyncPublisher,
 		requireProofOfPossession: opts.RequireProofOfPossession,
 		runcapBind:               opts.RuncapBind,
+		podAuth:                  opts.PodAuth,
 		proofSpender:             opts.ProofSpender,
 		spawnBudgets:             opts.SpawnBudgets,
 		killScopes:               opts.KillScopes,
@@ -874,12 +909,6 @@ func (s *Server) Handler() http.Handler {
 	// tenant's issuer + public PKCE client id here to log the end-user in. Unauthenticated (like
 	// authconfig); a uniform 404 for a ns with no end-user IdP (no tenant-existence oracle).
 	api.HandleFunc("GET /api/end-user-auth-config", s.handleEndUserAuthConfig)
-	// End-user "my runs" list (M137/EU1c, ADR 0107): host-derived + principal-scoped + store-backed
-	// (NOT the Langfuse GET /api/runs, which stays absent at an agent origin). Mounted on `api` DIRECTLY
-	// (like auth-config) so it escapes requireAuth's caller-client — a verified end-user bearer must never
-	// reach a K8s TokenReview. The handler verifies the end-user token itself + scopes the query to the
-	// principal; a non-end-user request is a uniform 404.
-	api.HandleFunc("GET /api/end-user/runs", s.handleEndUserMyRuns)
 	// Shared-run public read (M75, m75.2, ADR 0069 §1/§2) — the platform's FIRST genuinely
 	// UNAUTHENTICATED read surface. Mounted on the `api` mux DIRECTLY (a more specific pattern
 	// than "/api/"), so it is NOT behind requireAuth: a logged-out visitor with only the share
@@ -907,545 +936,391 @@ func (s *Server) Handler() http.Handler {
 	// Wired alongside the spawn edge — both are internal launcher-to-BFF endpoints authenticated on
 	// the run capability, not a browser bearer token.
 	s.registerGuardrailEventRoute(api)
+	// AMP attestation (ADR 0153): a registry member's launcher trades its pod token for the platform's
+	// statement of which agent it is, which every agent it calls verifies.
+	s.registerAMPAttestationRoute(api)
 
 	// Authenticated surface. The CRD routes run through the CALLER-SCOPED client
 	// (ADR 0011): list/create/topology reflect exactly what the caller's own RBAC
-	// permits, enforced by the K8s API server. They are wired only when the
-	// caller-client factory is configured; honest 501 otherwise (the BFF never
-	// falls back to its own SA for user CRD ops — that is the confused-deputy gap
-	// this task closes). Create additionally needs the scheme to decode manifests.
+	// permits, enforced by the K8s API server. Without the caller-client factory they
+	// answer 501 (requires): the BFF never falls back to its own SA for user CRD ops,
+	// which is the confused-deputy gap. Writes additionally need the scheme to decode
+	// manifests.
 	authed := http.NewServeMux()
-	if s.callerClients != nil {
-		authed.HandleFunc("GET /api/agents", s.handleListAgents)
-		authed.HandleFunc("GET /api/agents/census", s.handleAgentCensus)
-		// Eval-gated deploys metric (M69, ADR 0062 governance #2): the PRD §5
-		// ">50% of production deploys gated by an EvalSuite" counter. Caller-scoped
-		// (ADR 0011): reads AgentDeployments through the caller's own token — the K8s
-		// API server's RBAC decides visibility, not the BFF SA. No new RBAC grant.
-		authed.HandleFunc("GET /api/metrics/eval-gated", s.handleEvalGatedMetric)
-		// Agent detail + live log tail (m14.7, first-agent-flow.md §3). Both run
-		// through the CALLER-SCOPED client (ADR 0011): the detail read + the SSE
-		// pod-log stream act as the caller, so K8s RBAC governs them. The Go 1.22
-		// ServeMux treats "GET /api/agents", "GET /api/agents/{ns}/{name}" and
-		// ".../{name}/logs" as three DISTINCT patterns (the more specific wins), so
-		// these never shadow the list route above or the create route below.
-		authed.HandleFunc("GET /api/agents/{ns}/{name}", s.handleAgentDetail)
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/versions/diff", s.handleAgentVersionDiff)
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/logs", s.handleAgentLogs)
-		// Audit surface (M63, ADR 0056): the compliance persona reads the audit trail.
-		// Caller-scoped SSAR on the `auditlogs` resource (persona gate); nil store ⇒ 501.
-		authed.HandleFunc("GET /api/audit", s.handleListAudit)
-		// Alerts feed (M70, ADR 0063 D2): the fired-alert console feed — newest-first,
-		// namespace-scoped. Caller-scoped SSAR on `alertpolicies` (same resource the CRD
-		// path enforced); nil store ⇒ 501 (CONTROLPLANE_DSN absent). Read-only.
-		authed.HandleFunc("GET /api/alerts", s.handleListAlerts)
-		// Plan-approvals queue (M112, V5): the runs in a namespace paused on plan_approval —
-		// a reviewer's pending inbox, each row deep-linking to /runs/:id. Persona gate: one
-		// caller-scoped SSAR on `workflows` (plan_approval is workflow-only), never per-row.
-		authed.HandleFunc("GET /api/approvals", s.handleApprovals)
+	d := s.routeDeps()
+	authed.Handle("GET /api/agents", requires(s.handleListAgents, d.cluster))
+	authed.Handle("GET /api/agents/census", requires(s.handleAgentCensus, d.cluster))
+	// Eval-gated deploys metric (M69, ADR 0062 governance #2): the PRD §5
+	// ">50% of production deploys gated by an EvalSuite" counter. Caller-scoped
+	// (ADR 0011): reads AgentDeployments through the caller's own token — the K8s
+	// API server's RBAC decides visibility, not the BFF SA. No new RBAC grant.
+	authed.Handle("GET /api/metrics/eval-gated", requires(s.handleEvalGatedMetric, d.cluster))
+	// Agent detail + live log tail (m14.7, first-agent-flow.md §3). Both run
+	// through the CALLER-SCOPED client (ADR 0011): the detail read + the SSE
+	// pod-log stream act as the caller, so K8s RBAC governs them. The Go 1.22
+	// ServeMux treats "GET /api/agents", "GET /api/agents/{ns}/{name}" and
+	// ".../{name}/logs" as three DISTINCT patterns (the more specific wins), so
+	// these never shadow the list route above or the create route below.
+	authed.Handle("GET /api/agents/{ns}/{name}", requires(s.handleAgentDetail, d.cluster))
+	authed.Handle("GET /api/agents/{ns}/{name}/versions/diff", requires(s.handleAgentVersionDiff, d.cluster))
+	authed.Handle("GET /api/agents/{ns}/{name}/logs", requires(s.handleAgentLogs, d.cluster))
+	// Audit surface (M63, ADR 0056): the compliance persona reads the audit trail.
+	// Caller-scoped SSAR on the `auditlogs` resource (persona gate); nil store ⇒ 501.
+	authed.Handle("GET /api/audit", requires(s.handleListAudit, d.cluster))
+	// Alerts feed (M70, ADR 0063 D2): the fired-alert console feed — newest-first,
+	// namespace-scoped. Caller-scoped SSAR on `alertpolicies` (same resource the CRD
+	// path enforced); nil store ⇒ 501 (CONTROLPLANE_DSN absent). Read-only.
+	authed.Handle("GET /api/alerts", requires(s.handleListAlerts, d.cluster))
+	// Plan-approvals queue (M112, V5): the runs in a namespace paused on plan_approval —
+	// a reviewer's pending inbox, each row deep-linking to /runs/:id. Persona gate: one
+	// caller-scoped SSAR on `workflows` (plan_approval is workflow-only), never per-row.
+	authed.Handle("GET /api/approvals", requires(s.handleApprovals, d.cluster))
 
-		// The scoped kill switch (M146, ADR 0126). Every mutation is gated by the caller-scoped `kill`
-		// verb (see kill_handler.go) — NOT by an existing persona — and audited on every outcome
-		// including denial. The list is readable by any authenticated caller so the console can render
-		// the "this scope is stopped" banner to the people affected by it.
-		authed.HandleFunc("POST /api/kill", s.handleKill)
-		authed.HandleFunc("POST /api/kill/lift", s.handleUnkill)
-		authed.HandleFunc("GET /api/kills", s.handleListKills)
-		// Cost forecast (M70, ADR 0063 D3): linear run-rate month-end projection from
-		// the durable cost-rollup ledger. Caller-scoped SSAR on `costrollups` (persona
-		// gate â no per-row leak). nil store â 501. ?tenant= required.
-		authed.HandleFunc("GET /api/cost/forecast", s.handleCostForecast)
-		// Cost chargeback (M70, ADR 0063 D3): per-day rollup export for a calendar month.
-		// CSV when Accept: text/csv or ?format=csv, else JSON. Caller-scoped SSAR on
-		// `costrollups`. nil store â 501. ?tenant= and ?period=YYYY-MM required.
-		authed.HandleFunc("GET /api/cost/chargeback", s.handleCostChargeback)
-		// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
-		// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
-		// API server (a viewer without update is denied → 403).
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/tracepolicy", s.handleGetTracePolicy)
-		authed.HandleFunc("PUT /api/agents/{ns}/{name}/tracepolicy", s.handleUpdateTracePolicy)
-		// Long-term memory ENABLE surface (m49.3, closing the m49.1 pocket): configure the folded
-		// spec.longTermMemory capability directly (the tracepolicy pattern), caller-scoped.
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/longtermmemory", s.handleGetLongTermMemoryConfig)
-		authed.HandleFunc("PUT /api/agents/{ns}/{name}/longtermmemory", s.handleUpdateLongTermMemory)
-		// Session-memory config (M137/EU1d, ADR 0080): the console perUser toggle for spec.sessionMemory.
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/sessionmemory", s.handleGetSessionMemoryConfig)
-		authed.HandleFunc("PUT /api/agents/{ns}/{name}/sessionmemory", s.handleUpdateSessionMemory)
-		// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
-		// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/memory", s.handleAgentMemory)
-		// Online-score surface (m69.11, ADR 0062 Fork 2): the improvement-loop production signal for the
-		// agent detail page. Caller-scoped (ADR 0011): caller-Get gates access, cpDB read returns the
-		// 3-component (operational/feedback/judge) per-version aggregates. 501 when the store is absent.
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/online-score", s.handleAgentOnlineScore)
-		// Rollback (m69.11, ADR 0062 Fork 4): set the agents.ctxmesh.ai/rollback=<version> annotation
-		// on the AgentDeployment via the CALLER'S client (caller-scoped PATCH - ADR 0011). The rollback
-		// controller (m69.8) actuates the guarded spec revert; this endpoint only sets the annotation.
-		authed.HandleFunc("POST /api/agents/{ns}/{name}/rollback", s.handleAgentRollback)
-		// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
-		// history for ONE agent. CALLER-SCOPED existence check (the caller must be
-		// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
-		// `agent:<ns>/<name>` trace identity tag (cross-namespace correct). The Go 1.22
-		// ServeMux treats ".../{name}/runs" as MORE SPECIFIC than "GET .../{ns}/{name}"
-		// so it never shadows the detail GET. Wired only when the Langfuse adapter is
-		// present; absent → an honest 501 (m14.8 degrade), never a 500.
-		if s.adapters.Langfuse != nil {
-			authed.HandleFunc("GET /api/agents/{ns}/{name}/runs", s.handleAgentRuns)
-		} else {
-			authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("Langfuse per-agent runs adapter"))
-		}
-		// Agent EDIT (m15.3, ADR 0017): PUT the edited simplified spec. Two modes,
-		// keyed on the source-spec annotation — a full expand+SSA round-trip for a
-		// console-managed agent, a degraded safe-field SSA patch for an annotation-
-		// less (kubectl-created) one. It runs through the SAME CALLER-SCOPED client
-		// (ADR 0011): a viewer's PUT surfaces the API server's real 403, and the write
-		// is SSA-only under a console field-manager (never a controller-clobbering
-		// Update). The Go 1.22 ServeMux treats "GET .../{ns}/{name}" and
-		// "PUT .../{ns}/{name}" as distinct method+pattern routes, so this is additive
-		// beside the detail GET. It needs the scheme (to decode/apply manifests); when
-		// the scheme is absent the route serves an honest 501 below.
-		// Fork = install-from-template = the ONE create path (M74, m74.3, ADR 0068 §4/§6):
-		// duplicate an OWN agent in-place or install a cross-namespace PUBLISHED one, always
-		// into the CALLER's own namespace, stamping fork-origin provenance. The origin
-		// source-spec is resolved caller-scoped (own-ns live GET) or from the published
-		// snapshot (cross-ns, with a discoverability re-check gate → 404), then forked through
-		// createAgentFromYAML — no parallel fork subsystem. Like the edit route it needs the
-		// scheme (to decode/apply the expanded manifests), so it shares this scheme guard —
-		// absent scheme → an honest 501 for both. The Go 1.22 ServeMux treats this sub-path
-		// pattern as MORE SPECIFIC than the {ns}/{name} GET/PUT/DELETE routes below, so it
-		// never shadows them.
-		if s.scheme != nil {
-			authed.HandleFunc("PUT /api/agents/{ns}/{name}", s.handleUpdateAgent)
-			authed.HandleFunc("POST /api/agents/{ns}/{name}/fork", s.handleForkAgent)
-		} else {
-			authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("agent edit"))
-			authed.Handle("POST /api/agents/{ns}/{name}/fork", notImplemented("agent fork"))
-		}
-		// Agent DELETE (m15.4, ADR 0017): remove the AgentDeployment via the
-		// CALLER-SCOPED client (ADR 0011). Owned children are garbage-collected by
-		// Kubernetes; independent references (agentRef-only, no ownerRef) are left in
-		// place — orphan pruning is deferred. A viewer's DELETE surfaces the API
-		// server's real 403; no RBAC pre-emption. The Go 1.22 ServeMux treats
-		// "DELETE .../{ns}/{name}" as a DISTINCT pattern from the GET/PUT above.
-		authed.HandleFunc("DELETE /api/agents/{ns}/{name}", s.handleDeleteAgent)
-		// Publish a draft agent (ADR 0065 D1 — draft early, iterate live, publish
-		// when done): removes the agents.ctxmesh.ai/stage=draft label from the
-		// AgentDeployment so it becomes visible to the default list and team/registry
-		// consumption. Idempotent (already-published → 200 no-op). Caller-scoped
-		// (ADR 0011): the Get+Patch run through the caller's token; a viewer's Patch
-		// surfaces as 403. The Go 1.22 ServeMux treats this sub-path pattern as MORE
-		// SPECIFIC than "DELETE .../{ns}/{name}" and "GET .../{ns}/{name}", so it
-		// never shadows those routes.
-		authed.HandleFunc("POST /api/agents/{ns}/{name}/publish", s.handlePublishAgent)
-		// Snapshot-at-publish: publish an agent's source-spec as an immutable, versioned
-		// template into published_artifacts (M74, m74.1, ADR 0068 §1). POST snapshots the
-		// caller-scoped source-spec (a GET of the agent authorizes it — no BFF-SA RBAC);
-		// DELETE tombstones every version (idempotent). Both are nil-safe: a BFF without the
-		// published-artifact store serves 501, never a panic. The {kind}/{namespace}/{name}
-		// DELETE pattern is distinct from POST /api/templates so the two never conflict.
-		authed.HandleFunc("POST /api/templates", s.handlePublishTemplate)
-		authed.HandleFunc("DELETE /api/templates/{kind}/{namespace}/{name}", s.handleUnpublishTemplate)
-		// Cross-tenant template gallery (M74, m74.2, ADR 0068 §2/§3): Go-embedded recipes ∪
-		// published agents visible to the caller's tenant. Gate: caller-scoped SSAR `list
-		// agentdeployments` in callerNS (membership proof — amended-ADR-0011 model; NO BFF-SA
-		// RBAC grant; SelfSubjectAccessReview is a self-check the caller's token authorizes).
-		// The Go 1.22 ServeMux treats "GET /api/templates" as distinct from POST + DELETE above.
-		authed.HandleFunc("GET /api/templates", s.handleTemplates)
-		// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding and
-		// AgentScalingPolicy in the namespace that reference the named agent by
-		// spec.agentRef, classifying each as GC'd (owned) or orphan (independent
-		// reference). The Go 1.22 ServeMux treats this sub-path pattern
-		// as MORE SPECIFIC than "GET .../{ns}/{name}" and so it never shadows the
-		// detail GET above.
-		authed.HandleFunc("GET /api/agents/{ns}/{name}/references", s.handleAgentReferences)
-		authed.HandleFunc("GET /api/usedby", s.handleUsedBy)
-		authed.HandleFunc("GET /api/topology", s.handleTopology)
-		// ModelRoute CRUD (m15.5): direct edit — no expand, no source-spec
-		// annotation. Five endpoints following the list contract for GET /list and
-		// the SSA-under-console-field-manager pattern for PUT. The scheme is needed
-		// for SSA (ensureGVK); when absent the write routes serve 501 honestly.
-		authed.HandleFunc("GET /api/modelroutes", s.handleListModelRoutes)
-		authed.HandleFunc("GET /api/modelroutes/{ns}/{name}", s.handleGetModelRoute)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/modelroutes", s.handleCreateModelRoute)
-			authed.HandleFunc("PUT /api/modelroutes/{ns}/{name}", s.handleUpdateModelRoute)
-		} else {
-			authed.Handle("POST /api/modelroutes", notImplemented("model route create"))
-			authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("model route update"))
-		}
-		authed.HandleFunc("DELETE /api/modelroutes/{ns}/{name}", s.handleDeleteModelRoute)
-		// SecretBinding CRUD (m15.6): direct edit — no expand, no source-spec
-		// annotation. Five endpoints following the list contract for GET /list and
-		// the SSA-under-console-field-manager pattern for PUT.
-		//
-		// SECURITY (ADR 0015): the BFF NEVER reads the referenced Kubernetes Secret
-		// to return its data. Every DTO projects only the SecretBinding CRD's own
-		// fields — which Secret name, which key — plus status. The credential value
-		// lives only in the Secret; it never flows through this API surface.
-		//
-		// The scheme is needed for SSA (ensureGVK); when absent the write routes
-		// serve 501 honestly. The GET routes do not need the scheme.
-		authed.HandleFunc("GET /api/secretbindings", s.handleListSecretBindings)
-		authed.HandleFunc("GET /api/secretbindings/{ns}/{name}", s.handleGetSecretBinding)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/secretbindings", s.handleCreateSecretBinding)
-			authed.HandleFunc("PUT /api/secretbindings/{ns}/{name}", s.handleUpdateSecretBinding)
-		} else {
-			authed.Handle("POST /api/secretbindings", notImplemented("secret binding create"))
-			authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("secret binding update"))
-		}
-		authed.HandleFunc("DELETE /api/secretbindings/{ns}/{name}", s.handleDeleteSecretBinding)
-		// AgentRegistry CRUD (m15.7): direct edit — no expand, no source-spec
-		// annotation. Five endpoints following the list contract for GET /list and
-		// the SSA-under-console-field-manager pattern for PUT.
-		//
-		// SECURITY INVARIANT: the console CANNOT alter the egress posture. The SSA
-		// apply object carries only the AgentRegistry spec (memberSelector, guards,
-		// roles); the controller-owned NetworkPolicy (M6 whitelist + M11 default-deny)
-		// is never touched. There is no egress/allowlist field in any DTO.
-		//
-		// registryId is immutable after creation (CRD XValidation). The PUT body has
-		// no registryId field, so an edit cannot change it: a submitted value is
-		// ignored and the live value is preserved (the PUT returns 200). Immutability
-		// holds by construction, not by an API-server rejection.
-		//
-		// The scheme is needed for SSA (ensureGVK); when absent the write routes
-		// serve 501 honestly. The GET routes do not need the scheme.
-		authed.HandleFunc("GET /api/agentregistries", s.handleListAgentRegistries)
-		authed.HandleFunc("GET /api/agentregistries/{ns}/{name}", s.handleGetAgentRegistry)
-
-		// KnowledgeBase list + detail (m68.13): read the caller's KB CRs — name, phase, counts.
-		// Caller-scoped (ADR 0011): the BFF lists/gets through the caller's own client so K8s RBAC
-		// governs who can read KBs. 403 when denied; 404 on a missing KB (detail only).
-		authed.HandleFunc("GET /api/knowledgebases", s.handleListKBs)
-		authed.HandleFunc("GET /api/knowledgebases/{name}", s.handleGetKB)
-
-		// KnowledgeBase test-query (m68.13): the console test-query panel — verify the KB exists
-		// (caller-scoped, 404 if absent) then forward to the token-service /v1/knowledge/search
-		// with the KB's embeddingRoute. Returns ranked chunks + citations. 501 when the token-service
-		// is unconfigured (TOKEN_SERVICE_URL unset).
-		authed.HandleFunc("POST /api/knowledgebases/{name}/search", s.handleSearchKB)
-
-		// KnowledgeBase document upload (M68, ADR 0061 Fork 4): stream a raw document body
-		// into the durable KB bucket at KnowledgeKey(ns, kbName, filename). Caller-scoped:
-		// the BFF verifies the KB exists in the caller's namespace before writing (honest 404
-		// when absent; 403 when RBAC denies the GET; 501 when OBJECT_STORE_ADDR is unset;
-		// 413 when the body exceeds maxDocumentUploadBytes). Returns 201 + {documentRef, key, size}.
-		authed.HandleFunc("POST /api/knowledgebases/{name}/documents", s.handleUploadKBDocument)
-
-		// KnowledgeBase ingestion trigger (M68, ADR 0061 Fork 2): resolve the KB's source documents,
-		// pin an IngestionSpec, and create a durable ingestion Run the worker drives (extract → chunk →
-		// embed → upsert, cursor-resumable). Caller-scoped (404 when the KB is absent; 501 when the
-		// knowledge store / embedder / object store is unwired). Returns 202 + {runId, status, documentCount}.
-		authed.HandleFunc("POST /api/knowledgebases/{name}/ingest", s.handleIngestKB)
-
-		// Dataset export trigger (M69, ADR 0062 Fork 1): pin an ExportSpec (target dataset + agent tag +
-		// timerange) and create a durable export Run the worker drives — it copies production traces OUT of
-		// Langfuse into the control-plane dataset store, M66-REDACTED (the PII P1), with source-trace lineage.
-		// Caller-scoped (ADR 0011): the caller's own token gates who can trigger an export. 501 when the dataset
-		// store / Langfuse adapter is unwired; 400 on a bad body. Returns 202 + {runId, status}.
-		authed.HandleFunc("POST /api/datasets/{name}/export", s.handleExportDataset)
-
-		// Dataset labeling API (M69, ADR 0062 Fork 5 — the improvement loop's human-labeling path).
-		// Caller-scoped (ADR 0011): the caller must present a valid token; the author on a label append is
-		// derived from the authenticated caller identity (SelfSubjectReview), never a client field.
-		// All degrade honestly (501) when the dataset store is not configured.
-		//
-		// NOTE: Go 1.22 ServeMux: "POST /api/datasets/{name}/cases/from-run" is MORE SPECIFIC than
-		// "POST /api/datasets/{name}/cases/{caseId}/labels" because the literal segment "from-run" is
-		// longer than the wildcard, so the from-run route wins on that path and the label route never
-		// sees it — the two patterns do not conflict.
-		authed.HandleFunc("GET /api/datasets", s.handleListDatasets)
-		authed.HandleFunc("GET /api/datasets/{name}/cases", s.handleListDatasetCases)
-		authed.HandleFunc("POST /api/datasets/{name}/cases/{caseId}/labels", s.handleAppendLabel)
-		authed.HandleFunc("POST /api/datasets/{name}/cases/from-run", s.handleFromRun)
-		authed.HandleFunc("POST /api/datasets/{name}/pin", s.handlePinDataset)
-
-		// Tenants (M47, ADR 0046): cluster-scoped, caller-scoped. Read + create (M99 C4 — operators
-		// manage tenants; RBAC is the API server's real answer via the caller-scoped client).
-		authed.HandleFunc("GET /api/tenants", s.handleListTenants)
-		authed.HandleFunc("POST /api/tenants", s.handleCreateTenant)
-		// Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator
-		// on the list. Registered before the {name} routes; the literal "usage" segment
-		// takes precedence over the {name} wildcard (Go 1.22 ServeMux).
-		authed.HandleFunc("GET /api/tenants/usage", s.handleTenantUsageList)
-		authed.HandleFunc("GET /api/tenants/{name}", s.handleGetTenant)
-		// Live usage vs cap (M49, the M47-review P0): the tenant's current spend/rpm/inflight from Valkey.
-		authed.HandleFunc("GET /api/tenants/{name}/usage", s.handleTenantUsage)
-		// AgentTeams (M64, ADR 0057): read-only list of orchestration rosters, caller-scoped.
-		authed.HandleFunc("GET /api/teams", s.handleListTeams)
-		// Team create (ADR 0065 D4): caller-scoped CRD create from a reviewed AgentTeam YAML.
-		// The Go 1.22 ServeMux distinguishes "POST /api/teams" from "GET /api/teams".
-		authed.HandleFunc("POST /api/teams", s.handleCreateTeam)
-		// Team generation (ADR 0065 D4): compose an AgentTeamSpec from existing registry members.
-		// Caller-scoped, cost-tagged, NEVER auto-applies â returns spec + eligible members for review.
-		// The Go 1.22 ServeMux treats "POST /api/teams/generate" as distinct from "GET /api/teams".
-		authed.HandleFunc("POST /api/teams/generate", s.handleGenerateTeam)
-		// GuardrailPolicies (m66.10, ADR 0059): read-only list of content-governance policies, caller-scoped.
-		authed.HandleFunc("GET /api/guardrailpolicies", s.handleListGuardrailPolicies)
-		// Workflows (m67.9, ADR 0060): read-only list of Workflow CRs, caller-scoped.
-		authed.HandleFunc("GET /api/workflows", s.handleListWorkflows)
-		// Workflow declared DAG (M144-canvas, ADR 0115): the step graph for the canvas.
-		authed.HandleFunc("GET /api/workflows/{ns}/{name}", s.handleGetWorkflow)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/agentregistries", s.handleCreateAgentRegistry)
-			authed.HandleFunc("PUT /api/agentregistries/{ns}/{name}", s.handleUpdateAgentRegistry)
-		} else {
-			authed.Handle("POST /api/agentregistries", notImplemented("agent registry create"))
-			authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("agent registry update"))
-		}
-		authed.HandleFunc("DELETE /api/agentregistries/{ns}/{name}", s.handleDeleteAgentRegistry)
-		// ToolRegistry CRUD (m17.5): direct edit of the operator-curated tool catalog.
-		// Five endpoints following the list contract for GET /list and SSA for PUT/POST.
-		// IMPORTANT: the m14.6 GET /api/tools merged catalog (distinct route, distinct
-		// handler) is NOT affected — these routes are /api/toolregistries, not /api/tools.
-		// The PUT preserves each tool entry's approvalStatus (controller/approval-owned);
-		// the console CRUD edits the curated fields, never the approval state.
-		// The scheme is needed for SSA (ensureGVK); when absent the write routes serve 501.
-		authed.HandleFunc("GET /api/toolregistries", s.handleListToolRegistries)
-		authed.HandleFunc("GET /api/toolregistries/{ns}/{name}", s.handleGetToolRegistry)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/toolregistries", s.handleCreateToolRegistry)
-			authed.HandleFunc("PUT /api/toolregistries/{ns}/{name}", s.handleUpdateToolRegistry)
-		} else {
-			authed.Handle("POST /api/toolregistries", notImplemented("tool registry create"))
-			authed.Handle("PUT /api/toolregistries/{ns}/{name}", notImplemented("tool registry update"))
-		}
-		authed.HandleFunc("DELETE /api/toolregistries/{ns}/{name}", s.handleDeleteToolRegistry)
-		// MCPToolBinding CRUD (m17.5): direct edit of the tool-to-agent bindings.
-		// Five endpoints following the list contract + SSA. The detail DTO surfaces
-		// the HONEST hot-update propagation status: "propagated" only when the
-		// controller's Ready=True (tool registered, pin-matched, rendered + pushed to
-		// the discovery sidecar); failure reason when Ready=False (UnregisteredTool /
-		// RegistryMismatch); "pending" when the condition is absent. The console NEVER
-		// reports "propagated" unless the controller confirms it — the m16 honest-contract
-		// lesson. SSA never clobbles the controller's status/Ready condition.
-		authed.HandleFunc("GET /api/mcptoolbindings", s.handleListMCPToolBindings)
-		authed.HandleFunc("GET /api/mcptoolbindings/{ns}/{name}", s.handleGetMCPToolBinding)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/mcptoolbindings", s.handleCreateMCPToolBinding)
-			authed.HandleFunc("PUT /api/mcptoolbindings/{ns}/{name}", s.handleUpdateMCPToolBinding)
-		} else {
-			authed.Handle("POST /api/mcptoolbindings", notImplemented("MCP tool binding create"))
-			authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("MCP tool binding update"))
-		}
-		authed.HandleFunc("DELETE /api/mcptoolbindings/{ns}/{name}", s.handleDeleteMCPToolBinding)
-		// (MemoryBinding CRUD retired in M127/ADR 0101 — session memory is now the
-		// folded AgentDeployment.spec.sessionMemory field, authored via the agent form.)
-		// AgentScalingPolicy CRUD (m17.6): direct edit of elastic scaling rules for
-		// AgentDeployments. Five endpoints following the list contract + SSA.
-		// CRD XValidations (max>=min, schedule required when trigger=schedule) are
-		// enforced by the API server — rejections surface as honest 422 with the
-		// server's message. The BFF does not re-implement these rules.
-		// agentRef is NOT CRD-immutable — a PUT that changes agentRef is accepted
-		// and applied. The scheme is needed for SSA; absent → 501.
-		authed.HandleFunc("GET /api/agentscalingpolicies", s.handleListAgentScalingPolicies)
-		authed.HandleFunc("GET /api/agentscalingpolicies/{ns}/{name}", s.handleGetAgentScalingPolicy)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/agentscalingpolicies", s.handleCreateAgentScalingPolicy)
-			authed.HandleFunc("PUT /api/agentscalingpolicies/{ns}/{name}", s.handleUpdateAgentScalingPolicy)
-		} else {
-			authed.Handle("POST /api/agentscalingpolicies", notImplemented("agent scaling policy create"))
-			authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("agent scaling policy update"))
-		}
-		authed.HandleFunc("DELETE /api/agentscalingpolicies/{ns}/{name}", s.handleDeleteAgentScalingPolicy)
-		// EvalSuite CRUD (m17.7): direct edit of eval gate configurations.
-		// The detail DTO surfaces dataset/scorers/gate/threshold + the controller's
-		// status.conditions (gate/pass/block outcome). The /results sub-resource
-		// merges the CRD status with Langfuse scores honestly: scoresAvailable:false
-		// + reason when Langfuse is absent or traceId not supplied; real scores when
-		// both are present. Controller status.conditions are NEVER clobbered (SSA spec-only).
-		authed.HandleFunc("GET /api/evalsuites", s.handleListEvalSuites)
-		authed.HandleFunc("GET /api/evalsuites/{ns}/{name}", s.handleGetEvalSuite)
-		// Results always wired: degrades honestly (scoresAvailable:false) when Langfuse absent.
-		authed.HandleFunc("GET /api/evalsuites/{ns}/{name}/results", s.handleGetEvalSuiteResults)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/evalsuites", s.handleCreateEvalSuite)
-			authed.HandleFunc("PUT /api/evalsuites/{ns}/{name}", s.handleUpdateEvalSuite)
-		} else {
-			authed.Handle("POST /api/evalsuites", notImplemented("eval suite create"))
-			authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("eval suite update"))
-		}
-		authed.HandleFunc("DELETE /api/evalsuites/{ns}/{name}", s.handleDeleteEvalSuite)
-		// PromptVersion CRUD + diff (m17.8): direct edit of git-backed prompt pointers.
-		// The detail DTO surfaces git (repo/ref/path) + status.conditions.
-		// The /diff sub-resource resolves the two PromptVersions' git pointers via the
-		// optional prompt Resolver and returns a TEXTUAL line diff of the resolved content.
-		// If no resolver is configured → the diff endpoint returns an honest 501 (never
-		// fabricates content). ErrNotFound → 404; transient resolve failure → 502.
-		// Controller status.conditions are NEVER clobbered (SSA spec-only applies).
-		authed.HandleFunc("GET /api/promptversions", s.handleListPromptVersions)
-		authed.HandleFunc("GET /api/promptversions/{ns}/{name}", s.handleGetPromptVersion)
-		// Diff is always wired (degrades to 501 when no resolver configured).
-		authed.HandleFunc("GET /api/promptversions/{ns}/{name}/diff", s.handlePromptVersionDiff)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/promptversions", s.handleCreatePromptVersion)
-			authed.HandleFunc("PUT /api/promptversions/{ns}/{name}", s.handleUpdatePromptVersion)
-		} else {
-			authed.Handle("POST /api/promptversions", notImplemented("prompt version create"))
-			authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("prompt version update"))
-		}
-		authed.HandleFunc("DELETE /api/promptversions/{ns}/{name}", s.handleDeletePromptVersion)
-
-		// Skills (ADR 0137). Postgres-authoritative like promptversions, and authorized the
-		// same way: a caller-scoped SSAR on `skills`, so the BFF gains no privilege and the
-		// decision is exactly the one the API server would have made for a CRD.
-		authed.HandleFunc("GET /api/skills", s.handleListSkills)
-		authed.HandleFunc("GET /api/skills/{ns}/{name}", s.handleGetSkill)
-		authed.HandleFunc("POST /api/skills", s.handleUpsertSkill)
-		authed.HandleFunc("POST /api/skills/{ns}/{name}/versions", s.handleAddSkillVersion)
-		authed.HandleFunc("DELETE /api/skills/{ns}/{name}", s.handleDeleteSkill)
-		// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
-		// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
-		// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
-		// is a caller-scoped list. Gated on the same factor as the CRD routes: nil
-		// factory → 501, never a fallback to the BFF SA.
-		authed.HandleFunc("GET /api/whoami", s.handleWhoAmI)
-		authed.HandleFunc("GET /api/capabilities", s.handleCapabilities)
-		authed.HandleFunc("GET /api/namespaces", s.handleNamespaces)
-		// PUT /api/namespaces/{name}/display-name — set or clear the human-readable
-		// display label on a namespace (ADR 0068 §7). Caller needs "update namespaces";
-		// the API server enforces it — honest 403 if denied. "workspace" is UI-only.
-		authed.HandleFunc("PUT /api/namespaces/{name}/display-name", s.handleSetNamespaceDisplayName)
-		if s.scheme != nil {
-			authed.HandleFunc("POST /api/agents", s.handleCreateAgent)
-		} else {
-			authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
-		}
-	} else {
-		authed.Handle("GET /api/agents", notImplemented("caller-scoped agent list"))
-		authed.Handle("GET /api/agents/{ns}/{name}", notImplemented("caller-scoped agent detail"))
-		authed.Handle("GET /api/agents/{ns}/{name}/logs", notImplemented("caller-scoped agent logs"))
-		authed.Handle("GET /api/agents/{ns}/{name}/runs", notImplemented("caller-scoped agent runs"))
-		authed.Handle("PUT /api/agents/{ns}/{name}", notImplemented("caller-scoped agent edit"))
-		authed.Handle("DELETE /api/agents/{ns}/{name}", notImplemented("caller-scoped agent delete"))
-		authed.Handle("POST /api/agents/{ns}/{name}/publish", notImplemented("caller-scoped agent publish"))
-		authed.Handle("GET /api/agents/{ns}/{name}/references", notImplemented("caller-scoped agent references"))
-		authed.Handle("GET /api/topology", notImplemented("caller-scoped topology"))
-		authed.Handle("GET /api/modelroutes", notImplemented("caller-scoped model route list"))
-		authed.Handle("GET /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route detail"))
-		authed.Handle("POST /api/modelroutes", notImplemented("caller-scoped model route create"))
-		authed.Handle("PUT /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route update"))
-		authed.Handle("DELETE /api/modelroutes/{ns}/{name}", notImplemented("caller-scoped model route delete"))
-		authed.Handle("GET /api/secretbindings", notImplemented("caller-scoped secret binding list"))
-		authed.Handle("GET /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding detail"))
-		authed.Handle("POST /api/secretbindings", notImplemented("caller-scoped secret binding create"))
-		authed.Handle("PUT /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding update"))
-		authed.Handle("DELETE /api/secretbindings/{ns}/{name}", notImplemented("caller-scoped secret binding delete"))
-		authed.Handle("GET /api/agentregistries", notImplemented("caller-scoped agent registry list"))
-		authed.Handle("GET /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry detail"))
-		authed.Handle("POST /api/agentregistries", notImplemented("caller-scoped agent registry create"))
-		authed.Handle("PUT /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry update"))
-		authed.Handle("DELETE /api/agentregistries/{ns}/{name}", notImplemented("caller-scoped agent registry delete"))
-		authed.Handle("GET /api/toolregistries", notImplemented("caller-scoped tool registry list"))
-		authed.Handle("GET /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry detail"))
-		authed.Handle("POST /api/toolregistries", notImplemented("caller-scoped tool registry create"))
-		authed.Handle("PUT /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry update"))
-		authed.Handle("DELETE /api/toolregistries/{ns}/{name}", notImplemented("caller-scoped tool registry delete"))
-		authed.Handle("GET /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding list"))
-		authed.Handle("GET /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding detail"))
-		authed.Handle("POST /api/mcptoolbindings", notImplemented("caller-scoped MCP tool binding create"))
-		authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding update"))
-		authed.Handle("DELETE /api/mcptoolbindings/{ns}/{name}", notImplemented("caller-scoped MCP tool binding delete"))
-		authed.Handle("GET /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy list"))
-		authed.Handle("GET /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy detail"))
-		authed.Handle("POST /api/agentscalingpolicies", notImplemented("caller-scoped agent scaling policy create"))
-		authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy update"))
-		authed.Handle("DELETE /api/agentscalingpolicies/{ns}/{name}", notImplemented("caller-scoped agent scaling policy delete"))
-		authed.Handle("GET /api/evalsuites", notImplemented("caller-scoped eval suite list"))
-		authed.Handle("GET /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite detail"))
-		authed.Handle("GET /api/evalsuites/{ns}/{name}/results", notImplemented("caller-scoped eval suite results"))
-		authed.Handle("POST /api/evalsuites", notImplemented("caller-scoped eval suite create"))
-		authed.Handle("PUT /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite update"))
-		authed.Handle("DELETE /api/evalsuites/{ns}/{name}", notImplemented("caller-scoped eval suite delete"))
-		authed.Handle("GET /api/promptversions", notImplemented("caller-scoped prompt version list"))
-		authed.Handle("GET /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version detail"))
-		authed.Handle("GET /api/promptversions/{ns}/{name}/diff", notImplemented("caller-scoped prompt version diff"))
-		authed.Handle("POST /api/promptversions", notImplemented("caller-scoped prompt version create"))
-		authed.Handle("PUT /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version update"))
-		authed.Handle("DELETE /api/promptversions/{ns}/{name}", notImplemented("caller-scoped prompt version delete"))
-		authed.Handle("GET /api/skills", notImplemented("caller-scoped skill list"))
-		authed.Handle("GET /api/skills/{ns}/{name}", notImplemented("caller-scoped skill detail"))
-		authed.Handle("POST /api/skills", notImplemented("caller-scoped skill create"))
-		authed.Handle("POST /api/skills/{ns}/{name}/versions", notImplemented("caller-scoped skill version add"))
-		authed.Handle("DELETE /api/skills/{ns}/{name}", notImplemented("caller-scoped skill delete"))
-		authed.Handle("GET /api/whoami", notImplemented("caller-scoped whoami"))
-		authed.Handle("GET /api/capabilities", notImplemented("caller-scoped capabilities"))
-		authed.Handle("GET /api/namespaces", notImplemented("caller-scoped namespaces"))
-		authed.Handle("PUT /api/namespaces/{name}/display-name", notImplemented("caller-scoped namespace display-name"))
-		authed.Handle("POST /api/agents", notImplemented("config-builder apply"))
-		authed.Handle("GET /api/guardrailpolicies", notImplemented("caller-scoped guardrail policy list"))
-		authed.Handle("GET /api/workflows", notImplemented("caller-scoped workflow list"))
-		authed.Handle("GET /api/workflows/{ns}/{name}", notImplemented("caller-scoped workflow detail"))
-		authed.Handle("GET /api/alerts", notImplemented("caller-scoped alerts feed"))
-		authed.Handle("GET /api/approvals", notImplemented("caller-scoped approval queue"))
-		authed.Handle("GET /api/knowledgebases", notImplemented("caller-scoped KB list"))
-		authed.Handle("GET /api/knowledgebases/{name}", notImplemented("caller-scoped KB detail"))
-		authed.Handle("POST /api/knowledgebases/{name}/search", notImplemented("caller-scoped KB test-query"))
-		authed.Handle("POST /api/knowledgebases/{name}/documents", notImplemented("caller-scoped KB document upload"))
-		authed.Handle("GET /api/agents/{ns}/{name}/online-score", notImplemented("caller-scoped online score"))
-		authed.Handle("POST /api/agents/{ns}/{name}/rollback", notImplemented("caller-scoped agent rollback"))
+	// The scoped kill switch (M146, ADR 0126). Every mutation is gated by the caller-scoped `kill`
+	// verb (see kill_handler.go) — NOT by an existing persona — and audited on every outcome
+	// including denial. The list is readable by any authenticated caller so the console can render
+	// the "this scope is stopped" banner to the people affected by it.
+	authed.Handle("POST /api/kill", requires(s.handleKill, d.cluster))
+	authed.Handle("POST /api/kill/lift", requires(s.handleUnkill, d.cluster))
+	authed.Handle("GET /api/kills", requires(s.handleListKills, d.cluster))
+	// Cost forecast (M70, ADR 0063 D3): linear run-rate month-end projection from
+	// the durable cost-rollup ledger. Caller-scoped SSAR on `costrollups` (persona
+	// gate â no per-row leak). nil store â 501. ?tenant= required.
+	authed.Handle("GET /api/cost/forecast", requires(s.handleCostForecast, d.cluster))
+	// Cost chargeback (M70, ADR 0063 D3): per-day rollup export for a calendar month.
+	// CSV when Accept: text/csv or ?format=csv, else JSON. Caller-scoped SSAR on
+	// `costrollups`. nil store â 501. ?tenant= and ?period=YYYY-MM required.
+	authed.Handle("GET /api/cost/chargeback", requires(s.handleCostChargeback, d.cluster))
+	// Redaction-policy editor (m18.13, ADR 0019): read/replace the agent's custom
+	// trace-redaction detectors. Both caller-scoped; the PUT is enforced by the
+	// API server (a viewer without update is denied → 403).
+	authed.Handle("GET /api/agents/{ns}/{name}/tracepolicy", requires(s.handleGetTracePolicy, d.cluster))
+	authed.Handle("PUT /api/agents/{ns}/{name}/tracepolicy", requires(s.handleUpdateTracePolicy, d.cluster))
+	// Long-term memory ENABLE surface (m49.3, closing the m49.1 pocket): configure the folded
+	// spec.longTermMemory capability directly (the tracepolicy pattern), caller-scoped.
+	authed.Handle("GET /api/agents/{ns}/{name}/longtermmemory", requires(s.handleGetLongTermMemoryConfig, d.cluster))
+	authed.Handle("PUT /api/agents/{ns}/{name}/longtermmemory", requires(s.handleUpdateLongTermMemory, d.cluster))
+	// Session-memory config (M137/EU1d, ADR 0080): the console perUser toggle for spec.sessionMemory.
+	authed.Handle("GET /api/agents/{ns}/{name}/sessionmemory", requires(s.handleGetSessionMemoryConfig, d.cluster))
+	authed.Handle("PUT /api/agents/{ns}/{name}/sessionmemory", requires(s.handleUpdateSessionMemory, d.cluster))
+	// Long-term memory viewer (m46.6, ADR 0045): list an agent's `agent`-scope memories. Caller-scoped
+	// (the caller must be able to `get` the agent) then a store read. 501 when no memory store is wired.
+	authed.Handle("GET /api/agents/{ns}/{name}/memory", requires(s.handleAgentMemory, d.cluster))
+	// Online-score surface (m69.11, ADR 0062 Fork 2): the improvement-loop production signal for the
+	// agent detail page. Caller-scoped (ADR 0011): caller-Get gates access, cpDB read returns the
+	// 3-component (operational/feedback/judge) per-version aggregates. 501 when the store is absent.
+	authed.Handle("GET /api/agents/{ns}/{name}/online-score", requires(s.handleAgentOnlineScore, d.cluster))
+	// Rollback (m69.11, ADR 0062 Fork 4): set the agents.ctxmesh.ai/rollback=<version> annotation
+	// on the AgentDeployment via the CALLER'S client (caller-scoped PATCH - ADR 0011). The rollback
+	// controller (m69.8) actuates the guarded spec revert; this endpoint only sets the annotation.
+	authed.Handle("POST /api/agents/{ns}/{name}/rollback", requires(s.handleAgentRollback, d.cluster))
+	// Per-agent recent runs (m15.9, first-agent-flow.md §3): the bounded run
+	// history for ONE agent. CALLER-SCOPED existence check (the caller must be
+	// able to `get` the agent) THEN a server-side Langfuse fetch filtered to the
+	// `agent:<ns>/<name>` trace identity tag (cross-namespace correct). The Go 1.22
+	// ServeMux treats ".../{name}/runs" as MORE SPECIFIC than "GET .../{ns}/{name}"
+	// so it never shadows the detail GET. Without a trace store the agent's runs
+	// come from the run store (ADR 0150).
+	agentRuns := s.handleStoreAgentRuns
+	if s.adapters.Langfuse != nil {
+		agentRuns = s.handleAgentRuns
 	}
+	authed.Handle("GET /api/agents/{ns}/{name}/runs", requires(agentRuns, d.cluster))
+	// Agent EDIT (m15.3, ADR 0017): PUT the edited simplified spec. Two modes,
+	// keyed on the source-spec annotation — a full expand+SSA round-trip for a
+	// console-managed agent, a degraded safe-field SSA patch for an annotation-
+	// less (kubectl-created) one. It runs through the SAME CALLER-SCOPED client
+	// (ADR 0011): a viewer's PUT surfaces the API server's real 403, and the write
+	// is SSA-only under a console field-manager (never a controller-clobbering
+	// Update). The Go 1.22 ServeMux treats "GET .../{ns}/{name}" and
+	// "PUT .../{ns}/{name}" as distinct method+pattern routes, so this is additive
+	// beside the detail GET. It needs the scheme (to decode/apply manifests).
+	// Fork = install-from-template = the ONE create path (M74, m74.3, ADR 0068 §4/§6):
+	// duplicate an OWN agent in-place or install a cross-namespace PUBLISHED one, always
+	// into the CALLER's own namespace, stamping fork-origin provenance. The origin
+	// source-spec is resolved caller-scoped (own-ns live GET) or from the published
+	// snapshot (cross-ns, with a discoverability re-check gate → 404), then forked through
+	// createAgentFromYAML — no parallel fork subsystem. Like the edit route it needs the
+	// scheme (to decode/apply the expanded manifests). The Go 1.22 ServeMux treats this sub-path
+	// pattern as MORE SPECIFIC than the {ns}/{name} GET/PUT/DELETE routes below, so it
+	// never shadows them.
+	authed.Handle("PUT /api/agents/{ns}/{name}", requires(s.handleUpdateAgent, d.cluster, d.scheme))
+	authed.Handle("POST /api/agents/{ns}/{name}/fork", requires(s.handleForkAgent, d.cluster, d.scheme))
+	// Agent DELETE (m15.4, ADR 0017): remove the AgentDeployment via the
+	// CALLER-SCOPED client (ADR 0011). Owned children are garbage-collected by
+	// Kubernetes; independent references (agentRef-only, no ownerRef) are left in
+	// place — orphan pruning is deferred. A viewer's DELETE surfaces the API
+	// server's real 403; no RBAC pre-emption. The Go 1.22 ServeMux treats
+	// "DELETE .../{ns}/{name}" as a DISTINCT pattern from the GET/PUT above.
+	authed.Handle("DELETE /api/agents/{ns}/{name}", requires(s.handleDeleteAgent, d.cluster))
+	// Publish a draft agent (ADR 0065 D1 — draft early, iterate live, publish
+	// when done): removes the agents.ctxmesh.ai/stage=draft label from the
+	// AgentDeployment so it becomes visible to the default list and team/registry
+	// consumption. Idempotent (already-published → 200 no-op). Caller-scoped
+	// (ADR 0011): the Get+Patch run through the caller's token; a viewer's Patch
+	// surfaces as 403. The Go 1.22 ServeMux treats this sub-path pattern as MORE
+	// SPECIFIC than "DELETE .../{ns}/{name}" and "GET .../{ns}/{name}", so it
+	// never shadows those routes.
+	authed.Handle("POST /api/agents/{ns}/{name}/publish", requires(s.handlePublishAgent, d.cluster))
+	// Snapshot-at-publish: publish an agent's source-spec as an immutable, versioned
+	// template into published_artifacts (M74, m74.1, ADR 0068 §1). POST snapshots the
+	// caller-scoped source-spec (a GET of the agent authorizes it — no BFF-SA RBAC);
+	// DELETE tombstones every version (idempotent). Both are nil-safe: a BFF without the
+	// published-artifact store serves 501, never a panic. The {kind}/{namespace}/{name}
+	// DELETE pattern is distinct from POST /api/templates so the two never conflict.
+	authed.Handle("POST /api/templates", requires(s.handlePublishTemplate, d.cluster))
+	authed.Handle("DELETE /api/templates/{kind}/{namespace}/{name}", requires(s.handleUnpublishTemplate, d.cluster))
+	// Cross-tenant template gallery (M74, m74.2, ADR 0068 §2/§3): Go-embedded recipes ∪
+	// published agents visible to the caller's tenant. Gate: caller-scoped SSAR `list
+	// agentdeployments` in callerNS (membership proof — amended-ADR-0011 model; NO BFF-SA
+	// RBAC grant; SelfSubjectAccessReview is a self-check the caller's token authorizes).
+	// The Go 1.22 ServeMux treats "GET /api/templates" as distinct from POST + DELETE above.
+	authed.Handle("GET /api/templates", requires(s.handleTemplates, d.cluster))
+	// Delete-impact preview (m15.4, ADR 0017): lists MCPToolBinding and
+	// AgentScalingPolicy in the namespace that reference the named agent by
+	// spec.agentRef, classifying each as GC'd (owned) or orphan (independent
+	// reference). The Go 1.22 ServeMux treats this sub-path pattern
+	// as MORE SPECIFIC than "GET .../{ns}/{name}" and so it never shadows the
+	// detail GET above.
+	authed.Handle("GET /api/agents/{ns}/{name}/references", requires(s.handleAgentReferences, d.cluster))
+	authed.Handle("GET /api/usedby", requires(s.handleUsedBy, d.cluster))
+	authed.Handle("GET /api/topology", requires(s.handleTopology, d.cluster))
+	// ModelRoute CRUD (m15.5): direct edit — no expand, no source-spec
+	// annotation. Five endpoints following the list contract for GET /list and
+	// the SSA-under-console-field-manager pattern for PUT. The scheme is needed
+	// for SSA (ensureGVK); when absent the write routes serve 501 honestly.
+	authed.Handle("GET /api/modelroutes", requires(s.handleListModelRoutes, d.cluster))
+	authed.Handle("GET /api/modelroutes/{ns}/{name}", requires(s.handleGetModelRoute, d.cluster))
+	authed.Handle("POST /api/modelroutes", requires(s.handleCreateModelRoute, d.cluster, d.scheme))
+	authed.Handle("PUT /api/modelroutes/{ns}/{name}", requires(s.handleUpdateModelRoute, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/modelroutes/{ns}/{name}", requires(s.handleDeleteModelRoute, d.cluster))
+	// SecretBinding CRUD (m15.6): direct edit — no expand, no source-spec
+	// annotation. Five endpoints following the list contract for GET /list and
+	// the SSA-under-console-field-manager pattern for PUT.
+	//
+	// SECURITY (ADR 0015): the BFF NEVER reads the referenced Kubernetes Secret
+	// to return its data. Every DTO projects only the SecretBinding CRD's own
+	// fields — which Secret name, which key — plus status. The credential value
+	// lives only in the Secret; it never flows through this API surface.
+	//
+	// The scheme is needed for SSA (ensureGVK); when absent the write routes
+	// serve 501 honestly. The GET routes do not need the scheme.
+	authed.Handle("GET /api/secretbindings", requires(s.handleListSecretBindings, d.cluster))
+	authed.Handle("GET /api/secretbindings/{ns}/{name}", requires(s.handleGetSecretBinding, d.cluster))
+	authed.Handle("POST /api/secretbindings", requires(s.handleCreateSecretBinding, d.cluster, d.scheme))
+	authed.Handle("PUT /api/secretbindings/{ns}/{name}", requires(s.handleUpdateSecretBinding, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/secretbindings/{ns}/{name}", requires(s.handleDeleteSecretBinding, d.cluster))
+	// AgentRegistry CRUD (m15.7): direct edit — no expand, no source-spec
+	// annotation. Five endpoints following the list contract for GET /list and
+	// the SSA-under-console-field-manager pattern for PUT.
+	//
+	// SECURITY INVARIANT: the console CANNOT alter the egress posture. The SSA
+	// apply object carries only the AgentRegistry spec (memberSelector, guards,
+	// roles); the controller-owned NetworkPolicy (M6 whitelist + M11 default-deny)
+	// is never touched. There is no egress/allowlist field in any DTO.
+	//
+	// registryId is immutable after creation (CRD XValidation). The PUT body has
+	// no registryId field, so an edit cannot change it: a submitted value is
+	// ignored and the live value is preserved (the PUT returns 200). Immutability
+	// holds by construction, not by an API-server rejection.
+	//
+	// The scheme is needed for SSA (ensureGVK); when absent the write routes
+	// serve 501 honestly. The GET routes do not need the scheme.
+	authed.Handle("GET /api/agentregistries", requires(s.handleListAgentRegistries, d.cluster))
+	authed.Handle("GET /api/agentregistries/{ns}/{name}", requires(s.handleGetAgentRegistry, d.cluster))
 
-	// Langfuse-backed dashboard routes (recent runs, cost/usage, trace link).
-	// Wired when the Langfuse adapter is present; honest 501 otherwise so the
-	// routes stay discoverable. Registering the real handler only when wired
-	// keeps the nil-adapter seam clean.
+	// KnowledgeBase list + detail (m68.13): read the caller's KB CRs — name, phase, counts.
+	// Caller-scoped (ADR 0011): the BFF lists/gets through the caller's own client so K8s RBAC
+	// governs who can read KBs. 403 when denied; 404 on a missing KB (detail only).
+	authed.Handle("GET /api/knowledgebases", requires(s.handleListKBs, d.cluster))
+	authed.Handle("GET /api/knowledgebases/{name}", requires(s.handleGetKB, d.cluster))
+
+	// KnowledgeBase test-query (m68.13): the console test-query panel — verify the KB exists
+	// (caller-scoped, 404 if absent) then forward to the token-service /v1/knowledge/search
+	// with the KB's embeddingRoute. Returns ranked chunks + citations. 501 when the token-service
+	// is unconfigured (TOKEN_SERVICE_URL unset).
+	authed.Handle("POST /api/knowledgebases/{name}/search", requires(s.handleSearchKB, d.cluster))
+
+	// KnowledgeBase document upload (M68, ADR 0061 Fork 4): stream a raw document body
+	// into the durable KB bucket at KnowledgeKey(ns, kbName, filename). Caller-scoped:
+	// the BFF verifies the KB exists in the caller's namespace before writing (honest 404
+	// when absent; 403 when RBAC denies the GET; 501 when OBJECT_STORE_ADDR is unset;
+	// 413 when the body exceeds maxDocumentUploadBytes). Returns 201 + {documentRef, key, size}.
+	authed.Handle("POST /api/knowledgebases/{name}/documents", requires(s.handleUploadKBDocument, d.cluster))
+
+	// KnowledgeBase ingestion trigger (M68, ADR 0061 Fork 2): resolve the KB's source documents,
+	// pin an IngestionSpec, and create a durable ingestion Run the worker drives (extract → chunk →
+	// embed → upsert, cursor-resumable). Caller-scoped (404 when the KB is absent; 501 when the
+	// knowledge store / embedder / object store is unwired). Returns 202 + {runId, status, documentCount}.
+	authed.Handle("POST /api/knowledgebases/{name}/ingest", requires(s.handleIngestKB, d.cluster))
+
+	// Dataset export trigger (M69, ADR 0062 Fork 1): pin an ExportSpec (target dataset + agent tag +
+	// timerange) and create a durable export Run the worker drives — it copies production traces OUT of
+	// Langfuse into the control-plane dataset store, M66-REDACTED (the PII P1), with source-trace lineage.
+	// Caller-scoped (ADR 0011): the caller's own token gates who can trigger an export. 501 when the dataset
+	// store / Langfuse adapter is unwired; 400 on a bad body. Returns 202 + {runId, status}.
+	authed.Handle("POST /api/datasets/{name}/export", requires(s.handleExportDataset, d.cluster))
+
+	// Dataset labeling API (M69, ADR 0062 Fork 5 — the improvement loop's human-labeling path).
+	// Caller-scoped (ADR 0011): the caller must present a valid token; the author on a label append is
+	// derived from the authenticated caller identity (SelfSubjectReview), never a client field.
+	// All degrade honestly (501) when the dataset store is not configured.
+	//
+	// NOTE: Go 1.22 ServeMux: "POST /api/datasets/{name}/cases/from-run" is MORE SPECIFIC than
+	// "POST /api/datasets/{name}/cases/{caseId}/labels" because the literal segment "from-run" is
+	// longer than the wildcard, so the from-run route wins on that path and the label route never
+	// sees it — the two patterns do not conflict.
+	authed.Handle("GET /api/datasets", requires(s.handleListDatasets, d.cluster))
+	authed.Handle("GET /api/datasets/{name}/cases", requires(s.handleListDatasetCases, d.cluster))
+	authed.Handle("POST /api/datasets/{name}/cases/{caseId}/labels", requires(s.handleAppendLabel, d.cluster))
+	authed.Handle("POST /api/datasets/{name}/cases/from-run", requires(s.handleFromRun, d.cluster))
+	authed.Handle("POST /api/datasets/{name}/pin", requires(s.handlePinDataset, d.cluster))
+
+	// Tenants (M47, ADR 0046): cluster-scoped, caller-scoped. Read + create (M99 C4 — operators
+	// manage tenants; RBAC is the API server's real answer via the caller-scoped client).
+	authed.Handle("GET /api/tenants", requires(s.handleListTenants, d.cluster))
+	authed.Handle("POST /api/tenants", requires(s.handleCreateTenant, d.cluster))
+	// Batched live usage for ALL listable tenants (m54.5) — the near-cap indicator
+	// on the list. Registered before the {name} routes; the literal "usage" segment
+	// takes precedence over the {name} wildcard (Go 1.22 ServeMux).
+	authed.Handle("GET /api/tenants/usage", requires(s.handleTenantUsageList, d.cluster))
+	authed.Handle("GET /api/tenants/{name}", requires(s.handleGetTenant, d.cluster))
+	// Live usage vs cap (M49, the M47-review P0): the tenant's current spend/rpm/inflight from Valkey.
+	authed.Handle("GET /api/tenants/{name}/usage", requires(s.handleTenantUsage, d.cluster))
+	// AgentTeams (M64, ADR 0057): read-only list of orchestration rosters, caller-scoped.
+	authed.Handle("GET /api/teams", requires(s.handleListTeams, d.cluster))
+	// Team create (ADR 0065 D4): caller-scoped CRD create from a reviewed AgentTeam YAML.
+	// The Go 1.22 ServeMux distinguishes "POST /api/teams" from "GET /api/teams".
+	authed.Handle("POST /api/teams", requires(s.handleCreateTeam, d.cluster))
+	// Team generation (ADR 0065 D4): compose an AgentTeamSpec from existing registry members.
+	// Caller-scoped, cost-tagged, NEVER auto-applies â returns spec + eligible members for review.
+	// The Go 1.22 ServeMux treats "POST /api/teams/generate" as distinct from "GET /api/teams".
+	authed.Handle("POST /api/teams/generate", requires(s.handleGenerateTeam, d.cluster))
+	// GuardrailPolicies (m66.10, ADR 0059): read-only list of content-governance policies, caller-scoped.
+	authed.Handle("GET /api/guardrailpolicies", requires(s.handleListGuardrailPolicies, d.cluster))
+	// Workflows (m67.9, ADR 0060): read-only list of Workflow CRs, caller-scoped.
+	authed.Handle("GET /api/workflows", requires(s.handleListWorkflows, d.cluster))
+	// Workflow declared DAG (M144-canvas, ADR 0115): the step graph for the canvas.
+	authed.Handle("GET /api/workflows/{ns}/{name}", requires(s.handleGetWorkflow, d.cluster))
+	authed.Handle("POST /api/agentregistries", requires(s.handleCreateAgentRegistry, d.cluster, d.scheme))
+	authed.Handle("PUT /api/agentregistries/{ns}/{name}", requires(s.handleUpdateAgentRegistry, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/agentregistries/{ns}/{name}", requires(s.handleDeleteAgentRegistry, d.cluster))
+	// ToolRegistry CRUD (m17.5): direct edit of the operator-curated tool catalog.
+	// Five endpoints following the list contract for GET /list and SSA for PUT/POST.
+	// IMPORTANT: the m14.6 GET /api/tools merged catalog (distinct route, distinct
+	// handler) is NOT affected — these routes are /api/toolregistries, not /api/tools.
+	// The PUT preserves each tool entry's approvalStatus (controller/approval-owned);
+	// the console CRUD edits the curated fields, never the approval state.
+	// The scheme is needed for SSA (ensureGVK); when absent the write routes serve 501.
+	authed.Handle("GET /api/toolregistries", requires(s.handleListToolRegistries, d.cluster))
+	authed.Handle("GET /api/toolregistries/{ns}/{name}", requires(s.handleGetToolRegistry, d.cluster))
+	authed.Handle("POST /api/toolregistries", requires(s.handleCreateToolRegistry, d.cluster, d.scheme))
+	authed.Handle("PUT /api/toolregistries/{ns}/{name}", requires(s.handleUpdateToolRegistry, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/toolregistries/{ns}/{name}", requires(s.handleDeleteToolRegistry, d.cluster))
+	// MCPToolBinding CRUD (m17.5): direct edit of the tool-to-agent bindings.
+	// Five endpoints following the list contract + SSA. The detail DTO surfaces
+	// the HONEST hot-update propagation status: "propagated" only when the
+	// controller's Ready=True (tool registered, pin-matched, rendered + pushed to
+	// the discovery sidecar); failure reason when Ready=False (UnregisteredTool /
+	// RegistryMismatch); "pending" when the condition is absent. The console NEVER
+	// reports "propagated" unless the controller confirms it — the m16 honest-contract
+	// lesson. SSA never clobbles the controller's status/Ready condition.
+	authed.Handle("GET /api/mcptoolbindings", requires(s.handleListMCPToolBindings, d.cluster))
+	authed.Handle("GET /api/mcptoolbindings/{ns}/{name}", requires(s.handleGetMCPToolBinding, d.cluster))
+	authed.Handle("POST /api/mcptoolbindings", requires(s.handleCreateMCPToolBinding, d.cluster, d.scheme))
+	authed.Handle("PUT /api/mcptoolbindings/{ns}/{name}", requires(s.handleUpdateMCPToolBinding, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/mcptoolbindings/{ns}/{name}", requires(s.handleDeleteMCPToolBinding, d.cluster))
+	// (MemoryBinding CRUD retired in M127/ADR 0101 — session memory is now the
+	// folded AgentDeployment.spec.sessionMemory field, authored via the agent form.)
+	// AgentScalingPolicy CRUD (m17.6): direct edit of elastic scaling rules for
+	// AgentDeployments. Five endpoints following the list contract + SSA.
+	// CRD XValidations (max>=min, schedule required when trigger=schedule) are
+	// enforced by the API server — rejections surface as honest 422 with the
+	// server's message. The BFF does not re-implement these rules.
+	// agentRef is NOT CRD-immutable — a PUT that changes agentRef is accepted
+	// and applied. The scheme is needed for SSA; absent → 501.
+	authed.Handle("GET /api/agentscalingpolicies", requires(s.handleListAgentScalingPolicies, d.cluster))
+	authed.Handle("GET /api/agentscalingpolicies/{ns}/{name}", requires(s.handleGetAgentScalingPolicy, d.cluster))
+	authed.Handle("POST /api/agentscalingpolicies", requires(s.handleCreateAgentScalingPolicy, d.cluster, d.scheme))
+	authed.Handle("PUT /api/agentscalingpolicies/{ns}/{name}", requires(s.handleUpdateAgentScalingPolicy, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/agentscalingpolicies/{ns}/{name}", requires(s.handleDeleteAgentScalingPolicy, d.cluster))
+	// EvalSuite CRUD (m17.7): direct edit of eval gate configurations.
+	// The detail DTO surfaces dataset/scorers/gate/threshold + the controller's
+	// status.conditions (gate/pass/block outcome). The /results sub-resource
+	// merges the CRD status with Langfuse scores honestly: scoresAvailable:false
+	// + reason when Langfuse is absent or traceId not supplied; real scores when
+	// both are present. Controller status.conditions are NEVER clobbered (SSA spec-only).
+	authed.Handle("GET /api/evalsuites", requires(s.handleListEvalSuites, d.cluster))
+	authed.Handle("GET /api/evalsuites/{ns}/{name}", requires(s.handleGetEvalSuite, d.cluster))
+	// Results always wired: degrades honestly (scoresAvailable:false) when Langfuse absent.
+	authed.Handle("GET /api/evalsuites/{ns}/{name}/results", requires(s.handleGetEvalSuiteResults, d.cluster))
+	authed.Handle("POST /api/evalsuites", requires(s.handleCreateEvalSuite, d.cluster, d.scheme))
+	authed.Handle("PUT /api/evalsuites/{ns}/{name}", requires(s.handleUpdateEvalSuite, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/evalsuites/{ns}/{name}", requires(s.handleDeleteEvalSuite, d.cluster))
+	// PromptVersion CRUD + diff (m17.8): direct edit of git-backed prompt pointers.
+	// The detail DTO surfaces git (repo/ref/path) + status.conditions.
+	// The /diff sub-resource resolves the two PromptVersions' git pointers via the
+	// optional prompt Resolver and returns a TEXTUAL line diff of the resolved content.
+	// If no resolver is configured → the diff endpoint returns an honest 501 (never
+	// fabricates content). ErrNotFound → 404; transient resolve failure → 502.
+	// Controller status.conditions are NEVER clobbered (SSA spec-only applies).
+	authed.Handle("GET /api/promptversions", requires(s.handleListPromptVersions, d.cluster))
+	authed.Handle("GET /api/promptversions/{ns}/{name}", requires(s.handleGetPromptVersion, d.cluster))
+	// Diff is always wired (degrades to 501 when no resolver configured).
+	authed.Handle("GET /api/promptversions/{ns}/{name}/diff", requires(s.handlePromptVersionDiff, d.cluster))
+	authed.Handle("POST /api/promptversions", requires(s.handleCreatePromptVersion, d.cluster, d.scheme))
+	authed.Handle("PUT /api/promptversions/{ns}/{name}", requires(s.handleUpdatePromptVersion, d.cluster, d.scheme))
+	authed.Handle("DELETE /api/promptversions/{ns}/{name}", requires(s.handleDeletePromptVersion, d.cluster))
+
+	// Skills (ADR 0137). Postgres-authoritative like promptversions, and authorized the
+	// same way: a caller-scoped SSAR on `skills`, so the BFF gains no privilege and the
+	// decision is exactly the one the API server would have made for a CRD.
+	authed.Handle("GET /api/skills", requires(s.handleListSkills, d.cluster))
+	authed.Handle("GET /api/skills/{ns}/{name}", requires(s.handleGetSkill, d.cluster))
+	authed.Handle("POST /api/skills", requires(s.handleUpsertSkill, d.cluster))
+	authed.Handle("POST /api/skills/{ns}/{name}/versions", requires(s.handleAddSkillVersion, d.cluster))
+	authed.Handle("DELETE /api/skills/{ns}/{name}", requires(s.handleDeleteSkill, d.cluster))
+	// RBAC-aware chrome (ADR 0012, ui-foundation §3). All three run through the
+	// CALLER-SCOPED client — whoami/capabilities are DISPLAY-ONLY (they gate
+	// nothing server-side; enforcement stays with K8s, ADR 0011), and namespaces
+	// is a caller-scoped list. Gated on the same factor as the CRD routes: nil
+	// factory → 501, never a fallback to the BFF SA.
+	authed.Handle("GET /api/whoami", requires(s.handleWhoAmI, d.cluster))
+	authed.Handle("GET /api/capabilities", requires(s.handleCapabilities, d.cluster))
+	authed.Handle("GET /api/namespaces", requires(s.handleNamespaces, d.cluster))
+	// PUT /api/namespaces/{name}/display-name — set or clear the human-readable
+	// display label on a namespace (ADR 0068 §7). Caller needs "update namespaces";
+	// the API server enforces it — honest 403 if denied. "workspace" is UI-only.
+	authed.Handle("PUT /api/namespaces/{name}/display-name", requires(s.handleSetNamespaceDisplayName, d.cluster))
+	authed.Handle("POST /api/agents", requires(s.handleCreateAgent, d.cluster, d.scheme))
+
+	// Trace-store routes (recent runs, cost/usage, trace link, feedback). Without a trace store the
+	// runs list comes from the run store, which every install has (ADR 0150).
 	if s.adapters.Langfuse != nil {
 		authed.HandleFunc("GET /api/runs", s.handleRuns)
-		authed.HandleFunc("GET /api/cost", s.handleCost)
-		authed.HandleFunc("GET /api/traces/{id}", s.handleTraceLink)
-		// Run inspector (m14.8, first-agent-flow.md §3/§5): the flat span summary for
-		// one trace (trace + observations). The Go 1.22 ServeMux treats
-		// "GET /api/traces/{id}" and "GET /api/traces/{id}/detail" as DISTINCT
-		// patterns (the more specific "/detail" wins), so this is additive and never
-		// shadows the embed-URL route above.
-		authed.HandleFunc("GET /api/traces/{id}/detail", s.handleTraceDetail)
-		// Feedback / scores browser (m16.4): reads Langfuse scores for one trace
-		// (GET /api/public/scores?traceId=) and returns them as the feedback panel's
-		// flat score list. Requires ?traceId; missing → 400. Langfuse absent → 501
-		// (registered by the else branch below).
-		authed.HandleFunc("GET /api/feedback", s.handleFeedback)
-		// Feedback WRITE (M139, ADR 0112): the console/external submit path. Caller-scoped;
-		// gated by the agent's FeedbackStore (declared score names) when bound; relayed to
-		// Langfuse (the store of record). Langfuse absent → 501 (registered by the else branch).
-		authed.HandleFunc("POST /api/feedback", s.handleSubmitFeedback)
-		// Cost breakdown by agent (m16.5): aggregates a bounded recent window of
-		// Langfuse traces by agent:<ns>/<name> tag and returns per-agent cost/usage.
-		// ?by=agent is required; any other `by` value → 400. Requires ?by=agent;
-		// other values are explicitly rejected (honest contract). Langfuse absent →
-		// 501 (registered by the else branch below).
-		authed.HandleFunc("GET /api/cost/breakdown", s.handleCostBreakdown)
 	} else {
-		authed.Handle("GET /api/runs", notImplemented("Langfuse runs adapter"))
-		authed.Handle("GET /api/cost", notImplemented("Langfuse cost adapter"))
-		authed.Handle("GET /api/traces/", notImplemented("Langfuse trace adapter"))
-		authed.Handle("GET /api/feedback", notImplemented("Langfuse feedback adapter"))
-		authed.Handle("POST /api/feedback", notImplemented("Langfuse feedback adapter"))
-		authed.Handle("GET /api/cost/breakdown", notImplemented("Langfuse cost breakdown adapter"))
+		authed.HandleFunc("GET /api/runs", s.handleStoreRuns)
 	}
+	authed.Handle("GET /api/cost", requires(s.handleCost, d.traces))
+	authed.Handle("GET /api/traces/{id}", requires(s.handleTraceLink, d.traces))
+	// Run inspector (m14.8): the flat span summary for one trace (trace + observations).
+	authed.Handle("GET /api/traces/{id}/detail", requires(s.handleTraceDetail, d.traces))
+	// Feedback / scores browser (m16.4): the scores for one trace; ?traceId is required (400).
+	authed.Handle("GET /api/feedback", requires(s.handleFeedback, d.traces))
+	// Feedback WRITE (M139, ADR 0112): caller-scoped; gated by the agent's spec.feedback (declared
+	// score names) when set; relayed to the trace store, the store of record.
+	authed.Handle("POST /api/feedback", requires(s.handleSubmitFeedback, d.traces))
+	// Cost breakdown by agent (m16.5): ?by=agent is required; any other `by` value → 400.
+	authed.Handle("GET /api/cost/breakdown", requires(s.handleCostBreakdown, d.traces))
 
-	// Remaining adapter seams for m12.6–m12.7: mounted now (discoverable) but
-	// honest 501 until their adapter is wired.
-	if s.adapters.Prometheus == nil {
-		authed.Handle("GET /api/metrics/", notImplemented("Prometheus adapter"))
-	}
-	// Playground invoke (m12.7): run a deployed agent, traced, and return its
-	// traceId. The CLUSTER path is wired only when BOTH the InvokeAdapter (the
-	// pure-HTTP invoker) AND the caller-client factory are present — the run is
-	// CALLER-SCOPED (the agent lookup + dispatch act as the caller, ADR 0011), so it
-	// needs the caller-client seam and must never fall back to the BFF SA.
-	//
-	// The DEV path (ADR 0021) has no cluster: when devMode + a devInvokeEndpoint are
-	// set, POST /api/invoke targets the single local Compose agent directly (no RBAC
-	// to scope — it's a single local developer). Honest 501 when neither is wired.
-	switch {
-	case s.devMode && s.adapters.Invoke != nil && s.devInvokeEndpoint != "":
+	// Playground invoke (m12.7): run a deployed agent, traced, and return its traceId. The run is
+	// CALLER-SCOPED (the agent lookup + dispatch act as the caller, ADR 0011), so it needs the
+	// caller-client seam and never falls back to the BFF SA. The DEV path (ADR 0021) has no
+	// cluster: devMode + a devInvokeEndpoint target the single local Compose agent directly.
+	if s.devMode && s.adapters.Invoke != nil && s.devInvokeEndpoint != "" {
 		authed.HandleFunc("POST /api/invoke", s.handleDevInvoke)
-	case s.adapters.Invoke != nil && s.callerClients != nil:
-		authed.HandleFunc("POST /api/invoke", s.handleInvoke)
-	default:
-		authed.Handle("POST /api/invoke", notImplemented("Playground invoke"))
+	} else {
+		authed.Handle("POST /api/invoke", requires(s.handleInvoke, d.invoke, d.cluster))
 	}
 
 	// Gateway ext-auth (ADR 0039): a token-authenticated hit to an AGENT URL gets OBO parity with
@@ -1455,31 +1330,16 @@ func (s *Server) Handler() http.Handler {
 	s.registerRunRoutes(authed)
 	s.registerShareRoutes(authed)
 	s.registerWorkflowRunRoutes(authed)
-	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s). Wired
-	// when the ExpandAdapter is present (it reuses the CLI expand core server-side);
-	// honest 501 otherwise.
-	if s.adapters.Expand != nil {
-		authed.HandleFunc("POST /api/expand", s.handleExpand)
-	} else {
-		authed.Handle("POST /api/expand", notImplemented("config expand"))
-	}
+	// Config-builder expand preview (m12.6): agent.yaml → CRD manifest(s), through the CLI expand
+	// core server-side.
+	authed.Handle("POST /api/expand", requires(s.handleExpand, d.expand))
 
-	// Create-from-prompt generation (m14.5, ADR 0014): a natural-language
-	// description → a server-side chat/completions call through the CALLER'S
-	// connected provider → the emitted simplified agent.yaml validated by the SAME
-	// expand core → returned for REVIEW (never auto-applied). It needs BOTH seams:
-	//   - the CALLER-CLIENT factory — the generation key is resolved caller-scoped
-	//     (route → SecretBinding → Secret), so a viewer denied the Secret is a 403
-	//     and the BFF never falls back to its own SA (ADR 0011); AND
-	//   - the EXPAND adapter — the emitted YAML is validated through the one mapping
-	//     (no divergent generator schema, ADR 0014).
-	// Either missing → an honest 501. The generation chat reuses providerHTTP (nil
-	// → a bounded default client).
-	if s.callerClients != nil && s.adapters.Expand != nil {
-		authed.HandleFunc("POST /api/agents/generate", s.handleGenerate)
-	} else {
-		authed.Handle("POST /api/agents/generate", notImplemented("create-from-prompt generation"))
-	}
+	// Create-from-prompt generation (m14.5, ADR 0014): a natural-language description → a
+	// server-side chat/completions call through the CALLER'S connected provider → the emitted
+	// simplified agent.yaml validated by the SAME expand core → returned for REVIEW (never
+	// auto-applied). The generation key is resolved caller-scoped (route → SecretBinding → Secret),
+	// so a viewer denied the Secret is a 403 and the BFF never falls back to its own SA (ADR 0011).
+	authed.Handle("POST /api/agents/generate", requires(s.handleGenerate, d.cluster, d.expand))
 
 	// Pure spec-editing (m71.1, extracted to keep Handler under gocyclo).
 	s.registerRefineRoute(authed)
@@ -1509,19 +1369,11 @@ func (s *Server) Handler() http.Handler {
 	//
 	// When both are satisfied the three connect endpoints run caller-scoped.
 	if s.providerConnect {
-		if s.callerClients != nil {
-			authed.HandleFunc("POST /api/providers", s.handleConnectProvider)
-			authed.HandleFunc("GET /api/providers", s.handleListProviders)
-			authed.HandleFunc("GET /api/providers/{name}/models", s.handleProviderModels)
-			authed.HandleFunc("POST /api/providers/{name}/rotate", s.handleRotateProviderKey)
-			authed.HandleFunc("DELETE /api/providers/{name}", s.handleDisconnectProvider)
-		} else {
-			authed.Handle("POST /api/providers", notImplemented("caller-scoped provider connect"))
-			authed.Handle("GET /api/providers", notImplemented("caller-scoped provider list"))
-			authed.Handle("GET /api/providers/{name}/models", notImplemented("caller-scoped provider models"))
-			authed.Handle("POST /api/providers/{name}/rotate", notImplemented("caller-scoped provider key rotation"))
-			authed.Handle("DELETE /api/providers/{name}", notImplemented("caller-scoped provider disconnect"))
-		}
+		authed.Handle("POST /api/providers", requires(s.handleConnectProvider, d.cluster))
+		authed.Handle("GET /api/providers", requires(s.handleListProviders, d.cluster))
+		authed.Handle("GET /api/providers/{name}/models", requires(s.handleProviderModels, d.cluster))
+		authed.Handle("POST /api/providers/{name}/rotate", requires(s.handleRotateProviderKey, d.cluster))
+		authed.Handle("DELETE /api/providers/{name}", requires(s.handleDisconnectProvider, d.cluster))
 	}
 
 	// BYO-MCP register + tool catalog (m14.6, ADR 0016): probe a user's MCP server,
@@ -1541,86 +1393,75 @@ func (s *Server) Handler() http.Handler {
 	// mcpRequireApproval value, read inside the handler — it changes the entry
 	// status, not the route wiring.
 	if s.mcpEnabled {
-		if s.callerClients != nil {
-			authed.HandleFunc("POST /api/mcpservers", s.handleRegisterMCPServer)
-			authed.HandleFunc("GET /api/mcpservers", s.handleListMCPServers)
-			// Deregister an MCP server (m26.3): tear down the whole register bundle
-			// (Secret + SecretBinding + ToolRegistry + NetworkPolicy) caller-scoped, with
-			// a personal-owner guard; the references route previews the delete-impact
-			// (dependent bindings). The Go 1.22 ServeMux treats these as distinct from the
-			// bare "GET/POST /api/mcpservers" (the more specific {ns}/{name} pattern wins).
-			authed.HandleFunc("DELETE /api/mcpservers/{ns}/{name}", s.handleDeleteMCPServer)
-			authed.HandleFunc("GET /api/mcpservers/{ns}/{name}/references", s.handleMCPServerReferences)
-			authed.HandleFunc("GET /api/tools", s.handleListTools)
-			// Cross-tenant MCP catalog (m73.4, ADR 0067 §6): the discovery-only list of org/public/team
-			// MCP servers visible to the caller's tenant, without leaking private servers. A single
-			// own-namespace SSAR gates entry (the sole authz); the store read uses the BFF's own cpDB
-			// connection (the amended-ADR-0011 model — not the caller-scoped client). GET /api/catalog
-			// is in the SAME mcpEnabled + callerClients gate as the other MCP endpoints.
-			authed.HandleFunc("GET /api/catalog", s.handleCatalog)
-			// Per-user on-behalf-of grants (m17.3, ADR 0016 §5): a user consents to an
-			// OAuth MCP server → THEIR (user, server) grant is stored; a user revokes
-			// their OWN grant. Both are CALLER-SCOPED — the invoking user's identity is
-			// resolved from their token (SelfSubjectReview) and the grant Secret writes
-			// run as that user, so a user can only touch their own grant. The consent
-			// POST starts the m17.2 PKCE flow (marked with the caller's hashed identity)
-			// and completes at the shared OAuth callback. The Go 1.22 ServeMux treats
-			// "POST /api/mcp/oauth/grant" and "DELETE /api/mcp/oauth/grant/{server}" as
-			// distinct patterns.
-			authed.HandleFunc("POST /api/mcp/oauth/grant", s.beginMCPGrantConsent)
-			authed.HandleFunc("DELETE /api/mcp/oauth/grant/{server}", s.handleRevokeMCPGrant)
-			// Admin org-credential (m25.9, ADR 0029 §7): promote a server to org scope + set
-			// its shared credential. Admin gate is RBAC-by-construction — the ToolRegistry
-			// scope change is written caller-scoped (a viewer can't update it → 403).
-			authed.HandleFunc("POST /api/mcp/org-credential", s.handleSetOrgCredential)
-			// Tiered visibility publish (m73.5, ADR 0067 §5): widen a registered MCP server
-			// to team / org / public visibility. Each tier is gated by a caller-scoped SSAR
-			// (team → update toolregistries in ns; org → update tenants/<tenant>;
-			// public → update tenants cluster-wide). Publish NEVER opens egress (m14.6 B1).
-			authed.HandleFunc("POST /api/mcp/publish", s.handleMCPPublish)
-			// Discover-then-materialize (m73.6, ADR 0067 §3): "Connect" imports a
-			// catalog-discovered server's DEFINITION into the caller's OWN namespace so they
-			// can use it with their OWN credential. The credential-safety crux: the
-			// publisher's token NEVER crosses the namespace boundary — the copy is created
-			// with NO credential material and the consumer OBO-connects their own later. A
-			// security gate re-checks the origin is discoverable by the caller (else 404); the
-			// origin read is a store read (amended-ADR-0011, like the catalog), the create is
-			// caller-scoped (SSAR-gated by createMCPObjects). Same mcpEnabled + callerClients gate.
-			authed.HandleFunc("POST /api/mcp/connect", s.handleMCPConnect)
-			// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
-			// the HARDENED trust mode. GET lists the pending BYO servers awaiting
-			// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries
-			// pending→approved AND opens the per-server egress the register flow withheld —
-			// the ONLY transition that opens egress, preserving the m14.6 B1 invariant);
-			// POST .../{ns}/{name}/reject DENIES one (removes the pending catalog entry, so
-			// it stays non-bindable with no egress). All CALLER-SCOPED (ADR 0011): the
-			// approve UPDATE / reject DELETE run as the caller, so a non-operator's action
-			// is the API server's real 403 — no bypass. In self-serve mode nothing is
-			// pending, so the queue is empty/inert but the endpoints exist and behave
-			// honestly. The Go 1.22 ServeMux treats "POST .../{ns}/{name}" and
-			// "POST .../{ns}/{name}/reject" as DISTINCT patterns (the more specific
-			// "/reject" wins), and both are additive beside the "GET /api/mcp/approvals"
-			// list route.
-			authed.HandleFunc("GET /api/mcp/approvals", s.handleListMCPApprovals)
-			authed.HandleFunc("POST /api/mcp/approvals/{ns}/{name}", s.handleApproveMCP)
-			authed.HandleFunc("POST /api/mcp/approvals/{ns}/{name}/reject", s.handleRejectMCP)
-		} else {
-			authed.Handle("POST /api/mcpservers", notImplemented("caller-scoped MCP register"))
-			authed.Handle("GET /api/mcpservers", notImplemented("caller-scoped MCP list"))
-			authed.Handle("DELETE /api/mcpservers/{ns}/{name}", notImplemented("caller-scoped MCP deregister"))
-			authed.Handle("GET /api/mcpservers/{ns}/{name}/references", notImplemented("caller-scoped MCP references"))
-			authed.Handle("GET /api/tools", notImplemented("caller-scoped tool catalog"))
-			authed.Handle("POST /api/mcp/oauth/grant", notImplemented("caller-scoped MCP grant consent"))
-			authed.Handle("DELETE /api/mcp/oauth/grant/{server}", notImplemented("caller-scoped MCP grant revoke"))
-			authed.Handle("GET /api/mcp/approvals", notImplemented("caller-scoped MCP approval queue"))
-			authed.Handle("POST /api/mcp/approvals/{ns}/{name}", notImplemented("caller-scoped MCP approve"))
-			authed.Handle("POST /api/mcp/approvals/{ns}/{name}/reject", notImplemented("caller-scoped MCP reject"))
-			authed.Handle("GET /api/catalog", notImplemented("caller-scoped MCP catalog"))
-			authed.Handle("POST /api/mcp/publish", notImplemented("caller-scoped MCP publish"))
-		}
+		authed.Handle("POST /api/mcpservers", requires(s.handleRegisterMCPServer, d.cluster))
+		authed.Handle("GET /api/mcpservers", requires(s.handleListMCPServers, d.cluster))
+		// Deregister an MCP server (m26.3): tear down the whole register bundle
+		// (Secret + SecretBinding + ToolRegistry + NetworkPolicy) caller-scoped, with
+		// a personal-owner guard; the references route previews the delete-impact
+		// (dependent bindings). The Go 1.22 ServeMux treats these as distinct from the
+		// bare "GET/POST /api/mcpservers" (the more specific {ns}/{name} pattern wins).
+		authed.Handle("DELETE /api/mcpservers/{ns}/{name}", requires(s.handleDeleteMCPServer, d.cluster))
+		authed.Handle("GET /api/mcpservers/{ns}/{name}/references", requires(s.handleMCPServerReferences, d.cluster))
+		authed.Handle("GET /api/tools", requires(s.handleListTools, d.cluster))
+		// Cross-tenant MCP catalog (m73.4, ADR 0067 §6): the discovery-only list of org/public/team
+		// MCP servers visible to the caller's tenant, without leaking private servers. A single
+		// own-namespace SSAR gates entry (the sole authz); the store read uses the BFF's own cpDB
+		// connection (the amended-ADR-0011 model — not the caller-scoped client). GET /api/catalog
+		// is in the SAME mcpEnabled + callerClients gate as the other MCP endpoints.
+		authed.Handle("GET /api/catalog", requires(s.handleCatalog, d.cluster))
+		// Per-user on-behalf-of grants (m17.3, ADR 0016 §5): a user consents to an
+		// OAuth MCP server → THEIR (user, server) grant is stored; a user revokes
+		// their OWN grant. Both are CALLER-SCOPED — the invoking user's identity is
+		// resolved from their token (SelfSubjectReview) and the grant Secret writes
+		// run as that user, so a user can only touch their own grant. The consent
+		// POST starts the m17.2 PKCE flow (marked with the caller's hashed identity)
+		// and completes at the shared OAuth callback. The Go 1.22 ServeMux treats
+		// "POST /api/mcp/oauth/grant" and "DELETE /api/mcp/oauth/grant/{server}" as
+		// distinct patterns.
+		authed.Handle("POST /api/mcp/oauth/grant", requires(s.beginMCPGrantConsent, d.cluster))
+		authed.Handle("DELETE /api/mcp/oauth/grant/{server}", requires(s.handleRevokeMCPGrant, d.cluster))
+		// A chatbox on an agent's own hostname mints a consent ticket here and redeems it on
+		// the console origin (ADR 0040 amendment); the redeem route is registered outside
+		// requireAuth below.
+		authed.Handle("POST /api/mcp/oauth/ticket", requires(s.handleMintConsentTicket, d.cluster))
+		// Admin org-credential (m25.9, ADR 0029 §7): promote a server to org scope + set
+		// its shared credential. Admin gate is RBAC-by-construction — the ToolRegistry
+		// scope change is written caller-scoped (a viewer can't update it → 403).
+		authed.Handle("POST /api/mcp/org-credential", requires(s.handleSetOrgCredential, d.cluster))
+		// Tiered visibility publish (m73.5, ADR 0067 §5): widen a registered MCP server
+		// to team / org / public visibility. Each tier is gated by a caller-scoped SSAR
+		// (team → update toolregistries in ns; org → update tenants/<tenant>;
+		// public → update tenants cluster-wide). Publish NEVER opens egress (m14.6 B1).
+		authed.Handle("POST /api/mcp/publish", requires(s.handleMCPPublish, d.cluster))
+		// Discover-then-materialize (m73.6, ADR 0067 §3): "Connect" imports a
+		// catalog-discovered server's DEFINITION into the caller's OWN namespace so they
+		// can use it with their OWN credential. The credential-safety crux: the
+		// publisher's token NEVER crosses the namespace boundary — the copy is created
+		// with NO credential material and the consumer OBO-connects their own later. A
+		// security gate re-checks the origin is discoverable by the caller (else 404); the
+		// origin read is a store read (amended-ADR-0011, like the catalog), the create is
+		// caller-scoped (SSAR-gated by createMCPObjects). Same mcpEnabled + callerClients gate.
+		authed.Handle("POST /api/mcp/connect", requires(s.handleMCPConnect, d.cluster))
+		// MCP approval queue (m17.4, ADR 0016 §3): the operator-facing surface for
+		// the HARDENED trust mode. GET lists the pending BYO servers awaiting
+		// approval; POST .../{ns}/{name} APPROVES one (flips its ToolRegistry entries
+		// pending→approved AND opens the per-server egress the register flow withheld —
+		// the ONLY transition that opens egress, preserving the m14.6 B1 invariant);
+		// POST .../{ns}/{name}/reject DENIES one (removes the pending catalog entry, so
+		// it stays non-bindable with no egress). All CALLER-SCOPED (ADR 0011): the
+		// approve UPDATE / reject DELETE run as the caller, so a non-operator's action
+		// is the API server's real 403 — no bypass. In self-serve mode nothing is
+		// pending, so the queue is empty/inert but the endpoints exist and behave
+		// honestly. The Go 1.22 ServeMux treats "POST .../{ns}/{name}" and
+		// "POST .../{ns}/{name}/reject" as DISTINCT patterns (the more specific
+		// "/reject" wins), and both are additive beside the "GET /api/mcp/approvals"
+		// list route.
+		authed.Handle("GET /api/mcp/approvals", requires(s.handleListMCPApprovals, d.cluster))
+		authed.Handle("POST /api/mcp/approvals/{ns}/{name}", requires(s.handleApproveMCP, d.cluster))
+		authed.Handle("POST /api/mcp/approvals/{ns}/{name}/reject", requires(s.handleRejectMCP, d.cluster))
 	}
 
-	api.Handle("/api/", s.requireAuth(authed))
+	api.Handle("/api/", s.requireAuth(withWorkspaceMemo(authed)))
 
 	// MCP OAuth 2.1 callback (m17.2, ADR 0016). Registered on the `api` mux
 	// DIRECTLY (a more specific pattern than "/api/"), so it is NOT behind
@@ -1640,11 +1481,10 @@ func (s *Server) Handler() http.Handler {
 		// an OAuth client (client_id == this URL). No caller auth — the auth server
 		// fetches it, not the user — and no callerClients needed (it writes nothing).
 		api.HandleFunc("GET /api/mcp/oauth/client-metadata", s.handleMCPOAuthClientMetadata)
-		if s.callerClients != nil {
-			api.HandleFunc("GET /api/mcp/oauth/callback", s.handleMCPOAuthCallback)
-		} else {
-			api.Handle("GET /api/mcp/oauth/callback", notImplemented("caller-scoped MCP OAuth callback"))
-		}
+		api.Handle("GET /api/mcp/oauth/callback", requires(s.handleMCPOAuthCallback, d.cluster))
+		// The console's /connect page redeems a consent ticket here; the ticket is the
+		// credential, as the state is for the callback (ADR 0040 amendment).
+		api.Handle("POST /api/mcp/oauth/grant/redeem", requires(s.handleRedeemConsentTicket, d.cluster))
 	}
 
 	root := http.NewServeMux()
@@ -1860,7 +1700,6 @@ const agentChatboxHeader = "X-Ctxmesh-Agent-Chatbox"
 var agentOriginAPIAllowlist = []string{
 	"GET /api/authconfig",
 	"GET /api/end-user-auth-config", // M137/EU1b: the SPA reads the tenant's end-user IdP config here
-	"GET /api/end-user/runs",        // M137/EU1c: the end-user's OWN runs at this agent (principal-scoped)
 	"GET /api/whoami",
 	"GET /api/devmode",
 	"GET /api/health",
@@ -1879,6 +1718,7 @@ var agentOriginAPIAllowlist = []string{
 	"GET /api/runs/{id}/events",
 	"POST /api/runs/{id}/resume",
 	"POST /api/mcp/oauth/grant",
+	"POST /api/mcp/oauth/ticket", // the redeem is console-origin only (ADR 0040 amendment)
 	"GET /api/mcp/oauth/callback",
 	"GET /api/mcp/oauth/client-metadata",
 	"GET /api/traces/{id}",

@@ -88,8 +88,8 @@ func TestAdapterSeamsReturn501(t *testing.T) {
 	}{
 		{http.MethodPost, "/api/invoke"},
 		{http.MethodPost, "/api/expand"},
-		{http.MethodGet, "/api/metrics/cost"},
 		{http.MethodGet, "/api/traces/abc"},
+		{http.MethodGet, "/api/traces/abc/detail"},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
@@ -98,6 +98,52 @@ func TestAdapterSeamsReturn501(t *testing.T) {
 		s.Handler().ServeHTTP(rec, req)
 		assert.Equalf(t, http.StatusNotImplemented, rec.Code, "%s %s", tc.method, tc.path)
 	}
+}
+
+// TestAbsentClusterIs501OnEveryCallerScopedRoute: without the caller-client factory each
+// caller-scoped route still exists and answers 501, including the ones that used to have no
+// 501 registration and so answered 404 (census, kills, run tree, run fixture).
+func TestAbsentClusterIs501OnEveryCallerScopedRoute(t *testing.T) {
+	s := NewServer(Options{
+		Scheme:   testScheme(t),
+		Auth:     BearerAuthenticator{},
+		Adapters: Adapters{Invoke: NewInvokeAdapter(InvokeAdapterConfig{}), Expand: NewExpandAdapter()},
+		Log:      logr.Discard(),
+	})
+	h := s.Handler()
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodGet, "/api/agents"},
+		{http.MethodGet, "/api/agents/census"},
+		{http.MethodPut, "/api/agents/ns1/a1"},
+		{http.MethodGet, "/api/kills"},
+		{http.MethodPost, "/api/modelroutes"},
+		{http.MethodGet, "/api/skills"},
+		{http.MethodPost, "/api/runs"},
+		{http.MethodGet, "/api/runs/r1/tree"},
+		{http.MethodGet, "/api/runs/r1/fixture"},
+		{http.MethodGet, "/api/my/shares"},
+		{http.MethodPost, "/api/agents/generate"},
+		{http.MethodPost, "/api/agents/refine"},
+		{http.MethodPost, "/api/agents/check-requirements"},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		req.Header.Set("Authorization", "Bearer valid-token")
+		h.ServeHTTP(rec, req)
+		assert.Equalf(t, http.StatusNotImplemented, rec.Code, "%s %s", tc.method, tc.path)
+		assert.Containsf(t, rec.Body.String(), "caller-scoped cluster access is not configured", "%s %s", tc.method, tc.path)
+	}
+}
+
+// TestNoMetricsSubtree: /api/metrics/ had a 501 registration and no handler in any configuration.
+// Cost is served at /api/cost; the only /api/metrics route is eval-gated.
+func TestNoMetricsSubtree(t *testing.T) {
+	s := newAuthServer(t, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/metrics/cost", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	s.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
 func TestServesStaticSPA(t *testing.T) {

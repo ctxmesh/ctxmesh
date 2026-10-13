@@ -35,6 +35,63 @@ security:
   # (the default) and under the dev profile.
   tenantLabelEnforcement: ""
 
+global:
+  # Pull secrets for every pod this chart renders: the control plane, the bundled data plane and the
+  # install hooks. Each entry is the name of a kubernetes.io/dockerconfigjson Secret in the install
+  # namespace, as a string or as {name: <secret>}. Agent pods are not covered; they pull in their
+  # own namespaces.
+  imagePullSecrets: []
+
+# Third-party images, each pulled as <registry>/<repository>:<tag>@<digest>. The digest is what the
+# runtime pulls; the tag is for a reader. To pull from a private registry or a mirror, set `registry`
+# on an entry, or `registryOverride` for all of them; the repository path, tag and digest stay the
+# same, so a copy made with `crane copy` or `skopeo copy --all` matches.
+#
+# A digest pins the bytes, not their availability: an upstream that closes anonymous pulls breaks
+# an install whatever the pin says. CI pulls every image rendered here (hack/chart-images-pullable.sh).
+thirdPartyImages:
+  # Replaces the registry of every entry below when set, e.g. registry.internal:5000. Use it for a
+  # registry you fill with all of them. The project's mirror (hack/third-party-images.txt) does not
+  # carry litellm, so it is chosen per entry with `registry`, never here.
+  registryOverride: ""
+  # The model gateway (LiteLLM). MIT, except the enterprise/ directory the image also ships, which
+  # is under BerriAI's commercial licence.
+  litellm:
+    registry: ghcr.io
+    repository: berriai/litellm
+    tag: v1.91.0
+    digest: sha256:078f96272f0c84da383e6a1f197478390b5204a86dcf00a181bcfe02a00e5dfa
+  # The state layer (Valkey): devDataPlane and statelayer.persistence. BSD-3-Clause.
+  valkey:
+    registry: docker.io
+    repository: valkey/valkey
+    tag: 8.1.3
+    digest: sha256:fea8b3e67b15729d4bb70589eb03367bab9ad1ee89c876f54327fc7c6e618571
+  # The bundled database: PostgreSQL with pgvector. PostgreSQL License.
+  postgres:
+    registry: docker.io
+    repository: pgvector/pgvector
+    tag: pg16
+    digest: sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+  # The bundled object store (SeaweedFS). Apache-2.0.
+  seaweedfs:
+    registry: docker.io
+    repository: chrislusf/seaweedfs
+    tag: "3.80"
+    digest: sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a
+  # The bundled async broker (NATS JetStream), rendered only with devDataPlane.nats.enabled. Apache-2.0.
+  nats:
+    registry: docker.io
+    repository: library/nats
+    tag: 2.11-alpine
+    digest: sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
+  # The console login broker (Dex), rendered only with auth.oidc.enabled. Apache-2.0.
+  dex:
+    registry: ghcr.io
+    repository: dexidp/dex
+    tag: v2.41.1
+    digest: sha256:bc7cfce7c17f52864e2bb2a4dc1d2f86a41e3019f6d42e81d92a301fad0c8a1d
+
 # Namespace the platform installs into. MUST match the namespace baked into
 # config/default (ctxmesh) for the no-drift default to hold. Change
 # it for a custom install; `--create-namespace` (or crds.install) still applies.
@@ -99,16 +156,11 @@ controllerManager:
   # it (the controller reads each as env). All default empty/off ⇒ the DEFAULT render == kustomize
   # (helm-verify no-drift), so this block is inert until an operator sets it.
   #
-  # injectedImages: the collector + tool-discovery sidecar images the controller injects into EVERY
-  # agent pod. Empty ⇒ the controller's dev.local defaults, which ImagePullBackOff off a real
-  # cluster — a PRODUCTION install MUST point these at your registry, digest-pinned (OPS-1).
-  # Empty ⇒ the controller's compiled-in dev.local constants, which ImagePullBackOff on any real
-  # cluster. Both are now PUBLISHED and defaulted here, because "empty" meant a default install
-  # could not run a single agent to Ready: the collector is injected into EVERY agent pod and the
-  # discovery sidecar into every tool-having one. PRODUCTION: pin to an immutable digest (OPS-1).
+  # injectedImages: the collector image the controller injects into EVERY agent pod. Empty ⇒ the
+  # controller's compiled-in dev.local constant, which ImagePullBackOffs on any real cluster, so it
+  # is PUBLISHED and defaulted here. PRODUCTION: point it at your registry, digest-pinned (OPS-1).
   injectedImages:
     collector: ghcr.io/ctxmesh/agent-otel-collector
-    discovery: ghcr.io/ctxmesh/agent-discovery
 
   # oboEgress: on-behalf-of egress-sidecar injection (ADR 0030) — injects an egress sidecar into agents
   # with remote OBO tools so tool calls are made as the end-user. For a WORKING OBO install set
@@ -135,6 +187,15 @@ controllerManager:
     # env, and an env change that did not move the revision name would be silently dropped.
     responseHeaderTimeout: ""
     streamIdleTimeout: ""
+
+  # amp: calls between agents in an AgentRegistry (ADR 0153). requireAttestation=true (the default) makes
+  # a registry member admit /invoke only from an attested AMP caller, its own async consumer, or a run
+  # capability minted for it, so registry isolation and allowedCallers hold against any code in the
+  # cluster. false is the accept posture for a two-step rollout: members also admit unattested calls,
+  # while a caller that presents an attestation is still held to it. Flipping it rolls every member once;
+  # an approved revision stays approved.
+  amp:
+    requireAttestation: true
 
 # How long the controller waits for a referenced KnowledgeBase to become visible before deploying the
 # agent WITHOUT it (M146.7 / m52.M143-knobs; the gate itself is M143.5). Blank ⇒ 30s, which covers the
@@ -241,6 +302,49 @@ tokenService:
     # kustomize, no drift). true ⇒ the token-service (credential plane) REFUSES to start
     # without mTLS — no silent HTTP downgrade. profile=production requires this true.
     required: false
+  # Admits only the BFF from the install namespace, and pods from every other namespace, to the
+  # service's port (ADR 0154). Defence in depth: every request is authenticated by a token
+  # review either way, and the policy does nothing on a CNI that does not enforce NetworkPolicy.
+  # While it is on, an agent in the install namespace cannot reach the token service: its tool
+  # calls, memory and knowledge searches time out. Run agents in their own namespaces.
+  networkPolicy:
+    enabled: true
+  # Where per-user MCP grants (OAuth tokens) are stored (ADR 0152). One backend per install,
+  # built by the token-service at startup. The keys mirror the spec.provider.<type> block of
+  # the retired CredentialStore kind, with two exceptions: kubernetes.credentialNamespace is
+  # bff.mcp.credentialNamespace (set it to the same namespace, or existing grants are
+  # orphaned), and kmsV2.keyIDPrefix is gone (KMS v2 is single-key).
+  # Every Secret named here is read from the credential namespace (bff.mcp.credentialNamespace,
+  # else the install namespace). A missing or malformed value makes the token-service refuse to
+  # start with an error naming the setting; it never falls back to kubernetes.
+  credentialBackend:
+    # kubernetes (default): grants are Secrets in the credential namespace. Renders nothing.
+    # postgres: envelope-encrypted rows in Postgres. Needs dsnSecretRef and exactly one
+    #           encryption custodian.
+    # remote:   an out-of-tree provider over mutual TLS. Needs endpoint (https) and mtls.
+    type: kubernetes
+    postgres:
+      # The Postgres connection string: {name: <secret>, key: <key>}.
+      dsnSecretRef: {}
+      # Exactly one custodian for the key that wraps each record's data key:
+      #   localKEKSecretRef: {name, key}   a 32-byte AES-256 key in a Secret
+      #   openBaoTransit:                  a per-tenant OpenBao/Vault transit key
+      #     address: https://openbao.example:8200
+      #     tokenSecretRef: {name, key}
+      #     mountPath: transit           # optional
+      #     keyPrefix: ""                # optional; key name is <keyPrefix><tenant>
+      #     caSecretRef: {name, key}     # optional; verifies the OpenBao server
+      #   kmsV2:                           a Kubernetes KMS v2 plugin
+      #     endpoint: unix:///var/run/kms/socket   # single-key: the plugin manages one KEK
+      encryption: {}
+    remote:
+      # The provider's https base URL.
+      endpoint: ""
+      mtls:
+        # The CA that verifies the provider: {name: <secret>, key: <key>}.
+        caSecretRef: {}
+        # A kubernetes.io/tls Secret holding the client certificate the token-service presents.
+        clientTLSSecretName: ""
 # The state-layer proxy (M51, ADR 0050) — stateless, so >1 is plain HA. As of M53
 # the phase-3 cutover is the DEFAULT (agents route memory/quota/dedup through the
 # proxy and hold no direct Valkey path), so a PRODUCTION install MUST set
@@ -271,14 +375,29 @@ statelayerProxy:
 crds:
   install: true
 
-# --- Bundled dev data plane (Valkey statelayer + MinIO objectstore) ----------
-# DEV / TRIAL ONLY (PRD §23). These run an in-cluster Valkey + MinIO with
-# DETERMINISTIC dev credentials (never real secrets). In production set
-# `enabled: false` and point the controller at an externally-managed data plane.
+# --- Bundled dev data plane (Postgres, Valkey, SeaweedFS, NATS) --------------
+# DEV / TRIAL ONLY (PRD §23). These run in-cluster with DETERMINISTIC dev
+# credentials (never real secrets). In production set `enabled: false` and point
+# the controller at an externally-managed data plane.
 devDataPlane:
   # Container resources for the bundled dev data plane. Same contract as the
   # control-plane components: today's numbers, overridable per component.
   nats:
+    # The async A2A broker (NATS JetStream, ADR 0121). Off by default: nothing uses it until the
+    # BFF is pointed at it, so enable it together with
+    #   bff.asyncBackend: jetstream
+    #   bff.natsURL: nats://ctxmesh-nats.<namespace>.svc:4222
+    # Without a broker the async publish edge is not registered and `?mode=async` is refused.
+    enabled: false
+    # KEDA's operator reads an agent's queue from the NATS monitoring port, 8222, for a
+    # queue-depth AgentScalingPolicy. This broker's NetworkPolicy admits it to that port, and
+    # only that port, by the namespace KEDA runs in and its operator pods' labels; set them to
+    # match your KEDA install (Helm merges maps, so set a default label to null to drop it). A
+    # NATS you run yourself must admit the same pods to its 8222.
+    kedaOperator:
+      namespace: keda
+      podLabels:
+        app: keda-operator
     resources:
       limits:
         memory: 512Mi
@@ -286,6 +405,11 @@ devDataPlane:
         cpu: 50m
         memory: 64Mi
   objectstore:
+    # The object store (SeaweedFS, S3 API on :9000): knowledge-base documents, recorded run
+    # fixtures, and large async payloads between registry members. Turning it off makes KB upload
+    # and ingestion and the run-fixture view answer 501, record-capable agents fail at start, and
+    # async payloads between registry members travel inline, so one over 1 MiB is refused.
+    enabled: true
     resources:
       limits:
         memory: 512Mi
@@ -318,7 +442,7 @@ devDataPlane:
 #
 # DEV/TRIAL (default): a single-node pgvector Deployment + PVC is rendered under
 # `devDataPlane.enabled`, with deterministic dev credentials (PRD §23) — the same
-# posture as the bundled Valkey and MinIO.
+# posture as the bundled Valkey and object store.
 #
 # PRODUCTION: set `devDataPlane.enabled=false` and point `externalDsn` at an
 # operator-managed PostgreSQL. `profile: production` REQUIRES externalDsn and
@@ -454,6 +578,13 @@ ui:
 # `helm install --set bff.providerConnect.enabled=false` renders "false" to
 # disable it — the ADR 0015 hardened-install path.
 bff:
+  # Run capabilities are sender-constrained (ADR 0124): the launcher binds each one to a
+  # key only it holds, and the BFF refuses an unbound (bearer) capability at spawn, handoff, discover,
+  # async publish and guardrail events. Empty follows whether binding is possible (it needs the state
+  # layer). Set false only while agents built on an older base image, whose launcher cannot bind, are
+  # still running: false lets a copied capability be spent.
+  runCapabilities:
+    requireProofOfPossession: ""
   # Container resources. An operator cannot size the control plane for their
   # cluster if these are baked into the template, and until M178 every workload
   # in this chart had them hardcoded — 31 limits/requests blocks, none of them
@@ -512,7 +643,10 @@ bff:
     annotations: {}
     tls: []
 
-  managedAgentImage: ""
+  # The image every console-created (managed) agent runs. A repository without a tag gets the
+  # chart's appVersion, like the injected images; a full ref or digest is used as given. Empty falls
+  # back to a compiled-in tag that is never published, so leave it set.
+  managedAgentImage: ghcr.io/ctxmesh/managed-agent
   ingestOcrURL: ""
   knowledgeRerankURL: ""
   # Capability discovery (M141, ADR 0120) embeds through a ModelRoute the
@@ -522,9 +656,19 @@ bff:
   # Async A2A backend (M141, ADR 0121). BYO by design, like Valkey (ADR 0053):
   # set asyncBackend + natsURL to ride a JetStream the operator runs. Empty ⇒
   # the publish edge is not registered at all, so ?mode=async fails loudly.
+  # The controller reads both as well: only on this backend does a queue-depth
+  # AgentScalingPolicy scale an eventing agent, with KEDA reading the agent's
+  # queue from the NATS monitoring port, 8222, on the natsURL host.
   asyncBackend: ""
   natsURL: ""
   natsCredentialsFile: ""
+  # The NATS account the stream lives in, which KEDA's scaler reads it under. Empty ⇒ $G,
+  # the account of a server with no accounts configured, such as the bundled one. Set it
+  # whenever natsCredentialsFile is set: a queue-depth AgentScalingPolicy refuses to guess.
+  natsAccount: ""
+  # How many async hops to one agent the dispatcher delivers at once. Empty ⇒ 8. Raise it
+  # when a queue-depth policy lets an agent scale past what 8 concurrent hops keep busy.
+  asyncDeliveryConcurrency: ""
 
   image:
     # The BFF (console backend) image. Empty tag → Chart.appVersion ("latest"), matching
@@ -547,8 +691,16 @@ bff:
   # resume). LOCALLY, without TLS, a plain-http custom domain (e.g. console.127.0.0.1.sslip.io)
   # is REFUSED by many providers (Scalekit) — use the loopback callback instead
   # ("http://127.0.0.1:9090", a port-forward to the BFF), which the provider's loopback
-  # exception accepts; the chatbox then resumes via the popup-close poll (the relay only fires
-  # when the callback shares the agents' base domain). Verified on kind (M38).
+  # exception accepts. Verified on kind (M38).
+  #
+  # Connect in an agent's own chat begins on the console's /connect page by a single-use
+  # ticket (ADR 0040 amendment). The console accepts the ticket only from
+  # <agent>.<namespace>.<base>, where <base> is this host minus its first label (the host
+  # itself for an apex domain; console.localhost has its agents under localhost) — the
+  # platform edge's layout — or, for a loopback console,
+  # <agent>.<namespace>.127.0.0.1.sslip.io / .nip.io / .localhost. That check relies on the
+  # edge sandboxing every agent response and dropping its Set-Cookie (deploy/edge); /connect
+  # also names the account and waits for the user to continue.
   consoleURL: ""
   # BFF replica count (ADR 0051, M55). Default 1 == kustomize (no-drift). Scaling >1
   # REQUIRES runStore.enabled (dispatch) — else in-process runs split across pods and
@@ -610,7 +762,15 @@ bff:
     # Per-cluster salt for MCP grant identity hashes (ADR 0029 §7). Empty ⇒ legacy
     # UNSALTED SHA-256, which is enumerable: a known username hashes to a known value, so
     # a reader of the grant Secrets can identify users without reading a token.
-    # REQUIRED under profile=production. Changing it later re-keys grants (re-consent).
+    # REQUIRED under profile=production (one of the two below). Changing it later re-keys
+    # grants (re-consent).
+    #
+    # grantHmacKeySecret names a Secret you create, holding the key under MCP_GRANT_HMAC_KEY.
+    # Preferred: the key never passes through Helm values, and an upgrade that forgets it
+    # cannot drop it. The BFF and the run-worker read it from there.
+    grantHmacKeySecret: ""
+    # grantHmacKey makes the chart create that Secret (ctxmesh-grant-hmac) from this value.
+    # Every upgrade must pass the same value again, or the Secret is removed.
     grantHmacKey: ""
     enabled: true
     requireApproval: false
@@ -621,7 +781,7 @@ bff:
     # `ctxmesh-credentials`) to render the dedicated namespace + a
     # credential-component-only Role/RoleBinding (templates/mcp-credentials.yaml) and
     # route grants there, so a tenant sharing the cluster cannot read another user's
-    # OAuth tokens. Pair it with a per-cluster MCP_GRANT_HMAC_KEY (bff-adapters Secret).
+    # OAuth tokens. Pair it with a per-cluster grant key (grantHmacKeySecret above).
     # Changing it later re-keys grants (dev re-consent). PRODUCTION SHOULD SET THIS.
     credentialNamespace: ""
 
@@ -645,9 +805,7 @@ auth:
     # Dex at. It MUST match the apiserver --oidc-issuer-url byte-for-byte. Override
     # for your ingress / LoadBalancer host.
     issuer: "https://dex.ctxmesh.example.com"
-    image:
-      repository: ghcr.io/dexidp/dex
-      tag: "v2.41.1"
+    # The Dex image is thirdPartyImages.dex.
     # The console OAuth client — Auth-Code + PKCE, a PUBLIC client (no secret in the
     # browser; PKCE is the proof). redirectURIs is the SPA's callback origin(s).
     client:

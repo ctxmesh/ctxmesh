@@ -22,8 +22,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
@@ -41,21 +43,22 @@ import (
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/enduseragent"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/killscope"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/spawnbudget"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
-	"github.com/ctxmesh/ctxmesh/internal/gateway"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
@@ -64,6 +67,11 @@ import (
 // into AgentDeployment.status.conditions. Kept as a named constant to satisfy
 // the goconst linter and to make the value easy to grep.
 const conditionReady = "Ready"
+
+// conditionTraceExport reports whether this agent's spans export to Langfuse or stay in the
+// collector's debug log. It exists because the alternative was silence: an agent without a
+// Langfuse Secret in its namespace looked identical to one exporting successfully.
+const conditionTraceExport = "TraceExport"
 
 // reasonIdentitySAConflict is set on the AgentDeployment Ready condition when
 // the per-agent identity ServiceAccount (agent-<name>) already exists and is
@@ -96,21 +104,15 @@ const ceTypeAttribute = "type"
 
 // Blob-offload object store (m7.6b, specs/eventing-scaling.md §"Blob offload").
 // A registry member's launcher offloads a >256KiB async payload to the dedicated
-// dev MinIO (config/objectstore/) and rehydrates it on consume. The address and
-// the DEV-ONLY deterministic credentials are injected as STATIC env — never
-// valueFrom (Knative's ksvc webhook rejects it; the m5.7 landmine + tier1 guard).
+// dev object store (config/objectstore/) and rehydrates it on consume. The address and
+// the DEV-ONLY deterministic credentials are injected as STATIC env: they are public
+// constants (ADR 0083), so a Secret reference would hide nothing.
 const (
-	// objectStoreAddr is the cluster address of the dedicated dev MinIO Service
-	// (config/objectstore/, wired into config/default). It mirrors the S3 API
-	// port; the launcher connects to it plain-HTTP in-cluster (dev posture, like
-	// the dev Valkey). One store serves every registry member.
-	objectStoreAddr = "ctxmesh-objectstore.ctxmesh.svc:9000"
-
 	// objectStoreDevAccessKey / objectStoreDevSecretKey are the DETERMINISTIC
-	// DEV-ONLY credentials for the dev MinIO — fixed values committed as such
+	// DEV-ONLY credentials for the dev object store — fixed values committed as such
 	// (identical posture to the dev Langfuse / Valkey: NOT a real credential,
-	// never rotated, only ever meaningful against the in-cluster dev MinIO). They
-	// MUST match the values the config/objectstore/ MinIO Deployment is seeded
+	// never rotated, only ever meaningful against the in-cluster dev object store). They
+	// MUST match the values the config/objectstore/ Deployment is seeded
 	// with. Injected as static env so the launcher authenticates to the dev store.
 	objectStoreDevAccessKey = "ctxmesh-dev"
 	objectStoreDevSecretKey = "ctxmesh-dev-secret" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
@@ -128,31 +130,29 @@ const (
 // record fixture sinks) so the names + values stay in lockstep. Values are reconcile-time
 // constants — NEVER valueFrom (the m5.7 Knative landmine / tier1 no-valueFrom guard).
 //
-// OPS-2: the triple is DEV-ONLY (the bundled MinIO). It is injected ONLY when the dev data plane is
-// enabled (devDataPlane=false ⇒ nil, no injection), so a `profile: production` install never ships
-// the dev.local object-store creds into agent pods — a record-capable agent there then C2-fails-
-// closed on the absent store rather than pointing at a non-existent dev MinIO (the correct posture:
-// production has not provisioned a durable store, so record/blob-offload is feature-off).
-func objectStoreEnv(devDataPlane bool) []corev1.EnvVar {
-	if !devDataPlane {
+// OPS-2: the triple is DEV-ONLY (the bundled object store). It is injected ONLY when that store is
+// deployed (devObjectStore=false ⇒ nil, no injection), so a `profile: production` install never ships
+// the dev object-store creds into agent pods — a record-capable agent there then C2-fails-closed on
+// the absent store rather than pointing at a Service that does not exist (production has not
+// provisioned a durable store, so record/blob-offload is feature-off).
+func objectStoreEnv(devObjectStore bool, platform platformServices) []corev1.EnvVar {
+	if !devObjectStore {
 		return nil
 	}
 	return []corev1.EnvVar{
-		{Name: envObjectStoreAddr, Value: objectStoreAddr},
+		{Name: envObjectStoreAddr, Value: platform.objectStoreAddr()},
 		{Name: envObjectStoreAccessKey, Value: objectStoreDevAccessKey},
 		{Name: envObjectStoreSecretKey, Value: objectStoreDevSecretKey},
 	}
 }
 
-const (
-	// litellmGatewayURL is the in-cluster address of the LiteLLM model gateway.
-	// It is the DEFAULT MODEL_GATEWAY_URL for an unbudgeted agent (the agent calls
-	// LiteLLM directly, the M2 path). For a BUDGETED agent (spec.budget set) the
-	// controller repoints MODEL_GATEWAY_URL at the launcher's local budget proxy
-	// (budgetProxyURL) and passes this address through as GATEWAY_UPSTREAM_URL so
-	// the proxy still forwards to LiteLLM after enforcing the cost cap.
-	litellmGatewayURL = "http://ctxmesh-gateway.ctxmesh.svc:4000"
+// devObjectStore reports whether agent pods get the bundled object store's env: the dev data plane
+// is on and its object store was not turned off.
+func (r *AgentDeploymentReconciler) devObjectStore() bool {
+	return r.DevDataPlane && !r.DevObjectStoreOff
+}
 
+const (
 	// budgetProxyURL is where MODEL_GATEWAY_URL points when a budget is set: the
 	// launcher's OWN outbound gateway proxy (:2996, cmd/launcher/gateway.go). The
 	// proxy runs inside the same pod, so localhost. Its port must match
@@ -160,9 +160,14 @@ const (
 	budgetProxyURL = "http://localhost:2996"
 
 	// envAgentName is the AGENT_NAME env var — the agent's identity, injected
-	// unconditionally in the base env (the tracing identity) and reused by the
-	// memory, registry, and budget paths (each guards against double-inject).
+	// once in the base env (the tracing identity) and read by the memory,
+	// registry, and budget paths. An identity variable (platform_env.go).
 	envAgentName = "AGENT_NAME"
+
+	// envAgentVersion is the AGENT_VERSION env var: the AgentVersion the pod serves. The launcher tags
+	// every trace version:<AGENT_VERSION>, and online scores, regression detection, auto-rollback and
+	// canary scoring all key on it matching status.latestVersion.
+	envAgentVersion = "AGENT_VERSION"
 
 	// envPodNamespace is the POD_NAMESPACE env var — the agent's namespace. Injected
 	// unconditionally in the base env so the launcher can form the UNAMBIGUOUS
@@ -188,8 +193,14 @@ const (
 	// proxy audience; the launcher presents it so the proxy derives the tenant from the
 	// pod's namespace. The mount path + audience + expiry must match the launcher
 	// (defaultPodTokenPath) and the proxy (STATELAYER_POD_AUDIENCE) respectively.
-	envStatelayerProxyURL      = "STATELAYER_PROXY_URL"
-	envStatelayerTokenPath     = "STATELAYER_TOKEN_PATH"
+	envStatelayerProxyURL  = "STATELAYER_PROXY_URL"
+	envStatelayerTokenPath = "STATELAYER_TOKEN_PATH"
+	// A guarded agent's own identity toward the BFF (m184.7): a projected token with the BFF's audience,
+	// so the guardrail audit edge can authenticate the pod that enforced a block when the run capability
+	// it holds was relayed over AMP and is bound to another agent's key.
+	envBFFPodTokenPath         = "BFF_POD_TOKEN_PATH"
+	bffPodTokenVolume          = "bff-pod-token"
+	bffPodTokenMountPath       = "/var/run/secrets/ctxmesh-bff"
 	statelayerTokenVolume      = "statelayer-proxy-token"
 	statelayerTokenMountPath   = "/var/run/secrets/statelayer-proxy"
 	statelayerPodTokenFilePath = statelayerTokenMountPath + "/token"
@@ -198,25 +209,14 @@ const (
 )
 
 // Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3). The :2995
-// listener is started by the launcher when these env vars are injected. All
-// values are known at reconcile time → STATIC env, NEVER valueFrom (Knative
-// ksvc webhook rejects valueFrom; the m5.7 landmine + tier1 no-valueFrom guard).
+// listener is started by the launcher when these env vars are injected; its
+// Langfuse keys come from the namespace's langfuse-otlp Secret
+// (telemetry.LangfuseScoresEnv), never from literals.
 const (
 	// langfuseHost is the in-cluster Langfuse base URL. The feedback hook POSTs
 	// scores to <langfuseHost>/api/public/scores. Reuses the dev Langfuse wired
 	// by `make -C harness dev-up M=3` (same host as the M3 OTel collector exporter).
 	langfuseHost = "http://langfuse-web.langfuse.svc:3000"
-
-	// langfuseDevPublicKey / langfuseDevSecretKey are the DETERMINISTIC DEV-ONLY
-	// Langfuse API credentials — fixed values committed as such (identical posture
-	// to the dev MinIO OBJECT_STORE_ACCESS_KEY / objectStoreDevAccessKey). They
-	// MUST match the public/secret key seeded by `dev-up M=3` into the
-	// langfuse-otlp Secret (and into the Langfuse Helm chart's initialApiKey
-	// block). NOT a real credential — never rotated, only ever meaningful against
-	// the in-cluster dev Langfuse. Injected as STATIC env (no valueFrom) so the
-	// launcher's feedback hook can authenticate to the dev scores API.
-	langfuseDevPublicKey = "pk-lf-dev-00000000000000000000000000000000"
-	langfuseDevSecretKey = "sk-lf-dev-00000000000000000000000000000000" //nolint:gosec // dev-only fixed value, not a real credential (see comment).
 
 	// feedbackPort is the localhost port the launcher's feedback hook binds. Must
 	// match defaultFeedbackPort in cmd/launcher/feedback.go. Reserved per
@@ -235,7 +235,7 @@ const jobBackoffLimit int32 = 2
 // The reconcile loop implements a four-step flow (agent-brain specs/agent-serving.md):
 //
 //  1. Fetch; guard unsupported executionModel.
-//  2. Hash spec → ensure AgentVersion snapshot exists.
+//  2. Hash spec → record the version in the control-plane store (fails open).
 //  3. CreateOrUpdate the Knative Service (same name/namespace, controller owner ref).
 //  4. Mirror ksvc Ready condition + URL into AgentDeployment.status.
 //
@@ -256,6 +256,16 @@ type AgentDeploymentReconciler struct {
 	// control-plane database — an agent that attaches no skills is unaffected, and one that
 	// does is failed honestly rather than deployed with them silently missing.
 	Skills skill.Resolver
+
+	// SkillGit fetches the bodies of git-sourced skill versions. Nil ⇒ those bodies are not mounted,
+	// and the SkillBodies condition says so; the binary wires the same github.com fetch the BFF's
+	// prompt resolver uses.
+	SkillGit prompt.Resolver
+
+	// SkillObjects reads the bodies of uploaded skill versions. Nil ⇒ the bundled object store when
+	// this install deploys it (the address and credential agent pods are given), else uploaded bodies
+	// are not mounted.
+	SkillObjects skillObjectReader
 
 	// APIReader is an UNCACHED reader (the manager's API reader). The collector's
 	// Langfuse telemetry Secret is read through it, NOT the cache: a cached read is
@@ -287,6 +297,13 @@ type AgentDeploymentReconciler struct {
 	// (envtest) — the registration sync is a no-op.
 	AgentCapabilityStore agentcapability.Store
 
+	// AMPAcceptUnattested is the rollout posture for in-mesh calls (ADR 0153), from the controller's
+	// AMP_REQUIRE_ATTESTATION: only an explicit "false" sets it. False (the default) ⇒ a registry member
+	// admits /invoke only from an attested AMP caller, its own async consumer, or a run capability naming
+	// it. True ⇒ it also admits what it admitted before, while a caller that does present an attestation
+	// is still held to it.
+	AMPAcceptUnattested bool
+
 	// SpawnBudgetStore mirrors a supervisor's DECLARED spawn budget (M142.6, m52.C19b) so the BFF's
 	// authoritative spawn gate can enforce the team's real numbers instead of the ones a pod relays.
 	// Nil ⇒ no control-plane DB (envtest) — the sync is a no-op.
@@ -301,13 +318,11 @@ type AgentDeploymentReconciler struct {
 	// through the CALLER's client and therefore never needed the mirror.
 	KillScopeStore killscope.Store
 
-	// CollectorImage / DiscoveryImage override the injected OTel-collector / tool-discovery
-	// sidecar images (audit OPS-1; from COLLECTOR_IMAGE / DISCOVERY_IMAGE env, mirror of
-	// EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constants — which are dev.local/*
-	// and ImagePullBackOff off a kind cluster, so a real install MUST set these to a
+	// CollectorImage overrides the injected OTel-collector sidecar image (audit OPS-1; from
+	// COLLECTOR_IMAGE env, mirror of EGRESS_SIDECAR_IMAGE). Empty ⇒ the project-default constant —
+	// which is dev.local/* and ImagePullBackOff off a kind cluster, so a real install MUST set it to a
 	// reachable registry (wired through the chart, OPS-4).
 	CollectorImage string
-	DiscoveryImage string
 
 	// DevDataPlane gates injection of the DEV-ONLY blob-offload/record object-store creds and the
 	// dev Langfuse feedback-scores creds into agent pods (OPS-2). Set from the controller's
@@ -318,6 +333,17 @@ type AgentDeploymentReconciler struct {
 	// as feature-off (blob offload / record fixtures / feedback scores simply do not run). The
 	// creds themselves remain deterministic dev-only non-secrets; this gate governs INJECTION.
 	DevDataPlane bool
+
+	// DevObjectStoreOff withholds the object-store env that DevDataPlane would inject, for an install
+	// that runs the bundled data plane without its object store (DEV_OBJECT_STORE=false; chart:
+	// devDataPlane.objectstore.enabled=false). Record mode and blob offload then see no store, which
+	// they treat as feature-off, instead of an address no Service answers.
+	DevObjectStoreOff bool
+
+	// PlatformNamespace is the namespace the platform is installed into, the controller's own; every
+	// platform address an agent is given is derived from it (platform_services.go). Empty means
+	// DefaultPlatformNamespace.
+	PlatformNamespace string
 
 	// StatelayerProxyURL, when set (from the controller's STATELAYER_PROXY_URL env),
 	// is injected into memory-bound agents so the launcher reverse-proxies session/
@@ -382,6 +408,24 @@ type AgentDeploymentReconciler struct {
 	// auto-trigger a rollback (the auto-trigger is deferred, PRD §17.4).
 	OnlineScore onlineScoreReader
 
+	// Versions is the agent version history (ADR 0042): written at Step 2, read by rollback and the
+	// regression detector's baseline. Nil (a test without a store) records nothing, and a rollback then
+	// finds no target.
+	Versions agentversion.Store
+
+	// recorded holds, per "<namespace>/<name>", the recordedVersion this process last recorded.
+	recorded sync.Map
+
+	// skillFetches is what every agent's skill-body fetches have learned: failures to wait out, per
+	// pinned ref; breakers, per source host; verified sizes.
+	skillFetches skillFetchState
+
+	// bundledObjects holds the object-store reader for the bundled store, per address.
+	bundledObjects sync.Map
+
+	// clock replaces time.Now for the version cache's expiry (tests). Nil ⇒ time.Now.
+	clock func() time.Time
+
 	// OnlineConfig publishes each agent's online-scoring policy to cpDB (m84.3, ADR 0062 Fork 2 / ADR 0011):
 	// the controller resolves spec.evalSuiteRef → EvalSuite.spec.online and UPSERTS/DELETES the per-(ns,
 	// agent) config row that the BFF online-scoring worker READS (cpDB, no agent-CRD RBAC on the BFF SA).
@@ -394,6 +438,11 @@ type AgentDeploymentReconciler struct {
 // registryReader returns the configured RegistryReader. REQUIRED post-retirement
 // (ADR 0044) — there is no CRD to fall back to (main.go wires the Postgres reader;
 // envtests inject a memstore-backed one).
+// platformServices are the addresses of the platform this controller belongs to.
+func (r *AgentDeploymentReconciler) platformServices() platformServices {
+	return newPlatformServices(r.PlatformNamespace)
+}
+
 func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 	return r.Registry
 }
@@ -401,7 +450,6 @@ func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentdeployments/finalizers,verbs=update
-// +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentversions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=agentscalingpolicies,verbs=get;list;watch
 // PromptVersion retired to Postgres (ADR 0044) — the controller reads the resolved-prompt annotation, no CRD RBAC.
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=evalsuites,verbs=get;list;watch
@@ -421,11 +469,20 @@ func (r *AgentDeploymentReconciler) registryReader() RegistryReader {
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile implements the AgentDeployment reconciliation loop.
-func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
 	log := logf.FromContext(ctx)
 
+	// A version-store failure never stops the reconcile (agent_versions.go); it brings the next one
+	// forward instead.
+	storeUnavailable := false
+	defer func() {
+		if storeUnavailable {
+			result = retrySoon(result, err)
+		}
+	}()
+
 	// ── Step 1: Fetch ────────────────────────────────────────────────────────
-	var deploy agentsv1alpha1.AgentDeployment
+	var deploy agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, req.NamespacedName, &deploy); err != nil {
 		if apierrors.IsNotFound(err) {
 			// M137/EU1b (ADR 0107): prune the end-user exposure mirror for a deleted agent (the row is a
@@ -436,21 +493,26 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// M142.6: a deleted supervisor keeps no budget row (the mirror is not K8s-owned, so owner-ref
 			// GC does not reach it).
 			r.pruneSpawnBudget(ctx, req.Namespace, req.Name)
+			r.deleteVersions(ctx, req.Namespace, req.Name)
+			r.skillFetches.setPrunePending(req.String(), false)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
 	}
 
-	// ── Step 1b: Human rollback actuator (m69.8, ADR 0062 Fork 4) ─────────────
-	// A `agents.ctxmesh.ai/rollback=<agentversion>` annotation reverts the serving spec to
-	// that version's snapshot, guarded by the damping mechanism. It runs BEFORE the spec-hash
-	// / workload steps because a rollback rewrites spec — the ordinary path must reconcile the
-	// REVERTED spec, not the pre-revert one. The revert is a spec Update that re-enqueues the
-	// object, so the following reconcile rolls the workload through the normal path (the
-	// actuator never touches Knative traffic; the auto-trigger is DEFERRED, PRD §17.4).
-	if handled, rerr := r.maybeRollback(ctx, &deploy); handled {
+	// ── Step 1b: Rollback actuator (m69.8, ADR 0062 Fork 4) ───────────────────
+	// A `agents.ctxmesh.ai/rollback=<agentversion>` annotation, or an opted-in auto-rollback,
+	// reverts the serving spec to that version's snapshot, guarded by the damping mechanism. It
+	// runs BEFORE the spec-hash / workload steps because a rollback rewrites spec — the ordinary
+	// path must reconcile the REVERTED spec, not the pre-revert one. The revert is a spec Update
+	// that re-enqueues the object, so the following reconcile rolls the workload, giving the
+	// reverted version all traffic at once (serveRollbackTarget; the actuator never touches Knative
+	// traffic). An auto-path refusal is not handled: the ordinary reconcile below still runs.
+	handled, retry, rerr := r.maybeRollback(ctx, &deploy)
+	if rerr != nil || handled {
 		return ctrl.Result{}, rerr
 	}
+	storeUnavailable = retry
 
 	// Normalise the execution model. The CRD default fills "serving" for omitted
 	// values; a belt-and-braces default here covers a client that submits the
@@ -469,16 +531,14 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// and it does NOT gate the deploy: a cpDB blip is logged, never a reconcile error. No-op when unwired.
 	r.reconcileOnlineScoreConfig(ctx, &deploy)
 
-	// ── Step 2: Spec hash → AgentVersion ─────────────────────────────────────
+	// ── Step 2: Spec hash → recorded version ─────────────────────────────────
 	hash, err := specHash(deploy.Spec)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("computing spec hash: %w", err)
 	}
-	versionName := deploy.Name + "-" + hash
-	log.Info("Ensuring AgentVersion", "version", versionName)
-
-	if err = r.ensureAgentVersion(ctx, &deploy, versionName); err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensuring AgentVersion %s: %w", versionName, err)
+	versionName := agentVersionName(deploy.Name, hash)
+	if !r.recordVersion(ctx, &deploy, versionName) {
+		storeUnavailable = true
 	}
 
 	// Settle gate (M143 m143.5, m52.G12): a referenced-but-not-yet-visible KnowledgeBase is
@@ -531,7 +591,13 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// other kinds — a different object, not a ksvc revision roll — so each branch
 	// tears down the workloads the other branches own before writing its own.
 	log.Info("Reconciling workload", "name", deploy.Name, "executionModel", model)
-	result, err := r.reconcileWorkload(ctx, &deploy, model, hash, versionName)
+	workloadCtx, skillBodies := withSkillBodiesMemo(ctx)
+	result, err = r.reconcileWorkload(workloadCtx, &deploy, model, hash, versionName)
+	if err == nil {
+		// A skill body that could not be fetched is tried again on its own backoff; everything else
+		// about the agent is reconciled already.
+		result = requeueForSkillBodies(result, skillBodies)
+	}
 
 	// Prompt-only deploy (M9): a promptResolveError is USER input (missing
 	// PromptVersion / unresolvable git ref/path), surfaced from buildPodTemplate
@@ -561,13 +627,6 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if ie, ok := asInPodRequireApprovalError(err); ok {
 		return r.setReadyFalse(ctx, &deploy, ie.reason, ie.msg)
 	}
-	// Declarative HITL FAIL-CLOSED (M139, ADR 0111 §3): a dangling approvalPolicyRef is surfaced from
-	// buildPodTemplate as an *approvalPolicyResolveError BEFORE any workload write — the agent is held
-	// NotReady rather than served without its declared approval gate. An ApprovalPolicy create fixes it
-	// (re-reconciles via the watch).
-	if ae, ok := asApprovalPolicyResolveError(err); ok {
-		return r.setReadyFalse(ctx, &deploy, ae.reason, ae.msg)
-	}
 	// SA name-collision (m79.1, m52 C11): an agent-<name> SA already owned by a
 	// DIFFERENT controller must fail LOUD, not wedge the reconcile in a hot-loop.
 	// Surface it as Ready=False IdentitySAConflict and STOP cleanly (nil error ⇒
@@ -584,7 +643,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 // all three models before returning.
 func (r *AgentDeploymentReconciler) reconcileWorkload(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	model, hash, versionName string,
 ) (ctrl.Result, error) {
 	switch model {
@@ -605,24 +664,10 @@ func (r *AgentDeploymentReconciler) reconcileWorkload(
 // AgentScalingPolicy controller owns only the KEDA ScaledObject).
 func (r *AgentDeploymentReconciler) reconcileServing(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash, versionName string,
 ) (ctrl.Result, error) {
-	// Tear down the workloads owned by the other models (transition handling):
-	// the job-model Job/CronJob and the eventing Deployment + Service + Trigger.
-	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteStaleTrigger(ctx, deploy); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
-		return ctrl.Result{}, err
-	}
-	if err := r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name)); err != nil {
+	if err := r.deleteNonServingWorkloads(ctx, deploy); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -635,21 +680,41 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	// serving. Only `promoted`/`warned` proceed to the ksvc CreateOrUpdate. This is
 	// the scorer-agnostic mechanism: block-then-promote never overbuilds Knative
 	// traffic-splitting — a held candidate is simply never written.
-	candidateRev, err := r.candidateRevisionName(ctx, deploy, hash)
+	cand, err := r.candidateRevisionName(ctx, deploy, hash)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	candidateRev := cand.name
+
+	// A rollback returns to a version that has served: it takes all traffic at once, without a
+	// canary, an approval or a re-run of the gate (ADR 0062, 2026-10-11 amendment).
+	if rollbackBypass(deploy, versionName, cand) {
+		return r.serveRollbackTarget(ctx, deploy, hash, versionName, candidateRev)
 	}
 
 	// Resolve the OLD serving revision from the LIVE ksvc BEFORE any candidate write —
 	// it is the "old" arm of a canary split (the serving revision that is NOT the
 	// candidate). Read here (pre-apply) so the split pins the revision genuinely serving
 	// today. "" ⇒ no ksvc yet, or the only serving revision IS the candidate (no old arm).
-	oldRev, err := r.currentServingRevision(ctx, deploy, candidateRev)
+	live, err := r.liveKnativeService(ctx, deploy)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	oldRev := oldServingRevision(live, candidateRev)
+	if cand.renamedFrom(oldRev) {
+		oldRev = "" // the same pod under an older contract's name is not a second arm
+	}
+	// Whether the controller routes this service by revision name, and whether the candidate
+	// is the revision that routing treats as stable: a promoted or auto-promoted canary, a
+	// spec reverted — after an abort, or mid-split — to the revision that was serving, or that
+	// revision renamed by a pod contract change.
+	var stableRev string
+	if live != nil {
+		stableRev = stableArm(live.Spec.Traffic)
+	}
+	candidateIsStable := cand.names(stableRev)
 
-	outcome, err := r.evaluateGate(ctx, deploy, candidateRev)
+	outcome, err := r.evaluateGate(ctx, deploy, cand)
 	if err != nil {
 		// A missing/invalid EvalSuite is USER input (surfaced from evaluateGate as an
 		// evalGateError): report Ready=False and STOP cleanly (the old revision keeps
@@ -663,14 +728,21 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	// serving revision takes the canary path (ADR 0062 Fork 3) — for BOTH the
 	// unapproved case (hold at a named {old, candidate:N%} split so both arms accumulate
 	// online scores) AND the human-completion case (promote=<candidate> → 100% candidate,
-	// abort → 100% old). The ordinary promote path leaves ksvc.Spec.Traffic alone, so a
-	// canary MUST route through reconcileCanary to set the named split/completion traffic.
+	// abort → 100% old). The ordinary promote path never splits, so a canary MUST route
+	// through reconcileCanary to set the named split/completion traffic.
 	// A gate:warn/blocked candidate (Decision != promoted) never canaries. A first deploy
 	// with no old arm (oldRev == "") is a degenerate canary → fall through to the ordinary
 	// path (hold at 0% until promoted, or promote-all — unchanged).
 	if outcome != nil && outcome.status.Decision == eval.DecisionPromoted &&
 		canaryConfigured(deploy, execModelServing) && oldRev != "" && oldRev != candidateRev {
-		return r.reconcileCanary(ctx, deploy, hash, versionName, candidateRev, oldRev, outcome)
+		return r.reconcileCanary(ctx, deploy, hash, versionName, cand, oldRev, outcome)
+	}
+	// A passing candidate that is already the stable revision has nothing to wait for: the
+	// spec matches what serves. Holding it for approval would report a serving agent as
+	// awaiting promotion, which is what an auto-promoted revision did on its next reconcile.
+	if outcome != nil && !outcome.promote && outcome.status.Decision == eval.DecisionPromoted && candidateIsStable {
+		outcome = candidateServingOutcome(outcome)
+		r.emitGateSpan(ctx, deploy, outcome.status)
 	}
 	if outcome != nil && !outcome.promote {
 		// Gate held the rollout (blocked or awaiting-promotion): do NOT apply the
@@ -680,9 +752,22 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 		return r.recordHeldGate(ctx, deploy, versionName, outcome)
 	}
 
-	ksvc, resolvedSkills, err := r.reconcileKnativeService(ctx, deploy, hash)
+	// Once traffic is routed by name, keep routing by name, in the same write as the
+	// template. Applying the template alone drops spec.traffic when its name changes, and
+	// Knative then serves the latest ready revision, which after an abort is the rejected
+	// candidate. A named target that is not ready yet leaves the route as it was.
+	var keepTraffic []servingv1.TrafficTarget
+	if stableRev != "" {
+		keepTraffic = namedFullTraffic(candidateRev)
+	}
+	ksvc, resolvedSkills, err := r.reconcileKnativeService(ctx, deploy, hash, keepTraffic)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling Knative Service: %w", err)
+	}
+	// A progression recorded for another candidate is over: that candidate no longer serves.
+	// Left in place, re-applying its spec would resume at the percent it had reached.
+	if ro := deploy.Status.Rollout; ro != nil && ro.CandidateRevision != candidateRev {
+		deploy.Status.Rollout = nil
 	}
 	if err = r.syncStatus(ctx, deploy, ksvc, versionName, resolvedSkills); err != nil {
 		return ctrl.Result{}, fmt.Errorf("syncing status: %w", err)
@@ -698,6 +783,46 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 	return ctrl.Result{}, nil
 }
 
+// deleteNonServingWorkloads tears down the workloads owned by the other execution models
+// (transition handling): the job-model Job/CronJob and the eventing Deployment + Service + Trigger.
+func (r *AgentDeploymentReconciler) deleteNonServingWorkloads(
+	ctx context.Context,
+	deploy *agentsv1beta1.AgentDeployment,
+) error {
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.Job{}); err != nil {
+		return err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &batchv1.CronJob{}); err != nil {
+		return err
+	}
+	if err := r.deleteStaleTrigger(ctx, deploy); err != nil {
+		return err
+	}
+	if err := r.deleteWorkload(ctx, deploy, &appsv1.Deployment{}); err != nil {
+		return err
+	}
+	return r.deleteNamedWorkload(ctx, deploy, &corev1.Service{}, eventingServiceName(deploy.Name))
+}
+
+// candidateRevision is the Knative revision a reconcile would serve, and the names controllers on the
+// superseded pod contracts gave the same pod.
+type candidateRevision struct {
+	name       string
+	superseded []string
+}
+
+// names reports whether rev is this candidate's pod, under the current pod contract or a superseded one.
+// Only the contract differs between those names: a different spec, prompt, binding, skill or platform
+// image gives a different name under every contract, so an approval of one of them never carries.
+func (c candidateRevision) names(rev string) bool {
+	return rev != "" && (rev == c.name || slices.Contains(c.superseded, rev))
+}
+
+// renamedFrom reports whether rev is this candidate's pod under a superseded contract's name.
+func (c candidateRevision) renamedFrom(rev string) bool {
+	return rev != c.name && c.names(rev)
+}
+
 // candidateRevisionName computes the Knative revision name the candidate WOULD
 // serve — "<name>-<specHash>" plus, when a binding/membership/prompt resolves,
 // "-h<digest8>". It builds the pod template (idempotent — the same call
@@ -705,40 +830,43 @@ func (r *AgentDeploymentReconciler) reconcileServing(
 // the EXACT candidate the ksvc would create.
 func (r *AgentDeploymentReconciler) candidateRevisionName(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
-) (string, error) {
+) (candidateRevision, error) {
 	pod, err := r.buildPodTemplate(ctx, deploy)
 	if err != nil {
-		return "", fmt.Errorf("building pod template for candidate revision: %w", err)
+		return candidateRevision{}, fmt.Errorf("building pod template for candidate revision: %w", err)
 	}
-	revName := deploy.Name + "-" + hash
-	if pod.digest != "" {
-		revName = revName + "-h" + pod.digest
+	cand := candidateRevision{name: revisionName(deploy.Name, hash, pod.digest)}
+	for _, d := range pod.supersededDigests {
+		cand.superseded = append(cand.superseded, revisionName(deploy.Name, hash, d))
 	}
-	return revName, nil
+	return cand, nil
 }
 
-// currentServingRevision returns the "old" arm for a canary split against
-// candidateRev: the revision the agent's Knative Service serves today that is NOT
-// the candidate. Returns "" when no ksvc exists yet OR the only serving revision is
-// the candidate (a first deploy / already-promoted candidate has no distinct old
-// arm). A NotFound ksvc is not an error — it just means there is no old revision to
-// split against. See oldServingRevision for the resolution order.
-func (r *AgentDeploymentReconciler) currentServingRevision(
+// revisionName is the Knative revision a spec hash and pod digest are served as.
+func revisionName(deployName, hash, digest string) string {
+	if digest == "" {
+		return agentVersionName(deployName, hash)
+	}
+	return agentVersionName(deployName, hash) + "-h" + digest
+}
+
+// liveKnativeService returns the agent's Knative Service as it stands, or nil when none
+// exists yet (a first deploy has no serving revision, which is not an error).
+func (r *AgentDeploymentReconciler) liveKnativeService(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-	candidateRev string,
-) (string, error) {
+	deploy *agentsv1beta1.AgentDeployment,
+) (*servingv1.Service, error) {
 	var ksvc servingv1.Service
 	err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, &ksvc)
 	if apierrors.IsNotFound(err) {
-		return "", nil
+		return nil, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("reading current ksvc for serving revision: %w", err)
+		return nil, fmt.Errorf("reading current ksvc for serving revision: %w", err)
 	}
-	return oldServingRevision(&ksvc, candidateRev), nil
+	return &ksvc, nil
 }
 
 // reconcileEventing wraps the pod template in a plain apps/v1 Deployment + a
@@ -756,7 +884,7 @@ func (r *AgentDeploymentReconciler) currentServingRevision(
 // while membership is fixed.
 func (r *AgentDeploymentReconciler) reconcileEventing(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	_ /* hash */, versionName string,
 ) (ctrl.Result, error) {
 	// Tear down the workloads owned by the OTHER models (transition handling):
@@ -823,7 +951,7 @@ func (r *AgentDeploymentReconciler) reconcileEventing(
 // No ksvc / Trigger is emitted; any left over from a previous model is deleted.
 func (r *AgentDeploymentReconciler) reconcileJob(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	versionName string,
 ) (ctrl.Result, error) {
 	// Tear down the serving/eventing workloads (transition handling): the serving
@@ -880,48 +1008,38 @@ func (r *AgentDeploymentReconciler) reconcileJob(
 }
 
 // specHash returns the first 8 hex characters of the SHA-256 of the canonical
-// JSON encoding of spec. The JSON encoder is deterministic for Go structs
-// (fields in declaration order) and all leaf types used in AgentDeploymentSpec
-// (strings, int32, resource.Quantity) serialise deterministically.
-func specHash(spec agentsv1alpha1.AgentDeploymentSpec) (string, error) {
-	data, err := json.Marshal(spec)
+// JSON encoding of versionedSpec(spec). The JSON encoder is deterministic for Go
+// structs (fields in declaration order) and all leaf types used in
+// AgentDeploymentSpec (strings, int32, resource.Quantity) serialise
+// deterministically.
+func specHash(spec agentsv1beta1.AgentDeploymentSpec) (string, error) {
+	data, err := json.Marshal(versionedSpec(spec))
 	if err != nil {
 		return "", fmt.Errorf("marshalling spec to JSON: %w", err)
 	}
 	sum := sha256.Sum256(data)
-	return fmt.Sprintf("%x", sum[:])[:8], nil
+	return fmt.Sprintf("%x", sum[:])[:specHashLen], nil
 }
 
-// ensureAgentVersion creates an AgentVersion named versionName if it does not
-// already exist. Existing versions are never modified (spec is CEL-immutable).
-func (r *AgentDeploymentReconciler) ensureAgentVersion(
-	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-	versionName string,
-) error {
-	var av agentsv1alpha1.AgentVersion
-	err := r.Get(ctx, client.ObjectKey{Name: versionName, Namespace: deploy.Namespace}, &av)
-	if err == nil {
-		return nil // already exists — nothing to do
-	}
-	if !apierrors.IsNotFound(err) {
-		return err
-	}
+// specHashLen is the length of the spec hash in a version name.
+const specHashLen = 8
 
-	av = agentsv1alpha1.AgentVersion{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      versionName,
-			Namespace: deploy.Namespace,
-		},
-		Spec: agentsv1alpha1.AgentVersionSpec{
-			DeploymentName: deploy.Name,
-			Snapshot:       deploy.Spec,
-		},
-	}
-	if err = ctrl.SetControllerReference(deploy, &av, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner ref on AgentVersion: %w", err)
-	}
-	return r.Create(ctx, &av)
+// agentVersionName is the version a spec is served as: status.latestVersion, the AGENT_VERSION its
+// pods carry, the prefix of its revision name, and its name in the version history.
+func agentVersionName(deployName, hash string) string {
+	return deployName + "-" + hash
+}
+
+// versionedSpec is the part of the spec a version identifies and snapshots. spec.feedback
+// and spec.runtime.toolPolicy.approvers are left out: only the BFF enforces them, so editing them
+// changes nothing that runs and must not mint a version, and a rollback never restores them, so a
+// snapshot carrying them would show stale governance in the version diff. An agent without them
+// hashes exactly as before.
+func versionedSpec(spec agentsv1beta1.AgentDeploymentSpec) agentsv1beta1.AgentDeploymentSpec {
+	out := *spec.DeepCopy()
+	out.Feedback = nil
+	out.Runtime = runtimeForPod(out.Runtime)
+	return out
 }
 
 // podTemplate is the fully-built, model-independent pod spec for an agent: the
@@ -945,8 +1063,11 @@ type podTemplate struct {
 	// digest is the combined structural digest ("" when no binding/membership
 	// resolves), used as the "-h<digest>" revision/name suffix.
 	digest string
+	// supersededDigests is digest as each of supersededPodContracts computed it, then, for a spec that
+	// sets a variable the platform owns, as it was before those entries were dropped.
+	supersededDigests []string
 	// resolvedSkills is what spec.skillRefs resolved to — "<name>@sha256:…", always digests.
-	// Carried out so the reconciler can record it in status and in the AgentVersion snapshot:
+	// Carried out so the reconciler can record it in status and in the version snapshot:
 	// an alias may move, and the snapshot must describe content that cannot.
 	resolvedSkills []string
 	// membership is the resolved M6 registry context (used by the eventing
@@ -974,18 +1095,26 @@ type podTemplate struct {
 //nolint:gocyclo // sequential injection steps (collector/tools/memory/registry) kept in one auditable place
 func (r *AgentDeploymentReconciler) buildPodTemplate(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (podTemplate, error) {
 	port := deploy.Spec.Port
 	if port == 0 {
 		port = 8080
 	}
 
-	// Platform env vars come first so they are always present; user env is appended
-	// last and may override platform defaults if the operator deliberately sets the
-	// same name (consistent with the treatment of AGENT_PORT).
+	// Registry membership (M6) decides which variables the platform owns, so it is resolved first.
+	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
+	if err != nil {
+		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
+	}
+	// Recorded where the pod's registry env is decided, so status.registryRef always names the
+	// registry the revision was built for. The next status write persists it; the BFF reads it.
+	deploy.Status.RegistryRef = membership.RegistryName
+
+	// env is the platform's alone until the end: spec.env goes in at specEnvAt, without the names the
+	// platform owns (platform_env.go), once every platform variable is known.
 	env := make([]corev1.EnvVar, 0, 2+len(deploy.Spec.Env))
-	env = append(env, corev1.EnvVar{Name: "AGENT_PORT", Value: strconv.Itoa(int(port))})
+	env = append(env, corev1.EnvVar{Name: envAgentPort, Value: strconv.Itoa(int(port))})
 
 	// Tenancy (M47, ADR 0046): resolve the owning tenant EARLY — it decides both whether the gateway
 	// quota proxy is interposed (a tenant's model caps flow through the SAME launcher proxy as an M8
@@ -1021,10 +1150,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// An agent with none of those reasons gets the plain LiteLLM URL and no proxy env.
 	recordCapable := deploy.Spec.Record
 
-	gatewayURL := litellmGatewayURL
+	platform := r.platformServices()
+	gatewayURL := platform.gatewayURL()
 	if deploy.Spec.Budget != nil || tenantQuota || gr.referenced || recordCapable {
 		gatewayURL = budgetProxyURL
-		env = append(env, corev1.EnvVar{Name: "GATEWAY_UPSTREAM_URL", Value: litellmGatewayURL})
+		env = append(env, corev1.EnvVar{Name: envGatewayUpstreamURL, Value: platform.gatewayURL()})
 	}
 	if deploy.Spec.Budget != nil {
 		env = append(
@@ -1032,12 +1162,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// Either cap may be empty (that dimension unenforced); softThreshold
 			// carries the CRD default (80) when unset because the field defaults
 			// server-side, but guard against a zero value defensively.
-			corev1.EnvVar{Name: "BUDGET_PER_CONVERSATION_USD", Value: deploy.Spec.Budget.PerConversationUSD},
-			corev1.EnvVar{Name: "BUDGET_PER_AGENT_USD", Value: deploy.Spec.Budget.PerAgentUSD},
-			corev1.EnvVar{Name: "BUDGET_SOFT_PCT", Value: strconv.Itoa(int(budgetSoftPct(deploy.Spec.Budget)))},
+			corev1.EnvVar{Name: envBudgetPerConversation, Value: deploy.Spec.Budget.PerConversationUSD},
+			corev1.EnvVar{Name: envBudgetPerAgent, Value: deploy.Spec.Budget.PerAgentUSD},
+			corev1.EnvVar{Name: envBudgetSoftPct, Value: strconv.Itoa(int(budgetSoftPct(deploy.Spec.Budget)))},
 		)
 	}
-	env = append(env, corev1.EnvVar{Name: "MODEL_GATEWAY_URL", Value: gatewayURL})
+	env = append(env, corev1.EnvVar{Name: envModelGatewayURL, Value: gatewayURL})
 
 	// Guardrails (M66, ADR 0059 §8; K3, ADR 0059 Fork-2): deliver the resolved+validated GuardrailPolicy
 	// JSON as a MOUNTED, read-only per-agent ConfigMap file (<agent>-guardrail) rather than the pre-K3
@@ -1051,99 +1181,65 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// (buildPodTemplate returned a *guardrailResolveError), so we never reach here with an unenforceable
 	// policy. The env carries only the static FILE PATH (no valueFrom — the m5.7 Knative landmine).
 	//
-	// BFF_INTERNAL_URL (m66.15): the guardrail block audit POST (m66.9) targets BFF_INTERNAL_URL to write
-	// the durable guardrail.block audit row. The delegate path (delegateEnv) injects it for supervisors,
-	// but a PLAIN guarded agent (guardrailPolicyRef set, not a delegate supervisor) never enters that
-	// branch — its block audit is span-only and the durable row is silently skipped. Fix: inject
-	// BFF_INTERNAL_URL whenever a guardrailPolicyRef is present, using envVarPresent() to dedup so a
-	// guarded supervisor (both paths active) gets it exactly once. Unguarded non-delegate agents are
-	// unchanged (no BFF_INTERNAL_URL injected).
 	guardrailVol, guardrailMount, guardrailEnv, err := r.reconcileGuardrailConfigMap(ctx, deploy, gr)
 	if err != nil {
 		return podTemplate{}, err
 	}
 	if gr.referenced {
 		env = append(env, guardrailEnv...)
-		if !envVarPresent(env, "BFF_INTERNAL_URL") && !envVarPresent(deploy.Spec.Env, "BFF_INTERNAL_URL") {
-			env = append(env, corev1.EnvVar{Name: "BFF_INTERNAL_URL", Value: bffInternalURL})
-		}
+		env = append(env, corev1.EnvVar{Name: envBFFPodTokenPath, Value: bffPodTokenMountPath + "/token"})
+	}
+	// BFF_INTERNAL_URL goes to EVERY agent: its launcher binds the run capability at the BFF before the
+	// agent's code sees it (ADR 0124), and guardrail audits and delegation call the BFF too. An agent
+	// without it would hand its code a bearer capability anyone could bind first.
+	if !envVarPresent(env, envBFFInternalURL) {
+		env = append(env, corev1.EnvVar{Name: envBFFInternalURL, Value: platform.bffInternalURL()})
 	}
 
 	// Record mode (M78, ADR 0071 §1): a record-capable agent gets RECORD_CAPABLE=true, which flips
 	// the launcher gateway's record-mode on (GatewayProxyEnabled + the per-run capture path). Its
 	// presence — combined with GATEWAY_UPSTREAM_URL forced above — is the interposition reason. The
 	// fixture is a DURABLE object-store blob (internal/objectstore, keyed fixtures/{runId}/…), so the
-	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach MinIO. Inject them
-	// here (env-present-guarded so a record-capable registry MEMBER — which already got them in the
-	// membership block below is not the concern; that block runs later, so guard defensively) — a
-	// record-capable non-member would otherwise have no store to write the fixture to. STATIC env,
+	// record-capable agent also needs OBJECT_STORE_ADDR + the dev creds to reach the object store — a
+	// record-capable non-member would otherwise have no store to write the fixture to. The membership
+	// block below guards on the same name, so a record-capable member gets them once. STATIC env,
 	// NEVER valueFrom (the m5.7 Knative landmine). All values are reconcile-time constants.
 	if recordCapable {
-		env = append(env, corev1.EnvVar{Name: "RECORD_CAPABLE", Value: gatewaySyncValue})
-		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv(r.DevDataPlane)...)
+		env = append(env, corev1.EnvVar{Name: envRecordCapable, Value: gatewaySyncValue})
+		if !envVarPresent(env, envObjectStoreAddr) {
+			env = append(env, objectStoreEnv(r.devObjectStore(), platform)...)
 		}
 	}
 
-	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher
-	// starts the :2995 endpoint when LANGFUSE_HOST is present. The host, dev
-	// credentials, and port are STATIC env (values known at reconcile time — NEVER
-	// valueFrom, the m5.7 Knative ksvc landmine; tier1 no-valueFrom guard asserts
-	// this). The dev creds match those seeded by `dev-up M=3` into the
-	// langfuse-otlp Secret and the Langfuse Helm chart.
-	//
-	// OPS-2: these are DEV-ONLY Langfuse creds, so they inject ONLY when the dev data plane is
-	// enabled (devDataPlane=false ⇒ skipped) — a `profile: production` render never ships the
-	// dev.local feedback creds; with LANGFUSE_HOST absent the launcher simply does not start the
-	// feedback relay (feature-off). Prod-functional feedback against an operator-provided Langfuse
-	// (resolved from the langfuse-otlp Secret, like the collector path) is a carded follow-up
-	// (m52.G1a) — beyond this gate, whose charter is only to keep the dev creds out of production.
-	if r.DevDataPlane {
-		env = append(
-			env,
-			corev1.EnvVar{Name: "LANGFUSE_HOST", Value: langfuseHost},
-			corev1.EnvVar{Name: "LANGFUSE_SCORES_PUBLIC_KEY", Value: langfuseDevPublicKey},
-			corev1.EnvVar{Name: "LANGFUSE_SCORES_SECRET_KEY", Value: langfuseDevSecretKey},
-			corev1.EnvVar{Name: "FEEDBACK_PORT", Value: feedbackPort},
-		)
-	}
-
-	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the entire
-	// RuntimeSpec as JSON and inject it as AGENT_RUNTIME — a STATIC platform env var
-	// (NEVER valueFrom, the m5.7 Knative landmine). The SDK parses it at startup.
-	// Injected before spec.env, which is appended last; by the platform convention a
-	// user's spec.env may override a platform default (K8s uses the last value for a
-	// duplicate name). That's harmless here — the authoritative output-schema validator
-	// reads spec.runtime from the CRD (m65.4), not this env var. When nil, inject
-	// nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
+	// Runtime config (M65, ADR 0058): when spec.runtime is set, marshal the RuntimeSpec
+	// without its approvers (runtimeForPod) as JSON and inject it as AGENT_RUNTIME — a
+	// STATIC platform env var (NEVER valueFrom, the m5.7 Knative landmine). The SDK parses
+	// it at startup.
+	// When nil, inject nothing — the no-runtime path is byte-for-byte unchanged (backward-compat).
 	if deploy.Spec.Runtime != nil {
-		rtBytes, err := json.Marshal(deploy.Spec.Runtime)
+		rtBytes, err := json.Marshal(runtimeForPod(deploy.Spec.Runtime))
 		if err != nil {
 			return podTemplate{}, fmt.Errorf("marshaling spec.runtime: %w", err)
 		}
-		env = append(env, corev1.EnvVar{Name: "AGENT_RUNTIME", Value: string(rtBytes)})
+		env = append(env, corev1.EnvVar{Name: envAgentRuntime, Value: string(rtBytes)})
 	}
 
-	env = append(env, deploy.Spec.Env...)
+	specEnvAt := len(env)
 
-	// AGENT_NAME + POD_NAMESPACE identify the agent to the launcher's tracing:
-	// together they form the UNAMBIGUOUS `<namespace>/<name>` identity the launcher
-	// stamps as the Langfuse trace-level tag `agent:<ns>/<name>` (proxy.go), so the
-	// console can list the runs of exactly ONE agent without mixing two same-named
-	// agents in different namespaces. Injected UNCONDITIONALLY for every agent (a
-	// plain agent with no budget/memory/registry still needs a filterable trace
-	// identity), STATIC (values known at reconcile time — NEVER valueFrom, the m5.7
-	// Knative ksvc landmine / tier1 no-valueFrom guard), user-override-wins, and
-	// BEFORE the budget/memory/registry blocks so they observe it present (their own
-	// double-injection guards then no-op). These same vars also key per-agent spend
-	// (budget proxy), the Valkey memory prefix, and the AMP envelope identity — one
-	// injection now serves all of them.
-	if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-		env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
+	// The identity variables, for every agent and before the blocks below that read them: the
+	// `<namespace>/<name>` the launcher tags traces with (two same-named agents in different
+	// namespaces stay apart), which also keys per-agent spend, the memory prefix and the AMP sender;
+	// and the version this pod serves, derived from its own spec so each canary arm says which it is.
+	// STATIC values, never valueFrom (Knative rejects a fieldRef in a ksvc template).
+	hash, err := specHash(deploy.Spec)
+	if err != nil {
+		return podTemplate{}, fmt.Errorf("computing spec hash for %s: %w", envAgentVersion, err)
 	}
-	if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
-		env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
-	}
+	env = append(env,
+		corev1.EnvVar{Name: envAgentName, Value: deploy.Name},
+		corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace},
+		corev1.EnvVar{Name: envAgentVersion, Value: agentVersionName(deploy.Name, hash)},
+	)
 
 	var resources corev1.ResourceRequirements
 	if deploy.Spec.Resources != nil {
@@ -1158,9 +1254,21 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	// Observability (M3): ensure the collector-config ConfigMap and build the
 	// sidecar to inject alongside the user container.
-	collector, collectorVol, err := r.reconcileCollector(ctx, deploy)
+	collector, collectorVol, traceExporting, err := r.reconcileCollector(ctx, deploy)
 	if err != nil {
 		return podTemplate{}, err
+	}
+
+	// Feedback ingest hook (M9, specs/eval-prompts-feedback.md §3): the launcher starts the :2995
+	// endpoint when LANGFUSE_HOST is present. Dev data plane only (ADR 0083: LANGFUSE_HOST is the
+	// bundled Langfuse), and only where the namespace holds the langfuse-otlp Secret the keys
+	// reference — a secretKeyRef to a missing Secret would stop the pod from starting. Without
+	// LANGFUSE_HOST the launcher does not start the relay. Prod-functional feedback against an
+	// operator-provided Langfuse is m52.G1a.
+	if r.DevDataPlane && traceExporting {
+		env = append(env, corev1.EnvVar{Name: envLangfuseHost, Value: langfuseHost})
+		env = append(env, telemetry.LangfuseScoresEnv(telemetry.LangfuseSecretName)...)
+		env = append(env, corev1.EnvVar{Name: envFeedbackPort, Value: feedbackPort})
 	}
 
 	// Prompt-only deploy (M9): when spec.promptRef is set, resolve the referenced
@@ -1184,20 +1292,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	if err != nil {
 		return podTemplate{}, err
 	}
-	// Append the platform prompt env (PROMPT_FILE / PROMPT_VERSION) only for names
-	// the operator has NOT already set in spec.env — a duplicate container env var
-	// name is invalid, and a deliberate user override must win (consistent with the
-	// AGENT_PORT / AGENT_NAME treatment).
-	for _, e := range promptEnv {
-		if !envVarPresent(deploy.Spec.Env, e.Name) {
-			env = append(env, e)
-		}
-	}
+	env = append(env, promptEnv...)
 
-	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, inject
-	// the discovery sidecar + tools ConfigMap volume + (sidecar-mode) tool
-	// containers. The binding controller owns the CM CONTENT and the push; this
-	// reconciler is the single writer of the pod template.
+	// MCP tools (M4): resolve the agent's valid bindings. When ≥1 exists, mount the
+	// tools ConfigMap into the agent container and inject the (sidecar-mode) tool
+	// containers. The binding controller owns the CM CONTENT; this reconciler is the
+	// single writer of the pod template.
 	validBindings, _, err := resolveAgentBindings(ctx, r.Client, r.registryReader(), deploy.Namespace, deploy.Name)
 	if err != nil {
 		return podTemplate{}, fmt.Errorf("resolving tool bindings: %w", err)
@@ -1209,14 +1309,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// prompt-injected/custom loop just hits 127.0.0.1:<port> directly, around the sidecar). So a denied
 	// in-pod tool must simply NOT be deployed. resolveToolPolicy never fails on user input (the CRD
 	// enum bounds the shape); it only errors on a marshal bug.
-	// Declarative HITL (M139, ADR 0111): resolve spec.approvalPolicyRef and MERGE its require-approval
-	// requirements into the effective tool policy (max-strictness). A dangling ref fails closed
-	// (approvalPolicyResolveError → Reconcile sets Ready=False) — never served without the declared gate.
-	approvalPolicy, aerr := resolveApprovalPolicy(ctx, r.Client, deploy)
-	if aerr != nil {
-		return podTemplate{}, aerr
-	}
-	tp, terr := resolveToolPolicy(deploy, approvalPolicy)
+	tp, terr := resolveToolPolicy(deploy)
 	if terr != nil {
 		return podTemplate{}, terr
 	}
@@ -1236,6 +1329,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	renderedManifest, sidecarTools := toolmanifest.Render(validBindings)
 	hasBindings := len(validBindings) > 0
+	if hasBindings {
+		// The launcher serves this file on :2999 and follows its updates; the SDKs read it directly
+		// when :2999 is not answering.
+		env = append(env, corev1.EnvVar{Name: envToolsJSONPath, Value: toolsMountPath + "/" + toolsConfigMapKey})
+	}
 
 	// Tool-call governance (M82, ADR 0074 §1): front-all-tools is now the ONLY manifest mode —
 	// always-on, no flag. EVERY tool of EVERY tool-having agent is fronted through the per-pod
@@ -1291,10 +1389,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 
 	// Memory (M5): resolve the agent's session memory from spec.sessionMemory (ADR 0045;
 	// the standalone MemoryBinding CRD was retired in M127/ADR 0101). When present, inject
-	// MEMORY_BACKEND_ADDR, MEMORY_PORT, MEMORY_KEY_NAMESPACE (pod namespace), and AGENT_NAME
-	// (for Valkey key composition). The single-writer rule applies: only this reconciler
+	// MEMORY_BACKEND_ADDR, MEMORY_PORT and MEMORY_KEY_NAMESPACE (pod namespace); keys are composed
+	// with the base env's AGENT_NAME. The single-writer rule applies: only this reconciler
 	// writes the pod template.
-	memAddr, memScope, hasMemory := resolveMemory(deploy)
+	memAddr, memScope, hasMemory := resolveMemory(deploy, platform)
 	if hasMemory {
 		// MEMORY_BACKEND_ADDR is the DIRECT Valkey path. Injected ONLY when the
 		// state-layer proxy is NOT configured; once the proxy is on (the m53.7
@@ -1302,11 +1400,11 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// holds no direct Valkey path — the launcher's :2998 listener uses the proxy
 		// forward when MEMORY_BACKEND_ADDR is absent + STATELAYER_PROXY_URL is set.
 		if r.StatelayerProxyURL == "" {
-			env = append(env, corev1.EnvVar{Name: "MEMORY_BACKEND_ADDR", Value: memAddr})
+			env = append(env, corev1.EnvVar{Name: envMemoryBackendAddr, Value: memAddr})
 		}
 		env = append(
 			env,
-			corev1.EnvVar{Name: "MEMORY_PORT", Value: "2998"},
+			corev1.EnvVar{Name: envMemoryPort, Value: "2998"},
 			// MEMORY_KEY_NAMESPACE: the agent's own namespace, the Valkey key
 			// prefix. Set as a STATIC value (the pod always runs in the
 			// AgentDeployment's namespace, known here at reconcile time) — a
@@ -1317,23 +1415,14 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// the backend lives, so no downward reference is needed. (Unused on the
 			// proxy path — the proxy derives the key namespace from the token — but
 			// harmless + still correct for a proxy-less install.)
-			corev1.EnvVar{Name: "MEMORY_KEY_NAMESPACE", Value: deploy.Namespace},
+			corev1.EnvVar{Name: envMemoryKeyNamespace, Value: deploy.Namespace},
 		)
-		// AGENT_NAME: inject only if not already present. The launcher uses
-		// AGENT_NAME for Valkey key composition and as the agent.invoke span
-		// attribute. Check the ACCUMULATED env (the M8 budget block earlier may
-		// have already injected it for a budgeted agent) AND spec.env (user
-		// override must win) so a memory+budget agent gets AGENT_NAME exactly once
-		// — a duplicate container env var is invalid.
-		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
-		}
 		// STATELAYER_PROXY_URL (M51, ADR 0050 §8 phase 1): when the controller is
 		// configured with it, route this agent's session/shared memory through the
 		// state-layer proxy (the launcher reverse-proxies; it still holds MEMORY_BACKEND_ADDR
 		// in phase 1 for dual-mode fallback). Empty ⇒ direct Valkey, no drift.
 		if r.StatelayerProxyURL != "" {
-			env = append(env, corev1.EnvVar{Name: "STATELAYER_PROXY_URL", Value: r.StatelayerProxyURL})
+			env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
 		}
 		// Per-user session memory (M98, EU1a, ADR 0080): isolate each invoking end-user's conversation
 		// memory into its own bucket. The launcher stamps X-Memory-User from the VERIFIED run capability
@@ -1344,7 +1433,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// a new revision (it is part of the pod template), so a toggle takes effect on the next reconcile.
 		if sm := deploy.Spec.SessionMemory; sm != nil && sm.PerUser &&
 			memScope != memoryScopeShared && r.StatelayerProxyURL != "" {
-			env = append(env, corev1.EnvVar{Name: "MEMORY_PER_USER", Value: annotationTrue})
+			env = append(env, corev1.EnvVar{Name: envMemoryPerUser, Value: annotationTrue})
 		}
 	}
 
@@ -1360,31 +1449,28 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			ltScope = "agent_user"
 		}
 		env = append(env,
-			corev1.EnvVar{Name: "MEMORY_LONGTERM_ENABLED", Value: "true"},
-			corev1.EnvVar{Name: "MEMORY_LONGTERM_SCOPE", Value: ltScope},
+			corev1.EnvVar{Name: envMemoryLongTermEnabled, Value: "true"},
+			corev1.EnvVar{Name: envMemoryLongTermScope, Value: ltScope},
 		)
 		if lt.EmbeddingRoute != "" {
-			env = append(env, corev1.EnvVar{Name: "EMBEDDING_ROUTE", Value: lt.EmbeddingRoute})
+			env = append(env, corev1.EnvVar{Name: envEmbeddingRoute, Value: lt.EmbeddingRoute})
 		}
 		// The launcher proxies memory.remember/search_agent to the token-service; reuse the OBO
 		// token-service URL (guard against a duplicate the OBO path may already have set).
 		if r.OBOEgress.TokenServiceURL != "" &&
-			!envVarPresent(env, envTokenServiceURL) && !envVarPresent(deploy.Spec.Env, envTokenServiceURL) {
+			!envVarPresent(env, envTokenServiceURL) {
 			env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
 		}
 		// Per-user memory: the launcher verifies the invoking user's run capability, so inject the platform
 		// capability public key + audience on the MAIN container (the OBO path sets them on the egress
 		// sidecar). Without them the launcher fail-closes per-user memory (never falls back to agent-wide).
 		if lt.PerUser && r.OBOEgress.CapabilityPublicKeyB64 != "" &&
-			!envVarPresent(env, envMCPCapPublicKey) && !envVarPresent(deploy.Spec.Env, envMCPCapPublicKey) {
+			!envVarPresent(env, envMCPCapPublicKey) {
 			env = append(env, corev1.EnvVar{Name: envMCPCapPublicKey, Value: r.OBOEgress.CapabilityPublicKeyB64})
 			if r.OBOEgress.CapabilityAudience != "" &&
-				!envVarPresent(env, envMCPCapAudience) && !envVarPresent(deploy.Spec.Env, envMCPCapAudience) {
+				!envVarPresent(env, envMCPCapAudience) {
 				env = append(env, corev1.EnvVar{Name: envMCPCapAudience, Value: r.OBOEgress.CapabilityAudience})
 			}
-		}
-		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
 		}
 	}
 
@@ -1414,7 +1500,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// the in-pod auto-inject retrieval got "connection refused" → no RAG. Inject it here too when
 	// knowledge is enabled (guarded against a duplicate the memory/OBO path may already have set).
 	if len(kbRes.env) > 0 && r.OBOEgress.TokenServiceURL != "" &&
-		!envVarPresent(env, envTokenServiceURL) && !envVarPresent(deploy.Spec.Env, envTokenServiceURL) {
+		!envVarPresent(env, envTokenServiceURL) {
 		env = append(env, corev1.EnvVar{Name: envTokenServiceURL, Value: r.OBOEgress.TokenServiceURL})
 	}
 
@@ -1447,6 +1533,20 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		}
 	}
 
+	// The launcher's memory and knowledge proxies authenticate to the token service with this pod's
+	// agent-audience token (ADR 0154). The platform points them at it only for long-term memory or
+	// knowledge bases, so its address on this container is the condition.
+	mountAgentTokenServiceToken := envVarPresent(env, envTokenServiceURL)
+	if mountAgentTokenServiceToken {
+		env = append(env, corev1.EnvVar{
+			Name: envTokenServiceTokenPath, Value: tokenServiceAgentTokenMountPath + "/" + projectedTokenFile,
+		})
+	}
+
+	if err := r.syncModelRouteCondition(ctx, deploy); err != nil {
+		return podTemplate{}, err
+	}
+
 	// Tenancy (M47, ADR 0046): when a Tenant owns this agent's namespace, inject the tenant id + its
 	// model caps as STATIC env (known at reconcile time — NEVER valueFrom, the m5.7 Knative landmine). The
 	// launcher reads TENANT_ID for the trace attribute (m47.3) and the caps + shared-Valkey address for the
@@ -1454,25 +1554,25 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// injectPodToken records whether to mount the projected proxy token (set below).
 	injectPodToken := false
 	if hasTenant {
-		env = append(env, corev1.EnvVar{Name: "TENANT_ID", Value: tenantCtx.id})
+		env = append(env, corev1.EnvVar{Name: envTenantID, Value: tenantCtx.id})
 		if tenantCtx.budgetUSD != "" {
-			env = append(env, corev1.EnvVar{Name: "TENANT_BUDGET_USD", Value: tenantCtx.budgetUSD})
+			env = append(env, corev1.EnvVar{Name: envTenantBudgetUSD, Value: tenantCtx.budgetUSD})
 		}
 		if tenantCtx.rpm > 0 {
-			env = append(env, corev1.EnvVar{Name: "TENANT_RPM", Value: strconv.Itoa(int(tenantCtx.rpm))})
+			env = append(env, corev1.EnvVar{Name: envTenantRPM, Value: strconv.Itoa(int(tenantCtx.rpm))})
 		}
 		if tenantCtx.maxConcurrent > 0 {
-			env = append(env, corev1.EnvVar{Name: "TENANT_MAX_CONCURRENT", Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
+			env = append(env, corev1.EnvVar{Name: envTenantMaxConcurrent, Value: strconv.Itoa(int(tenantCtx.maxConcurrent))})
 		}
 		if tenantQuota {
 			// M53 (ADR 0050 §8): route tenant quota through the state-layer proxy
 			// (pod-identity authed) when the controller is configured with it — the
 			// launcher then holds NO Valkey credential for quota.
 			if r.StatelayerProxyURL != "" {
-				if !envVarPresent(env, envStatelayerProxyURL) && !envVarPresent(deploy.Spec.Env, envStatelayerProxyURL) {
+				if !envVarPresent(env, envStatelayerProxyURL) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
 				}
-				if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+				if !envVarPresent(env, envStatelayerTokenPath) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 				}
 				injectPodToken = true
@@ -1482,79 +1582,58 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				// the proxy is on (the m53.7 cutover, phase 3), this is NOT injected — the
 				// agent has no direct Valkey path; quota flows through the proxy on the
 				// SAME accumulator.
-				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
+				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: platform.statelayerAddr()})
 			}
 		}
 	}
 
-	// Registry membership (M6): resolve the agent's AgentRegistry (if any). When a
-	// member, inject the STATIC mesh env the launcher's /amp server reads
-	// (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
+	// Registry membership (M6): when a member, inject the STATIC mesh env the launcher's /amp
+	// server reads (AGENT_REGISTRY_ID gates the endpoint; AGENT_ROLE / AGENT_ALLOWED_CALLERS
 	// feed the L7 access-control checks; A2A_MAX_DEPTH / A2A_HOP_BUDGET seed the
 	// conversation guards) and stamp the membership pod label the generated
 	// NetworkPolicy selects on. All values are known at reconcile time → plain
-	// static env, NEVER valueFrom (the Knative webhook rejects valueFrom in a
-	// ksvc — the m5.7 landmine; a tier1 guard asserts no ksvc env uses it).
-	membership, err := resolveAgentRegistry(ctx, r.Client, deploy)
-	if err != nil {
-		return podTemplate{}, fmt.Errorf("resolving registry membership: %w", err)
-	}
+	// static env. (The Knative webhook rejects a downward-API fieldRef in a ksvc — the m5.7
+	// landmine; it accepts secretKeyRef.)
 	if membership.IsMember {
 		env = append(
 			env,
-			corev1.EnvVar{Name: "AGENT_REGISTRY_ID", Value: membership.RegistryID},
-			corev1.EnvVar{Name: "A2A_MAX_DEPTH", Value: strconv.Itoa(int(membership.MaxDepth))},
-			corev1.EnvVar{Name: "A2A_HOP_BUDGET", Value: strconv.Itoa(int(membership.HopBudget))},
+			corev1.EnvVar{Name: envAgentRegistryID, Value: membership.RegistryID},
+			corev1.EnvVar{Name: envA2AMaxDepth, Value: strconv.Itoa(int(membership.MaxDepth))},
+			corev1.EnvVar{Name: envA2AHopBudget, Value: strconv.Itoa(int(membership.HopBudget))},
 			// M141.4 (ADR 0121): where a fire-and-forget hop goes to become durable. The agent pod holds
 			// no broker credential — it hands the CloudEvent to the control plane, which owns the
 			// connection. Injected for every registry member; the BFF only serves the edge when an async
 			// backend is actually configured, so an install without one answers 404 and the launcher's
 			// `?mode=async` degrades to an honest refusal rather than a silent no-op.
-			corev1.EnvVar{Name: "ASYNC_PUBLISH_URL", Value: bffInternalURL + "/api/internal/async/publish"},
+			corev1.EnvVar{Name: envAsyncPublishURL, Value: platform.asyncPublishURL()},
 		)
 		// Shared memory scope (ADR 0035, m33.3): a sessionMemory scope=shared keys the team
-		// scratchpad under this registry (mem:shared:{registry}:{conversationId}), so agents in the
+		// scratchpad under this registry (mem:shared:{namespace}/{registryId}:{conversationId}), so agents in the
 		// conversation collaborate on ONE context. Injected ONLY here — inside the membership block —
 		// because the shared key needs a registry boundary; a scope=shared config on a NON-member
 		// agent gets no MEMORY_SCOPE and the launcher keeps its private layout (a visible misconfig,
 		// not a broken key).
 		if hasMemory && memScope == memoryScopeShared {
-			env = append(env, corev1.EnvVar{Name: "MEMORY_SCOPE", Value: memoryScopeShared})
+			env = append(env, corev1.EnvVar{Name: envMemoryScope, Value: memoryScopeShared})
 		}
-		// POD_NAMESPACE: the namespace AMP targets resolve in — the launcher's
-		// clusterHost() builds http://{target}.{POD_NAMESPACE}.svc.cluster.local.
-		// STATIC (deploy.Namespace, known here), never a downward-API fieldRef:
-		// Knative's webhook rejects valueFrom in a ksvc pod template (the m5.7
-		// landmine; a tier1 guard asserts no ksvc env uses valueFrom). Now injected
-		// UNCONDITIONALLY in the base env for the trace identity, so guard against a
-		// duplicate here (a duplicate container env var name is invalid); the base
-		// injection already covers a registry member without session memory.
-		if !envVarPresent(env, envPodNamespace) && !envVarPresent(deploy.Spec.Env, envPodNamespace) {
-			env = append(env, corev1.EnvVar{Name: envPodNamespace, Value: deploy.Namespace})
-		}
-		// AGENT_NAME: the launcher's senderAgentId / envelope path identity. The
-		// memory path (earlier in this function) may have already appended it, and
-		// the user may have overridden it in spec.env — inject exactly ONCE. Check
-		// the ACCUMULATED env slice (covers the memory path) AND spec.env (user
-		// override wins) so a member with BOTH memory and registry gets AGENT_NAME
-		// once, and a member without memory still gets it (the AMP path needs it).
-		if !envVarPresent(env, envAgentName) && !envVarPresent(deploy.Spec.Env, envAgentName) {
-			env = append(env, corev1.EnvVar{Name: envAgentName, Value: deploy.Name})
-		}
-		// AGENT_ROLE: from spec.role, user-override-wins (like AGENT_NAME). The
-		// launcher stamps it into the envelope role field.
-		if !envVarPresent(deploy.Spec.Env, "AGENT_ROLE") {
-			env = append(env, corev1.EnvVar{Name: "AGENT_ROLE", Value: deploy.Spec.Role})
-		}
-		// AGENT_ALLOWED_CALLERS: comma-join of spec.allowedCallers (user-override-
-		// wins). Empty when the list is unset → the launcher applies its default
-		// (registry-membership) policy.
-		if !envVarPresent(deploy.Spec.Env, "AGENT_ALLOWED_CALLERS") {
-			env = append(env, corev1.EnvVar{
-				Name:  "AGENT_ALLOWED_CALLERS",
-				Value: strings.Join(deploy.Spec.AllowedCallers, ","),
-			})
-		}
+		// POD_NAMESPACE (the namespace AMP targets resolve in, clusterHost()) and AGENT_NAME (the
+		// envelope's senderAgentId) are in the base env.
+		// AGENT_ROLE: from spec.role, always (an identity variable, platform_env.go). The launcher stamps
+		// it into the envelope, and a callee admits the call only when it equals the attested role.
+		env = append(env, corev1.EnvVar{Name: envAgentRole, Value: deploy.Spec.Role})
+		// AGENT_ALLOWED_CALLERS: comma-join of spec.allowedCallers. Empty when the list is unset → the
+		// launcher applies its default (registry-membership) policy.
+		env = append(env, corev1.EnvVar{
+			Name:  envAgentAllowedCallers,
+			Value: strings.Join(deploy.Spec.AllowedCallers, ","),
+		})
+
+		// AMP attestation (ADR 0153): as a caller, the launcher trades this pod's BFF-audience token for the
+		// platform's attestation of who it is and stamps it on every AMP hop; as a callee, it verifies a
+		// caller's with the capability public key and run capabilities with the key and audience, and
+		// admits a call that carries neither only under the accept posture. Without the key a member
+		// refuses every attested call, so the key is injected whenever the platform has one.
+		env = append(env, ampAttestationEnv(env, r.OBOEgress, !r.AMPAcceptUnattested)...)
 
 		// Delegate (M64, ADR 0057): if this registry member is the SUPERVISOR of an AgentTeam, inject the
 		// launcher's delegate wiring so its SDK gets the delegate_to tool + can spawn its roster as sub-runs.
@@ -1565,12 +1644,9 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			return podTemplate{}, fmt.Errorf("resolving supervised team: %w", tErr)
 		}
 		if team != nil {
-			for _, e := range delegateEnv(team) {
-				// Guard against duplicates: a guarded supervisor already has BFF_INTERNAL_URL
-				// injected by the guardrail block (m66.15). All other delegateEnv vars are
-				// delegate-only so the check is symmetric with the rest of the platform env
-				// injection pattern (envVarPresent before append).
-				if !envVarPresent(env, e.Name) && !envVarPresent(deploy.Spec.Env, e.Name) {
+			for _, e := range delegateEnv(team, platform) {
+				// Every agent already has BFF_INTERNAL_URL; the rest are delegate-only.
+				if !envVarPresent(env, e.Name) {
 					env = append(env, e)
 				}
 			}
@@ -1578,15 +1654,15 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// holds NO direct :6379 path — the last direct-Valkey consumer, so `:6379` can leave the egress
 			// allowlist). Otherwise (proxy-less) fall back to the direct Valkey addr.
 			if r.StatelayerProxyURL != "" {
-				if !envVarPresent(env, envStatelayerProxyURL) && !envVarPresent(deploy.Spec.Env, envStatelayerProxyURL) {
+				if !envVarPresent(env, envStatelayerProxyURL) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerProxyURL, Value: r.StatelayerProxyURL})
 				}
-				if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+				if !envVarPresent(env, envStatelayerTokenPath) {
 					env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 				}
 				injectPodToken = true
-			} else if !envVarPresent(env, "TENANT_QUOTA_ADDR") && !envVarPresent(deploy.Spec.Env, "TENANT_QUOTA_ADDR") {
-				env = append(env, corev1.EnvVar{Name: "TENANT_QUOTA_ADDR", Value: memoryDefaultAddr})
+			} else if !envVarPresent(env, envTenantQuotaAddr) {
+				env = append(env, corev1.EnvVar{Name: envTenantQuotaAddr, Value: platform.statelayerAddr()})
 			}
 			// The delegate spawn guard needs the run-capability verifier to recover THIS supervisor's run id
 			// as the spawn-tree ROOT when the X-Ctxmesh-Spawn-Root header doesn't propagate (L11) — the case
@@ -1596,10 +1672,10 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 			// only injects this key for perUser agents, so a plain supervisor got nothing. Inject it (+ the
 			// audience) on the supervisor's main container whenever the platform provides it.
 			if r.OBOEgress.CapabilityPublicKeyB64 != "" &&
-				!envVarPresent(env, envMCPCapPublicKey) && !envVarPresent(deploy.Spec.Env, envMCPCapPublicKey) {
+				!envVarPresent(env, envMCPCapPublicKey) {
 				env = append(env, corev1.EnvVar{Name: envMCPCapPublicKey, Value: r.OBOEgress.CapabilityPublicKeyB64})
 				if r.OBOEgress.CapabilityAudience != "" &&
-					!envVarPresent(env, envMCPCapAudience) && !envVarPresent(deploy.Spec.Env, envMCPCapAudience) {
+					!envVarPresent(env, envMCPCapAudience) {
 					env = append(env, corev1.EnvVar{Name: envMCPCapAudience, Value: r.OBOEgress.CapabilityAudience})
 				}
 			}
@@ -1609,20 +1685,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// path — as a publisher (offload a >256KiB payload) and/or a consumer
 		// (rehydrate a $ref before invoke). Inject the dedicated dev object store's
 		// address + the deterministic DEV-ONLY credentials so the launcher's
-		// publish/consume path can reach MinIO. Scope: EVERY registry member, not
+		// publish/consume path can reach the object store. Scope: EVERY registry member, not
 		// only executionModel=eventing — a member's launcher wires offload on the
 		// same gate the async consumer/publisher use (registry membership /
 		// AMPEnabled), independent of its own workload KIND, so a producer that
 		// publishes and a Trigger-backed consumer both get it. All three are known
-		// constants → STATIC env, NEVER valueFrom (Knative ksvc webhook rejects it;
-		// the m5.7 landmine + tier1 no-valueFrom guard). The launcher gate is
+		// constants → STATIC env. The launcher gate is
 		// OBJECT_STORE_ADDR: with it absent (a non-member), offload is disabled and
 		// async payloads pass through capped. Guard against double-injection: a
 		// record-capable agent (M78) may have already been given the same env by the
 		// record-mode block above — inject only when not already present (last-write
 		// semantics would otherwise leave a duplicate env entry).
-		if !envVarPresent(env, envObjectStoreAddr) && !envVarPresent(deploy.Spec.Env, envObjectStoreAddr) {
-			env = append(env, objectStoreEnv(r.DevDataPlane)...)
+		if !envVarPresent(env, envObjectStoreAddr) {
+			env = append(env, objectStoreEnv(r.devObjectStore(), platform)...)
 		}
 
 		// (Async dedup through the proxy needs the same pod token; it is now set by the
@@ -1638,7 +1713,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// any memory agent; this adds the token path + flips injectPodToken. The env-present
 	// guard keeps it duplicate-safe against the tenant-quota block.
 	if r.StatelayerProxyURL != "" && hasMemory {
-		if !envVarPresent(env, envStatelayerTokenPath) && !envVarPresent(deploy.Spec.Env, envStatelayerTokenPath) {
+		if !envVarPresent(env, envStatelayerTokenPath) {
 			env = append(env, corev1.EnvVar{Name: envStatelayerTokenPath, Value: statelayerPodTokenFilePath})
 		}
 		injectPodToken = true
@@ -1655,6 +1730,20 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// fsnotify-watch the policy file. A core ConfigMap volume (Knative Serving admits it, same as
 		// the prompt CM). No image change — a pod-VOLUME + config change only.
 		userMounts = append(userMounts, *guardrailMount)
+	}
+	if hasBindings {
+		userMounts = append(userMounts, toolsMount())
+	}
+	// The BFF-audience pod token: a guarded agent's audit edge (m184.7) and a registry member's AMP
+	// attestation (ADR 0153) both present it. One volume however many need it.
+	mountBFFPodToken := guardrailMount != nil || membership.IsMember
+	if mountBFFPodToken {
+		userMounts = append(userMounts, corev1.VolumeMount{
+			Name: bffPodTokenVolume, MountPath: bffPodTokenMountPath, ReadOnly: true,
+		})
+	}
+	if mountAgentTokenServiceToken {
+		userMounts = append(userMounts, agentTokenServiceTokenMount())
 	}
 	if injectPodToken {
 		// Mount the projected proxy token read-only (M53). The launcher runs in this
@@ -1735,6 +1824,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		// WITHOUT rolling the revision — the mount is structurally constant for any tool-having agent.
 		volumes = append(volumes, *routesVol)
 	}
+	if mountBFFPodToken {
+		volumes = append(volumes, bffPodTokenVolumeSpec())
+	}
+	if mountAgentTokenServiceToken {
+		volumes = append(volumes, agentTokenServiceTokenVolume())
+	}
 	if injectPodToken {
 		// Projected serviceAccountToken bound to the proxy audience (M53, ADR 0050 Amд 3).
 		// A projected VOLUME (not valueFrom) — Knative admits it (verified on 1.22.1). The
@@ -1758,7 +1853,6 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	}
 
 	if hasBindings {
-		containers = append(containers, discoverySidecarContainer(r.discoveryImage()))
 		// Sidecar-mode tool containers, in the deterministic binding-name order
 		// Render assigned (matches the manifest's localhost ports).
 		for _, st := range sidecarTools {
@@ -1791,11 +1885,23 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 					"The egress sidecar is the always-on tool-call chokepoint, so it cannot be skipped",
 				deploy.Namespace, deploy.Name, len(egressRoutes))
 		}
+		// The sidecar resolves every tool credential through the token service and exits at startup
+		// without one, so an agent rendered without it would CrashLoop with the cause only in the
+		// sidecar's log.
+		if r.OBOEgress.TokenServiceURL == "" {
+			return podTemplate{}, fmt.Errorf(
+				"agent %s/%s has %d tool route(s) but this install has no token service URL: "+
+					"set TOKEN_SERVICE_URL on the controller (chart: controllerManager.oboEgress.tokenServiceURL); "+
+					"the egress sidecar resolves every tool credential through it",
+				deploy.Namespace, deploy.Name, len(egressRoutes))
+		}
 		agentIdentity := deploy.Namespace + "/" + deploy.Name
-		containers = append(containers, egressSidecarContainer(
+		sidecar := egressSidecarContainer(
 			r.OBOEgress, deploy.Namespace, agentIdentity, agentEgressBoundary(deploy, membership),
-			egressRoutesJSON(egressRoutes), recordCapable, r.DevDataPlane, toolPolicyMount, toolPolicyEnv,
-			routesMount, routesEnv))
+			egressRoutesJSON(egressRoutes), recordCapable, objectStoreEnv(r.devObjectStore(), platform), toolPolicyMount, toolPolicyEnv,
+			routesMount, routesEnv)
+		volumes = append(volumes, withSidecarTokenServiceToken(&sidecar))
+		containers = append(containers, sidecar)
 	}
 
 	// Combined structural digest: "" when no binding/membership resolves (bare
@@ -1868,6 +1974,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				"agent", deploy.Name)
 		}
 	}
+	// The attached skills' bodies, verified against their digests, for load(). A body that cannot be
+	// mounted is named on the SkillBodies condition and the agent deploys without it; this also prunes
+	// the bodies of skills no longer attached.
+	skillBodies, err := r.reconcileSkillBodies(ctx, deploy, resolvedSkills)
+	if err != nil {
+		return podTemplate{}, err
+	}
 	memDigest := memoryDigest(hasMemory, memAddr)
 	// Long-term memory (M46, ADR 0045) is a structural pod change (env injected) → fold it into the
 	// memory digest so enabling/disabling it or changing perUser/embeddingRoute rolls a new revision
@@ -1877,8 +1990,8 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		memDigest = fmt.Sprintf("%x", sum[:])[:8]
 	}
 	// The object-store (blob-offload) env is injected 1:1 with membership.IsMember
-	// and its values are package constants (objectStoreAddr + the dev creds,
-	// identical for every member), so it needs no digest component of its own: the
+	// and its values are the same for every member of an install (the platform's
+	// store + the dev creds), so it needs no digest component of its own: the
 	// registry-membership digest already rolls the revision on join/leave — exactly
 	// when OBJECT_STORE_ADDR + the creds appear/disappear. If the store address
 	// ever becomes per-agent it must fold into registryMembershipDigest.
@@ -1951,10 +2064,20 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// (identityDig, above) rolls a plain agent onto the SA once without re-rolling the proxy fleet.
 	saName := agentIdentitySAName(deploy.Name)
 
-	// Only the REFS reach the pod, never the bodies — that is progressive disclosure made
-	// concrete. Mounting every attached body would defeat the whole reason skills exist rather
-	// than a longer prompt.
-	containers = injectSkills(containers, resolvedSkills, skillDescriptions, false)
+	// The refs and descriptions ride in env; the bodies are files, which cost no context until the
+	// agent calls load().
+	containers = injectSkills(containers, resolvedSkills, skillDescriptions, skillBodies.configMap != "")
+	if skillBodies.configMap != "" {
+		volumes = append(volumes, skillVolume(skillBodies.configMap))
+	}
+
+	// The platform's env is complete, so spec.env goes in now: an entry the platform owns is dropped
+	// rather than duplicated, and the drop is reported.
+	var ignoredEnv []string
+	containers[0].Env, ignoredEnv = withSpecEnv(containers[0].Env, specEnvAt, deploy.Spec.Env, membership.IsMember)
+	if err := r.syncPlatformEnvCondition(ctx, deploy, ignoredEnv); err != nil {
+		return podTemplate{}, err
+	}
 
 	// The hardened securityContext MUST move the revision name, or it never reaches a running
 	// pod. This is the M4 silent-loss landmine the file warns about elsewhere: the controller
@@ -1966,6 +2089,19 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// worth paying exactly once: the alternative is a security control that appears in the spec,
 	// reports success, and protects nothing — the failure mode this whole arc exists to kill.
 	combinedDigest = hardeningFold(combinedDigest, deploy.Spec.Unconfined)
+	// Everything folded in after the pod contract is folded into the superseded contracts' digests too,
+	// so each names this same pod as an older controller did (supersededPodContracts).
+	supersededDigests := make([]string, len(supersededPodContracts))
+	for i, contract := range supersededPodContracts {
+		supersededDigests[i] = contractFoldAt(combinedDigest, contract, traceExporting)
+	}
+	combinedDigest = traceExportFold(combinedDigest, traceExporting)
+	foldAfterContract := func(part string) {
+		combinedDigest = foldDigest(combinedDigest, part)
+		for i := range supersededDigests {
+			supersededDigests[i] = foldDigest(supersededDigests[i], part)
+		}
+	}
 
 	// Attached skills fold in AFTER the combined digest rather than as an eleventh component, the
 	// same shape the launcher image uses below. An agent with NO skills is left byte-identical,
@@ -1977,8 +2113,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// different agents — so an alias move rolls a revision, and a re-resolution to the same
 	// digests does not.
 	if d := skillDigest(resolvedSkills); d != "" {
-		sum := sha256.Sum256([]byte(combinedDigest + "|skills:" + d))
-		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+		foldAfterContract("|skills:" + d)
+	}
+	// The mounted bodies move the revision name too: the volume and SKILL_DIR are pod-spec changes,
+	// and a body that becomes mountable later changes what load() returns. No pod named without them
+	// stands in for this one, so an approval given before they were mounted does not carry.
+	if skillBodies.hash != "" {
+		foldAfterContract("|skill-bodies:" + skillBodies.hash)
 	}
 
 	// C8 launcher injection (ADR 0079): when LAUNCHER_IMAGE is configured, inject the launcher-inject
@@ -1989,8 +2130,7 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	var initContainers []corev1.Container
 	if r.launcherInjectionReady(ctx) { // C8c: only inject when LAUNCHER_IMAGE is set AND the Knative flags are on
 		initContainers, containers, volumes = injectPlatformLauncher(containers, volumes, r.LauncherImage)
-		sum := sha256.Sum256([]byte(combinedDigest + "|launcher:" + r.LauncherImage))
-		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+		foldAfterContract("|launcher:" + r.LauncherImage)
 	}
 
 	// The L4 egress redirect (M142.4, ADR 0123) — only for a pod that HAS an egress sidecar, since the
@@ -2002,8 +2142,44 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		return r.knativeFlagsEnabled(ctx, flags, "M142.4 egress redirect")
 	}) {
 		initContainers = append(initContainers, egressRedirectInitContainer(r.EgressRedirect))
-		sum := sha256.Sum256([]byte(combinedDigest + "|egress-redirect:" + r.EgressRedirect.Image))
-		combinedDigest = fmt.Sprintf("%x", sum[:])[:8]
+		foldAfterContract("|egress-redirect:" + r.EgressRedirect.Image)
+	}
+
+	// Dropping spec.env entries the platform owns changes the pod without changing anything a digest
+	// reads, so the drop must move the revision name or it never reaches a running pod. The pod built
+	// before it is the same pod renamed, as across a contract change: its approval carries, and it is not
+	// kept as a canary arm beside the corrected one. The fold keeps its first spelling, from when only
+	// identity variables were dropped, so the revisions it already named keep their names.
+	if len(ignoredEnv) > 0 {
+		supersededDigests = append(supersededDigests, combinedDigest)
+		combinedDigest = foldDigest(combinedDigest, "|identity-env:"+strings.Join(ignoredEnv, ","))
+	}
+
+	// A registry member's attestation wiring (the BFF token, the capability key, the posture) is read by
+	// no digest, so it moves the revision name here. The pod named without it, and the pod named under
+	// the other posture, are the same pod renamed: an approval carries across the upgrade and across the
+	// accept-to-require flip the posture exists for.
+	if membership.IsMember {
+		require := !r.AMPAcceptUnattested
+		supersededDigests = append(supersededDigests, combinedDigest,
+			foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, !require)))
+		combinedDigest = foldDigest(combinedDigest, ampAttestationFold(r.OBOEgress, require))
+	}
+
+	// The token-service tokens (ADR 0154) are read by no digest either. The pod named without them is the
+	// same pod renamed, so an approval carries across the upgrade that adds them.
+	if fold := tokenServiceTokenFold(len(egressRoutes) > 0, mountAgentTokenServiceToken); fold != "" {
+		supersededDigests = append(supersededDigests, combinedDigest)
+		combinedDigest = foldDigest(combinedDigest, fold)
+	}
+
+	// The platform's addresses are read by no digest, so an install outside the default namespace moves
+	// the revision name here; otherwise an agent a previous controller pointed at the default namespace
+	// keeps those addresses. The pod named without it is the same pod renamed. A default install's
+	// names do not move.
+	if platform.namespace != DefaultPlatformNamespace {
+		supersededDigests = append(supersededDigests, combinedDigest)
+		combinedDigest = foldDigest(combinedDigest, "|platform-namespace:"+platform.namespace)
 	}
 
 	return podTemplate{
@@ -2012,11 +2188,30 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 		volumes:            volumes,
 		labels:             templateLabels,
 		digest:             combinedDigest,
+		supersededDigests:  supersededDigests,
 		membership:         membership,
 		port:               port,
 		serviceAccountName: saName,
 		resolvedSkills:     resolvedSkills,
 	}, nil
+}
+
+// bffPodTokenVolumeSpec is a guarded agent's projected token for the BFF audience: a short-lived token
+// the kubelet rotates in place, read by the launcher on each audit write.
+func bffPodTokenVolumeSpec() corev1.Volume {
+	expiry := statelayerTokenExpirySecs
+	return corev1.Volume{
+		Name: bffPodTokenVolume,
+		VolumeSource: corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{{
+					ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+						Path: "token", Audience: runcap.BFFPodAudience, ExpirationSeconds: &expiry,
+					},
+				}},
+			},
+		},
+	}
 }
 
 // hardeningFold folds the hardened-securityContext decision into the revision digest.
@@ -2038,6 +2233,76 @@ func hardeningFold(digest string, unconfined bool) string {
 		return digest
 	}
 	sum := sha256.Sum256([]byte(digest + "|hardened:v1"))
+	return fmt.Sprintf("%x", sum[:])[:8]
+}
+
+// langfuseSecretRequests maps a Secret event to every AgentDeployment in its namespace when the
+// Secret is the langfuse-otlp Secret. Its presence and completeness decide whether the collector
+// exports, so a change must reach the namespace's agents at once rather than at the next resync.
+func langfuseSecretRequests(ctx context.Context, c client.Reader, obj client.Object) []reconcile.Request {
+	if obj.GetName() != telemetry.LangfuseSecretName {
+		return nil
+	}
+	var list agentsv1beta1.AgentDeploymentList
+	if err := c.List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+		logf.FromContext(ctx).Error(err, "listing agents for a langfuse-otlp Secret change; they re-render at the next resync",
+			"namespace", obj.GetNamespace())
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(list.Items))
+	for i := range list.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+	}
+	return reqs
+}
+
+// podContractVersion names the shape of what the platform renders into every agent's revision that a
+// change must reach every running agent with: a pod-template change that keeps the revision name is
+// dropped by the controller, and the collector's ConfigMap is rewritten in place while its env is not.
+// Bump it when that shape changes.
+//   - v2: every Langfuse credential became an optional secretKeyRef (ADR 0148).
+//   - v3: every agent gets BFF_INTERNAL_URL, so its launcher can bind the run capability (ADR 0124).
+//   - v4: every revision carries a run timeout and a target-burst-capacity (ADR 0147).
+//   - v5: every agent carries AGENT_VERSION, the version its online scores are keyed by.
+//   - v6: every injected sidecar has CPU and memory limits, the egress sidecar a restricted-profile
+//     securityContext, and tool discovery moved from a sidecar into the launcher (the agent container
+//     mounts the tools ConfigMap).
+const podContractVersion = "v6"
+
+// supersededPodContracts are the contracts whose revision names may still be serving, approved or recorded
+// when this controller starts: the one podContractVersion replaced, and "" for releases up to
+// v0.1.0-beta.8, which folded no contract. A revision whose name differs from the candidate's only by one
+// of these is the same pod, so its approval carries to the candidate (candidateRevision.names). Update the
+// list with every bump; a contract left off it re-gates every gated agent on upgrade.
+var supersededPodContracts = []string{"", "v5"}
+
+// traceExportFold folds the pod contract into the revision digest. Whether export is on
+// is part of it so that creating, completing or deleting a namespace's langfuse-otlp Secret reaches
+// running agents: their collectors loaded the old config at start, and the feedback hook's env
+// exists only while export is on.
+//
+// Shared with the tests, like hardeningFold.
+func traceExportFold(digest string, exporting bool) string {
+	return podContractFold(digest, podContractVersion, exporting)
+}
+
+// podContractFold is traceExportFold at a given contract version, so a test can name the revision an
+// older controller produced. It never returns "", so every revision name carries the -h suffix.
+func podContractFold(digest, contract string, exporting bool) string {
+	return foldDigest(digest, "|pod-contract:"+contract+":"+strconv.FormatBool(exporting))
+}
+
+// contractFoldAt folds a superseded contract into digest; "" is a release that folded none.
+func contractFoldAt(digest, contract string, exporting bool) string {
+	if contract == "" {
+		return digest
+	}
+	return podContractFold(digest, contract, exporting)
+}
+
+// foldDigest folds one more input into a revision digest.
+func foldDigest(digest, part string) string {
+	sum := sha256.Sum256([]byte(digest + part))
 	return fmt.Sprintf("%x", sum[:])[:8]
 }
 
@@ -2233,7 +2498,7 @@ func injectPlatformLauncher(containers []corev1.Container, volumes []corev1.Volu
 // agent back in — only for one that legitimately builds an in-cluster kube config. It
 // feeds both ensureAgentIdentitySA (the SA-level AutomountServiceAccountToken) and the
 // structural digest (so toggling it rolls a new revision, the M4 landmine).
-func mountAPIToken(deploy *agentsv1alpha1.AgentDeployment) bool {
+func mountAPIToken(deploy *agentsv1beta1.AgentDeployment) bool {
 	return deploy.Spec.MountServiceAccountToken != nil && *deploy.Spec.MountServiceAccountToken
 }
 
@@ -2280,7 +2545,7 @@ func asIdentitySAConflictError(err error) (*identitySAConflictError, bool) {
 //
 // registryID, when non-empty, is stamped as the registryIDLabel LABEL on the SA — the
 // SERVER-TRUSTED source the state-layer proxy reads to derive the SHARED-scope memory
-// boundary (`mem:shared:{registry}:`), which used to be the runcap `bnd` claim (ADR 0052
+// boundary (`mem:shared:{namespace}/{registryId}:`), which used to be the runcap `bnd` claim (ADR 0052
 // §C6 shared-scope resolution). Empty ⇒ the label is removed (the agent left the
 // registry), so a stale boundary can never linger.
 //
@@ -2288,7 +2553,7 @@ func asIdentitySAConflictError(err error) (*identitySAConflictError, bool) {
 // SetControllerReference returns a *controllerutil.AlreadyOwnedError.
 // ensureAgentIdentitySA wraps it as an *identitySAConflictError so the caller
 // (Reconcile) can surface Ready=False and stop cleanly — no hot-loop.
-func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, saName, registryID string) error {
+func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, saName, registryID string) error {
 	if saName == "" {
 		return nil
 	}
@@ -2371,10 +2636,15 @@ func (r *AgentDeploymentReconciler) ensureAgentIdentitySA(ctx context.Context, d
 // (m7.5: the AgentDeployment reconciler is the single writer of the ksvc and its
 // autoscaling annotations; the AgentScalingPolicy controller owns only the
 // separate KEDA ScaledObject).
+//
+// traffic, when non-nil, is written in the SAME update as the template; nil leaves
+// traffic as the template write leaves it. Two writes would pass through a service with
+// no traffic block, which Knative serves as 100% to the latest ready revision.
 func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	hash string,
+	traffic []servingv1.TrafficTarget,
 ) (*servingv1.Service, []string, error) {
 	pod, err := r.buildPodTemplate(ctx, deploy)
 	if err != nil {
@@ -2384,10 +2654,7 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		return nil, nil, err
 	}
 
-	revName := deploy.Name + "-" + hash
-	if pod.digest != "" {
-		revName = revName + "-h" + pod.digest
-	}
+	revName := revisionName(deploy.Name, hash, pod.digest)
 
 	annotations, err := r.autoscalingAnnotations(ctx, deploy)
 	if err != nil {
@@ -2418,6 +2685,12 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 						Containers:         pod.containers,
 						Volumes:            pod.volumes,
 					},
+					ContainerConcurrency: runConcurrency(deploy),
+					TimeoutSeconds:       runTimeoutSeconds(deploy),
+					// A run that answers only when it is done sends no byte until then, so the time to the
+					// first byte must allow the whole run; left unset it falls back to Knative's 300s and cuts
+					// off every run past five minutes regardless of timeoutSeconds (measured, ADR 0147).
+					ResponseStartTimeoutSeconds: runTimeoutSeconds(deploy),
 				},
 			},
 		},
@@ -2442,6 +2715,11 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 		if ksvc.Spec.Template.Name != desiredRev {
 			ksvc.Spec = desiredSpec
 		}
+		// Compared by revision and percent only: Knative defaults fields on each target, so a
+		// whole-object comparison would rewrite an unchanged block on every reconcile.
+		if traffic != nil && !trafficEqual(ksvc.Spec.Traffic, traffic) {
+			ksvc.Spec.Traffic = traffic
+		}
 		return ctrl.SetControllerReference(deploy, ksvc, r.Scheme)
 	})
 	if err != nil {
@@ -2451,13 +2729,48 @@ func (r *AgentDeploymentReconciler) reconcileKnativeService(
 	return ksvc, pod.resolvedSkills, nil
 }
 
+// An agent run is a session, not a request (ADR 0147): it can run for minutes, so the revision's request
+// timeout must cover the platform's run limit, and how many runs one pod holds must be something an
+// operator can bound. These read spec.scaling and apply the defaults when it is absent, since the CRD's
+// defaults reach only an object that has a scaling stanza.
+const defaultRunTimeoutSeconds = int64(600) // the BFF's default run limit (RUN_EXEC_TIMEOUT) and Knative's default maximum
+
+func runConcurrency(deploy *agentsv1beta1.AgentDeployment) *int64 {
+	if deploy.Spec.Scaling == nil || deploy.Spec.Scaling.Concurrency == nil {
+		return nil
+	}
+	cc := int64(*deploy.Spec.Scaling.Concurrency)
+	return &cc
+}
+
+func runTimeoutSeconds(deploy *agentsv1beta1.AgentDeployment) *int64 {
+	t := defaultRunTimeoutSeconds
+	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TimeoutSeconds != nil {
+		t = *deploy.Spec.Scaling.TimeoutSeconds
+	}
+	return &t
+}
+
+// targetBurstCapacity defaults by concurrency (measured, ADR 0147): with concurrency unlimited the
+// activator can leave the path (0); with concurrency bounded it must stay (-1) and queue the runs that
+// find every slot taken — at concurrency 1 with 0, half of a 12-run burst against 4 pods was dropped.
+func targetBurstCapacity(deploy *agentsv1beta1.AgentDeployment) int32 {
+	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.TargetBurstCapacity != nil {
+		return *deploy.Spec.Scaling.TargetBurstCapacity
+	}
+	if cc := runConcurrency(deploy); cc != nil && *cc > 0 {
+		return -1
+	}
+	return 0
+}
+
 // autoscalingAnnotations returns the Knative autoscaling annotations for the
 // ksvc revision template. The min/max scale defaults come from spec.scaling; a
 // request-rate / custom-metric AgentScalingPolicy that targets the agent
 // overrides them and adds the class/metric annotations.
 func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 ) (map[string]string, error) {
 	minScale := int32(0)
 	maxScale := int32(3)
@@ -2469,8 +2782,9 @@ func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	}
 
 	annotations := map[string]string{
-		"autoscaling.knative.dev/min-scale": strconv.Itoa(int(minScale)),
-		"autoscaling.knative.dev/max-scale": strconv.Itoa(int(maxScale)),
+		"autoscaling.knative.dev/min-scale":             strconv.Itoa(int(minScale)),
+		"autoscaling.knative.dev/max-scale":             strconv.Itoa(int(maxScale)),
+		"autoscaling.knative.dev/target-burst-capacity": strconv.Itoa(int(targetBurstCapacity(deploy))),
 	}
 
 	policy, err := r.knativeScalingPolicy(ctx, deploy)
@@ -2505,10 +2819,9 @@ func (r *AgentDeploymentReconciler) autoscalingAnnotations(
 	return annotations, nil
 }
 
-// collectorImage / discoveryImage resolve the injected sidecar images: the configured
-// override (COLLECTOR_IMAGE / DISCOVERY_IMAGE, OPS-1) or the project-default constant. The
-// defaults are dev.local/* (ImagePullBackOff off a kind cluster), so a real install sets
-// these — wired through the chart (OPS-4).
+// collectorImage resolves the injected collector image: the configured override (COLLECTOR_IMAGE,
+// OPS-1) or the project-default constant. The default is dev.local/* (ImagePullBackOff off a kind
+// cluster), so a real install sets it — wired through the chart (OPS-4).
 func (r *AgentDeploymentReconciler) collectorImage() string {
 	if r.CollectorImage != "" {
 		return r.CollectorImage
@@ -2516,58 +2829,65 @@ func (r *AgentDeploymentReconciler) collectorImage() string {
 	return telemetry.CollectorImage
 }
 
-func (r *AgentDeploymentReconciler) discoveryImage() string {
-	if r.DiscoveryImage != "" {
-		return r.DiscoveryImage
-	}
-	return DiscoveryImage
-}
-
 // reconcileCollector ensures the per-agent collector-config ConfigMap and
 // returns the collector sidecar container + its config volume. Langfuse export
-// is enabled only when a `langfuse-otlp` Secret exists in the agent's namespace
-// (seeded by `dev-up M=3`); otherwise the collector runs debug-only, which is
-// the automated-assertion sink the e2e slice reads via `kubectl logs`.
+// is on only when the AGENT'S OWN namespace holds a complete `langfuse-otlp` Secret;
+// otherwise the collector runs debug-only (the sink e2e slices read via `kubectl logs`)
+// and the TraceExport condition says why, so the absence is visible rather than silent. The bool
+// reports whether export is on, for the revision digest (traceExportFold).
 func (r *AgentDeploymentReconciler) reconcileCollector(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
-) (corev1.Container, corev1.Volume, error) {
-	var langfuseEnv []corev1.EnvVar
+	deploy *agentsv1beta1.AgentDeployment,
+) (corev1.Container, corev1.Volume, bool, error) {
 	langfuse := false
 
-	// Secret lookup: the agent's own namespace acts as a per-namespace
-	// override; the platform namespace (where dev-up seeds the dev keys) is
-	// the fallback default. Without the fallback, agents outside
-	// ctxmesh silently ran debug-only and nothing ever reached
-	// Langfuse (caught 2026-07-08 by querying the Langfuse API at M3 close).
+	// Secret lookup: the agent's OWN namespace only. A pod can reference only Secrets in its
+	// own namespace, and the alternative -- reading the platform namespace's Secret and copying
+	// its value into this pod -- is what put the platform's Langfuse key, as a literal, into
+	// every tenant's pod spec (any tenant admin could then read every tenant's traces).
 	var sec corev1.Secret
-	// UNCACHED read (see APIReader): a cached read is racy around informer resync and can
-	// render a collector without the LANGFUSE_OTLP env while its ConfigMap references it —
-	// crash-looping the sidecar. Fall back to the cached client when no APIReader is wired.
+	// UNCACHED read (see APIReader): a stale read could render a config that exports while the
+	// Secret it needs is gone. Fall back to the cached client when no APIReader is wired.
 	secretReader := client.Reader(r.Client)
 	if r.APIReader != nil {
 		secretReader = r.APIReader
 	}
 	err := secretReader.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: telemetry.LangfuseSecretName}, &sec)
-	if apierrors.IsNotFound(err) && deploy.Namespace != gateway.GatewayNamespace {
-		err = secretReader.Get(ctx, client.ObjectKey{Namespace: gateway.GatewayNamespace, Name: telemetry.LangfuseSecretName}, &sec)
-	}
 	switch {
 	case err == nil:
-		langfuse = true
-		// Dev keys are deterministic and non-secret; wiring the endpoint + basic
-		// auth as literal env is acceptable for the M3 dev posture (production
-		// would use a mounted secret ref). See specs/observability.md.
-		langfuseEnv = []corev1.EnvVar{
-			{Name: "LANGFUSE_OTLP_ENDPOINT", Value: string(sec.Data["otlp-endpoint"])},
-			{Name: "LANGFUSE_OTLP_AUTH", Value: telemetry.BasicAuthHeader(
-				string(sec.Data["public-key"]), string(sec.Data["secret-key"]),
-			)},
+		// A Secret missing a key would render an exporter whose endpoint or credential expands to
+		// nothing: the collector fails to start, or every export is refused. Export stays off.
+		if missing := telemetry.MissingLangfuseKeys(sec.Data); len(missing) > 0 {
+			apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+				Type:   conditionTraceExport,
+				Status: metav1.ConditionFalse,
+				Reason: "LangfuseSecretIncomplete",
+				Message: "the " + telemetry.LangfuseSecretName + " Secret in namespace " + deploy.Namespace +
+					" has no value for " + strings.Join(missing, ", ") + "; spans reach only the collector's debug log",
+				ObservedGeneration: deploy.Generation,
+			})
+			break
 		}
+		langfuse = true
+		apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+			Type:               conditionTraceExport,
+			Status:             metav1.ConditionTrue,
+			Reason:             "LangfuseSecretPresent",
+			Message:            "spans export to Langfuse using the " + telemetry.LangfuseSecretName + " Secret in this namespace",
+			ObservedGeneration: deploy.Generation,
+		})
 	case apierrors.IsNotFound(err):
-		// debug-only; not an error.
+		apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
+			Type:   conditionTraceExport,
+			Status: metav1.ConditionFalse,
+			Reason: "NoLangfuseSecret",
+			Message: "no " + telemetry.LangfuseSecretName + " Secret in namespace " + deploy.Namespace +
+				"; spans reach only the collector's debug log. To export to Langfuse, create it in this namespace with keys " +
+				strings.Join(telemetry.LangfuseSecretKeys, ", "),
+			ObservedGeneration: deploy.Generation,
+		})
 	default:
-		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("checking langfuse secret: %w", err)
+		return corev1.Container{}, corev1.Volume{}, false, fmt.Errorf("checking langfuse secret: %w", err)
 	}
 
 	// Redaction policy (§13.3): the built-in email/SSN/key detectors are always
@@ -2578,7 +2898,7 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 	// the reconciler is the backstop that refuses an un-compilable policy.
 	detectors, err := telemetry.DetectorsWithCustom(customDetectors(deploy))
 	if err != nil {
-		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("building trace-redaction policy: %w", err)
+		return corev1.Container{}, corev1.Volume{}, false, fmt.Errorf("building trace-redaction policy: %w", err)
 	}
 
 	cmName := telemetry.ConfigMapName(deploy.Name)
@@ -2592,16 +2912,16 @@ func (r *AgentDeploymentReconciler) reconcileCollector(
 		cm.Data["config.yaml"] = telemetry.RenderConfig(langfuse, detectors)
 		return ctrl.SetControllerReference(deploy, cm, r.Scheme)
 	}); err != nil {
-		return corev1.Container{}, corev1.Volume{}, fmt.Errorf("upserting collector ConfigMap: %w", err)
+		return corev1.Container{}, corev1.Volume{}, false, fmt.Errorf("upserting collector ConfigMap: %w", err)
 	}
 
-	return telemetry.Container(cmName, langfuseEnv, r.collectorImage()), telemetry.Volume(cmName), nil
+	return telemetry.Container(cmName, r.collectorImage()), telemetry.Volume(cmName), langfuse, nil
 }
 
 // customDetectors adapts the AgentDeployment's optional spec.tracePolicy into
 // the telemetry package's detector-spec shape. Returns nil when no tracePolicy
 // (or no custom detectors) is set, so only the built-in defaults apply.
-func customDetectors(deploy *agentsv1alpha1.AgentDeployment) []telemetry.CustomDetectorSpec {
+func customDetectors(deploy *agentsv1beta1.AgentDeployment) []telemetry.CustomDetectorSpec {
 	if deploy.Spec.TracePolicy == nil || len(deploy.Spec.TracePolicy.CustomDetectors) == 0 {
 		return nil
 	}
@@ -2618,7 +2938,7 @@ func customDetectors(deploy *agentsv1alpha1.AgentDeployment) []telemetry.CustomD
 // controller runs), status is set to Unknown.
 func (r *AgentDeploymentReconciler) syncStatus(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	ksvc *servingv1.Service,
 	latestVersion string,
 	resolvedSkills []string,
@@ -2705,7 +3025,7 @@ func preferredAgentURL(ksvc *servingv1.Service) string {
 // watch trigger will re-evaluate).
 func (r *AgentDeploymentReconciler) setReadyFalse(
 	ctx context.Context,
-	deploy *agentsv1alpha1.AgentDeployment,
+	deploy *agentsv1beta1.AgentDeployment,
 	reason, message string,
 ) (ctrl.Result, error) {
 	apimeta.SetStatusCondition(&deploy.Status.Conditions, metav1.Condition{
@@ -2733,7 +3053,7 @@ func (r *AgentDeploymentReconciler) setReadyFalse(
 // ADR 0107): Set (endpoint + spec) when spec.endUserAccess (serving-only, CEL-enforced), else prune. The
 // endpoint is the passed value (status.URL when Ready, "" when not) so the BFF 409s a not-Ready exposed
 // agent vs 404s an unexposed one. Best-effort — a store error is logged, never fails the reconcile.
-func (r *AgentDeploymentReconciler) syncEndUserAgentMirror(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, endpoint string) {
+func (r *AgentDeploymentReconciler) syncEndUserAgentMirror(ctx context.Context, deploy *agentsv1beta1.AgentDeployment, endpoint string) {
 	if r.EndUserAgentStore == nil {
 		return
 	}
@@ -2771,7 +3091,7 @@ func (r *AgentDeploymentReconciler) pruneEndUserAgentMirror(ctx context.Context,
 // two derivations of one CRD field would be a drift waiting to happen.
 //
 // Best-effort: a store error is logged and re-converges on the next reconcile, like the other mirrors.
-func (r *AgentDeploymentReconciler) syncSpawnBudget(ctx context.Context, deploy *agentsv1alpha1.AgentDeployment) {
+func (r *AgentDeploymentReconciler) syncSpawnBudget(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) {
 	if r.SpawnBudgetStore == nil {
 		return
 	}
@@ -2819,7 +3139,7 @@ func (r *AgentDeploymentReconciler) pruneSpawnBudget(ctx context.Context, namesp
 // An agent that is neither a member nor described is pruned. Best-effort: a store error is logged and
 // re-converges on the next reconcile, exactly like the end-user mirror; it never fails the reconcile.
 func (r *AgentDeploymentReconciler) syncCapabilityRegistration(
-	ctx context.Context, deploy *agentsv1alpha1.AgentDeployment, ready bool,
+	ctx context.Context, deploy *agentsv1beta1.AgentDeployment, ready bool,
 ) {
 	if r.AgentCapabilityStore == nil {
 		return
@@ -2849,7 +3169,9 @@ func (r *AgentDeploymentReconciler) syncCapabilityRegistration(
 		Ready:       ready,
 	}
 	if membership.IsMember {
-		row.RegistryID = membership.RegistryID
+		// The role is what the BFF attests for this agent's AMP calls (ADR 0153), so it is recorded
+		// beside the membership it qualifies; the endpoint is where its async deliveries go.
+		row.RegistryID, row.Role, row.Endpoint = membership.RegistryID, deploy.Spec.Role, deliveryEndpoint(deploy)
 	}
 	if err := r.AgentCapabilityStore.Set(ctx, row); err != nil {
 		logf.FromContext(ctx).Error(err, "capability registration failed; will re-converge next reconcile",
@@ -3010,7 +3332,7 @@ func registryMembershipDigest(m registryMembership, role string, allowedCallers 
 // server-side on create, but a client-side build (envtest, direct construction)
 // may leave it 0; defaulting here keeps the injected BUDGET_SOFT_PCT sane in
 // every path.
-func budgetSoftPct(b *agentsv1alpha1.BudgetSpec) int32 {
+func budgetSoftPct(b *agentsv1beta1.BudgetSpec) int32 {
 	if b == nil || b.SoftThresholdPct == 0 {
 		return 80
 	}
@@ -3025,7 +3347,7 @@ func budgetSoftPct(b *agentsv1alpha1.BudgetSpec) int32 {
 // skips re-applying the spec when the revision name is unchanged (the M4
 // silent-loss landmine). Returns "" when no budget is set (symmetric with the
 // tool/memory/registry components).
-func budgetDigest(b *agentsv1alpha1.BudgetSpec) string {
+func budgetDigest(b *agentsv1beta1.BudgetSpec) string {
 	if b == nil {
 		return ""
 	}
@@ -3043,11 +3365,11 @@ func budgetDigest(b *agentsv1alpha1.BudgetSpec) string {
 // re-applying the spec when the revision name is unchanged (the M4
 // silent-loss landmine). Returns "" when spec.runtime is nil (symmetric with
 // the other components, backward-compatible: pre-M65 revision names unchanged).
-func runtimeDigest(rt *agentsv1alpha1.RuntimeSpec) string {
+func runtimeDigest(rt *agentsv1beta1.RuntimeSpec) string {
 	if rt == nil {
 		return ""
 	}
-	b, err := json.Marshal(rt)
+	b, err := json.Marshal(runtimeForPod(rt))
 	if err != nil {
 		// Marshal of a well-typed struct should never fail; treat as empty to
 		// avoid a silent break in the digest path (the injection path returns
@@ -3056,6 +3378,20 @@ func runtimeDigest(rt *agentsv1alpha1.RuntimeSpec) string {
 	}
 	h := sha256.Sum256(b)
 	return fmt.Sprintf("%x", h[:])[:8]
+}
+
+// runtimeForPod returns a copy of rt without spec.runtime.toolPolicy.approvers. Approvers are
+// enforced by the BFF alone, so they never reach the pod (AGENT_RUNTIME, the sidecar's policy
+// ConfigMap) or a digest that would roll it. Nil stays nil.
+func runtimeForPod(rt *agentsv1beta1.RuntimeSpec) *agentsv1beta1.RuntimeSpec {
+	if rt == nil {
+		return nil
+	}
+	out := rt.DeepCopy()
+	if out.ToolPolicy != nil {
+		out.ToolPolicy.Approvers = nil
+	}
+	return out
 }
 
 // envVarPresent reports whether name appears in the given env slice.
@@ -3069,8 +3405,11 @@ func envVarPresent(env []corev1.EnvVar, name string) bool {
 	return false
 }
 
+// agentDeploymentWorkers is how many agents reconcile at once.
+const agentDeploymentWorkers = 4
+
 // SetupWithManager sets up the controller with the Manager.
-// The controller owns AgentVersion and Knative Service so that changes to either
+// The controller owns the Knative Service and the other workload kinds so that their changes
 // (e.g. a Knative controller updating ksvc status) requeue the parent deployment.
 //
 // It also watches MCPToolBinding: add/remove/change events map to a requeue of
@@ -3083,7 +3422,7 @@ func envVarPresent(env []corev1.EnvVar, name string) bool {
 func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapBindingToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
-			b, ok := obj.(*agentsv1alpha1.MCPToolBinding)
+			b, ok := obj.(*agentsv1beta1.MCPToolBinding)
 			if !ok || b.Spec.AgentRef == "" {
 				return nil
 			}
@@ -3103,11 +3442,11 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// registries are few and this only fires on registry events, not steady state.
 	mapRegistryToAgents := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			reg, ok := obj.(*agentsv1alpha1.AgentRegistry)
+			reg, ok := obj.(*agentsv1beta1.AgentRegistry)
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.AgentDeploymentList
+			var list agentsv1beta1.AgentDeploymentList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(reg.Namespace)); err != nil {
 				return nil
 			}
@@ -3116,6 +3455,23 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 				reqs = append(reqs, reconcile.Request{
 					NamespacedName: client.ObjectKeyFromObject(&list.Items[i]),
 				})
+			}
+			return reqs
+		},
+	)
+
+	// ModelRoute → requeue the agents in its namespace that name it (ModelRouteReady mirrors its Ready).
+	mapRouteToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			var list agentsv1beta1.AgentDeploymentList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(obj.GetNamespace())); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				if modelRouteName(&list.Items[i]) == obj.GetName() {
+					reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
+				}
 			}
 			return reqs
 		},
@@ -3130,7 +3486,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// the AgentScalingPolicy controller's KEDA path).
 	mapScalingPolicyToAgent := handler.EnqueueRequestsFromMapFunc(
 		func(_ context.Context, obj client.Object) []reconcile.Request {
-			p, ok := obj.(*agentsv1alpha1.AgentScalingPolicy)
+			p, ok := obj.(*agentsv1beta1.AgentScalingPolicy)
 			if !ok || p.Spec.AgentRef == "" {
 				return nil
 			}
@@ -3147,13 +3503,13 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// only fires on tenant events.
 	mapTenantToAgents := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			t, ok := obj.(*agentsv1alpha1.Tenant)
+			t, ok := obj.(*agentsv1beta1.Tenant)
 			if !ok {
 				return nil
 			}
 			var reqs []reconcile.Request
 			for _, ns := range t.Spec.Namespaces {
-				var list agentsv1alpha1.AgentDeploymentList
+				var list agentsv1beta1.AgentDeploymentList
 				if err := mgr.GetClient().List(ctx, &list, client.InNamespace(ns)); err != nil {
 					continue
 				}
@@ -3195,7 +3551,7 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.AgentDeploymentList
+			var list agentsv1beta1.AgentDeploymentList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(gp.Namespace)); err != nil {
 				return nil
 			}
@@ -3211,12 +3567,23 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// langfuse-otlp Secret → requeue every AgentDeployment in its namespace (langfuseSecretRequests).
+	// Metadata-only, like the ModelRoute watch: Secret payloads are never cached.
+	mapLangfuseSecretToAgents := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			return langfuseSecretRequests(ctx, mgr.GetClient(), obj)
+		},
+	)
+
 	// Knative Eventing is OPTIONAL (ADR 0141). Owning a kind the cluster does not serve stops the
 	// manager from starting at all, so a user running nothing but serving agents -- the default, and
 	// the whole quickstart -- had to install a second Knative component first.
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.AgentDeployment{}).
-		Owns(&agentsv1alpha1.AgentVersion{}).
+		// More than one worker: with one, a single reconcile that blocks (an informer that cannot sync,
+		// a slow store) stops every agent from reconciling — the M181 wedge. Reconciles of different
+		// agents share no mutable state (the reconciler holds configuration and pool-backed stores).
+		WithOptions(controller.Options{MaxConcurrentReconciles: agentDeploymentWorkers}).
+		For(&agentsv1beta1.AgentDeployment{}).
 		Owns(&servingv1.Service{})
 	if r.EventingAvailable {
 		b = b.Owns(&eventingv1.Trigger{})
@@ -3226,12 +3593,14 @@ func (r *AgentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.CronJob{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
-		Watches(&agentsv1alpha1.MCPToolBinding{}, mapBindingToAgent).
-		Watches(&agentsv1alpha1.AgentRegistry{}, mapRegistryToAgents).
-		Watches(&agentsv1alpha1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
-		Watches(&agentsv1alpha1.Tenant{}, mapTenantToAgents).
+		Watches(&agentsv1beta1.MCPToolBinding{}, mapBindingToAgent).
+		Watches(&agentsv1beta1.AgentRegistry{}, mapRegistryToAgents).
+		Watches(&agentsv1beta1.ModelRoute{}, mapRouteToAgents).
+		Watches(&agentsv1beta1.AgentScalingPolicy{}, mapScalingPolicyToAgent).
+		Watches(&agentsv1beta1.Tenant{}, mapTenantToAgents).
 		Watches(&agentsv1beta1.AgentTeam{}, mapTeamToSupervisor).
 		Watches(&agentsv1beta1.GuardrailPolicy{}, mapGuardrailPolicyToAgents).
+		WatchesMetadata(&corev1.Secret{}, mapLangfuseSecretToAgents).
 		Named("agentdeployment").
 		Complete(r)
 }

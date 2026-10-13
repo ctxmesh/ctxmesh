@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/publishedartifact"
 )
 
@@ -64,21 +64,21 @@ func getReferences(t *testing.T, s *Server, name string) *httptest.ResponseRecor
 // carries an ownerReference to the AgentDeployment (Kind AgentDeployment, Name
 // agent). This simulates an expand-emitted child that Kubernetes will GC on
 // delete.
-func ownedToolBinding(name, agent, ns string) *agentsv1alpha1.MCPToolBinding {
-	return &agentsv1alpha1.MCPToolBinding{
+func ownedToolBinding(name, agent, ns string) *agentsv1beta1.MCPToolBinding {
+	return &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 			OwnerReferences: []metav1.OwnerReference{
-				{Kind: agentDeploymentOwnerKind, Name: agent, APIVersion: "agents.ctxmesh.ai/v1alpha1"},
+				{Kind: agentDeploymentOwnerKind, Name: agent, APIVersion: "agents.ctxmesh.ai/v1beta1"},
 			},
 		},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    agent,
 			ToolName:    "search",
 			RegistryRef: "reg",
 			Mode:        "remote",
-			Server:      agentsv1alpha1.ToolServer{URL: "http://x"},
+			Server:      agentsv1beta1.ToolServer{URL: "http://x"},
 		},
 	}
 }
@@ -86,10 +86,10 @@ func ownedToolBinding(name, agent, ns string) *agentsv1alpha1.MCPToolBinding {
 // independentScalingPolicy builds an AgentScalingPolicy whose agentRef names
 // agent but that carries NO ownerReference to the AgentDeployment. This
 // simulates an independently-created policy that would orphan on delete.
-func independentScalingPolicy(name, agent, ns string) *agentsv1alpha1.AgentScalingPolicy {
-	return &agentsv1alpha1.AgentScalingPolicy{
+func independentScalingPolicy(name, agent, ns string) *agentsv1beta1.AgentScalingPolicy {
+	return &agentsv1beta1.AgentScalingPolicy{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec: agentsv1alpha1.AgentScalingPolicySpec{
+		Spec: agentsv1beta1.AgentScalingPolicySpec{
 			AgentRef: agent,
 			Trigger:  "request-rate",
 			Min:      0,
@@ -103,9 +103,9 @@ func independentScalingPolicy(name, agent, ns string) *agentsv1alpha1.AgentScali
 // TestDeleteAgentRemovesObject proves a DELETE succeeds (204) and the
 // AgentDeployment is gone from the fake cluster afterwards.
 func TestDeleteAgentRemovesObject(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -114,7 +114,7 @@ func TestDeleteAgentRemovesObject(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
 
 	// The AgentDeployment must no longer exist in the fake cluster.
-	var got agentsv1alpha1.AgentDeployment
+	var got agentsv1beta1.AgentDeployment
 	err := c.Get(context.Background(), client.ObjectKey{Name: "echo", Namespace: detailNS}, &got)
 	require.True(t, apierrors.IsNotFound(err), "AgentDeployment must be gone after a successful DELETE")
 }
@@ -132,9 +132,9 @@ func deleteAgentUnpublish(t *testing.T, s *Server, name string) *httptest.Respon
 // TestDeleteAgent_UnpublishTrueTombstones: ?unpublish=true tombstones the agent's published template
 // AFTER the delete (U4).
 func TestDeleteAgent_UnpublishTrueTombstones(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -158,9 +158,9 @@ func TestDeleteAgent_UnpublishTrueTombstones(t *testing.T) {
 // TestDeleteAgent_BareDeleteKeepsPublished: a bare DELETE (no ?unpublish) keeps the published template
 // live — ADR 0068 registry semantics (U4 is opt-in).
 func TestDeleteAgent_BareDeleteKeepsPublished(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -184,9 +184,9 @@ func TestDeleteAgent_BareDeleteKeepsPublished(t *testing.T) {
 // TestDeleteAgent_UnpublishNoStoreStillDeletes: ?unpublish=true with NO published store still deletes
 // (best-effort — the tombstone is a no-op, never fails the delete).
 func TestDeleteAgent_UnpublishNoStoreStillDeletes(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c}) // no publishedArtifactStore
@@ -210,9 +210,9 @@ func TestDeleteAgentNotFoundIs404(t *testing.T) {
 // back to its own SA (ADR 0011). The same fake-interceptor pattern as
 // TestEditForbiddenApplyIs403.
 func TestDeleteAgentForbiddenIs403(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -263,9 +263,9 @@ func TestDeleteAgentWithoutTokenIs401(t *testing.T) {
 //
 // Expects: GCCount=1, OrphanCount=1, two entries with the right ownedByAgent flags.
 func TestAgentReferencesClassifiesOwnedVsOrphan(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	// Owned MCPToolBinding (expand-emitted child with an ownerRef).
 	owned := ownedToolBinding("echo-search", "echo", detailNS)
@@ -310,9 +310,9 @@ func TestAgentReferencesClassifiesOwnedVsOrphan(t *testing.T) {
 // TestAgentReferencesEmptyWhenNone proves the endpoint returns an empty (not
 // null) References slice and zero counts when no objects reference the agent.
 func TestAgentReferencesEmptyWhenNone(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "solo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).Build()
 	s := newCallerServer(t, &fakeCallerClientFactory{client: c})
@@ -363,9 +363,9 @@ func TestAgentReferencesWithoutTokenIs401(t *testing.T) {
 // TestAgentReferencesForbiddenListIs403 proves a caller whose RBAC forbids
 // listing the reference resources sees an honest 403 — not a silent empty [].
 func TestAgentReferencesForbiddenListIs403(t *testing.T) {
-	ad := &agentsv1alpha1.AgentDeployment{
+	ad := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "echo", Namespace: detailNS},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "img:1"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "img:1"},
 	}
 	// Agent Get succeeds; the reference Lists are forbidden.
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(ad).

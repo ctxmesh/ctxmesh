@@ -68,12 +68,15 @@ fi
 # binding and reaches the console; `internal/controlplane/namespacetenant/` decides whether the
 # namespace picker has anything in it. Both are console surfaces and neither is under ui/.
 MAP='
-console;^ui/;ux-review tier0 tier2-ui
-console;^internal/bff/;ux-review tier0 tier1
+console;^ui/;ux-review tier0 tier2-ui bff-route-callers
+console;^internal/bff/;ux-review tier0 tier1 bff-route-callers
 console-authz;^config/rbac/;flow-completability ux-review tier1
 console-authz;^deploy/helm/.*/(dex|control-plane)\.yaml$;flow-completability install-truth ux-review
 console-authz;^internal/controlplane/namespacetenant/;flow-completability tier0 tier1
 install;^deploy/helm/;install-truth helm-lint tier2
+# The platform edge: host routing, ext-auth, and the sandbox on what agents return at their own
+# hostnames, which the consent page on the console relies on.
+install;^deploy/edge/;edge-truth tier2
 install;^config/(crd|default|gateway|manager|webhook|prometheus|network-policy|samples)/;install-truth helm-generate tier1
 # config/bff and config/run-worker are the server-side layer the console runs on, so a change
 # here reaches the console without touching ui/ — the blind spot that let M177 ship three
@@ -93,10 +96,35 @@ api;^api/;tier0 tier1 helm-generate crd-version-parity ux-review
 # internal/controller/, and its config decides whether a run is visible at all -- the gap that hid a
 # trace-fragmentation defect and a memory path that emitted no spans.
 runtime;^internal/telemetry/;tier0 tier1 tier2
-runtime;^cmd/launcher/;tier0 tier1 sdk-live
+runtime;^cmd/launcher/;tier0 tier1 sdk-conformance bff-route-callers
 runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
-runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
-sdk;^sdk/;sdk-contract sdk-readme-truth tier0
+runtime;^internal/(run|gateway|egress|pki|statelayer|deliveryclaim|toolpush)/;tier0 tier1
+# The run-capability wire format and proof-of-possession, ADR 0124: minted and bound by the BFF,
+# held and proven by the launcher, verified by the egress sidecar and the state-layer proxy.
+runtime;^internal/runcap/;tier0 tier1 tier2 sdk-conformance
+sdk;^sdk/;sdk-contract sdk-readme-truth sdk-conformance tier0 bff-route-callers
+# The SDK conformance suite itself: the contract checker, the fake generator and the probe runner.
+# sdk-conformance replaces sdk-live: it drives all six SDKs over every route and fails, rather than
+# skips, on a missing toolchain.
+sdk;^(test/sdkconformance/|hack/gen-sdk-fakes/|hack/sdk-conformance/|hack/gen-launcher-routes\.sh$);sdk-conformance sdk-contract tier0
+# The credential plane behind the token service: where an on-behalf-of grant is stored, sealed and
+# refreshed. A change here decides whether a tool call can authenticate at all, so it needs the e2e
+# credential flows, not only unit tests.
+credentials;^internal/(credplane|credpostgres|credprovider|credresolve|credstore)/;tier0 tier1 tier2
+# The memory and knowledge requests the token service serves to every agent. They moved out of
+# internal/credplane and keep its e2e tier.
+runtime;^internal/controlplane/(embedding|knowledge/retrieval|agentmemory/recall)/;tier0 tier1 tier2
+# The Postgres-backed control-plane stores the BFF serves to the console (registries, skills, knowledge,
+# datasets, shared runs). The two sub-packages mapped above keep their stricter rows.
+console;^internal/controlplane/;ux-review tier0 tier1
+# agent.yaml -> manifests. The console create flow and the CLI both produce agents through it.
+console;^internal/expand/;ux-review tier0 tier1
+console;^internal/replay/;ux-review tier0 tier1
+console-authz;^internal/enduseroidc/;flow-completability tier0 tier1
+install;^internal/(bootstrap|preflight)/;install-truth tier0 tier1
+api;^internal/webhook/;tier0 tier1 tier2
+runtime;^internal/(asyncbus|discovery|guardrail|ingest|ingestion|ocr|objectstore)/;tier0 tier1 tier2
+runtime;^internal/(audit|dbpool|eval|kedatypes|prompt|promql|runtimelimit|toolmanifest|workflow)/;tier0 tier1
 # The DEPENDENCY surface. go.mod/go.sum were unmapped, so a dependency bump required NOTHING --
 # found 2026-10-03 by gates-owed.sh, which propagates the fail-closed exit of this script. That is
 # change class most likely to introduce a supply-chain problem, and the one that had just shipped a

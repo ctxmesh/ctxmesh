@@ -76,7 +76,7 @@ bff:
       minReplicaCount: 2
       maxReplicaCount: 10
 
-# The bundled dev data plane (Valkey + MinIO, deterministic dev creds) is FORBIDDEN
+# The bundled dev data plane (Valkey + object store, deterministic dev creds) is FORBIDDEN
 # in production — bring your own externally-managed, HA data plane (PRD §23).
 devDataPlane:
   enabled: false

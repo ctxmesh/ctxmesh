@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Shield } from "lucide-react";
 
 import {
@@ -22,7 +22,9 @@ import {
   type StatusTone,
 } from "@/components/kit";
 import { Badge } from "@/components/ui/badge";
-import { api, ApiError, type GuardrailPolicySummary } from "@/lib/api";
+import { api, type GuardrailPolicySummary } from "@/lib/api";
+import { useNamespace } from "@/lib/namespace";
+import { useLoad } from "@/lib/use-load";
 
 // GuardrailPoliciesPage — archetype A1 (index/table), resource-list column
 // budget (M151 spec §6.1/§4.4). The GuardrailPolicy content-governance policies
@@ -133,48 +135,22 @@ function nextStep(p: GuardrailPolicySummary, tone: StatusTone): NextStep {
   return { tone: "none" };
 }
 
-type LoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; policies: GuardrailPolicySummary[] }
-  | { kind: "error"; message: string; forbidden: boolean };
-
 type View = "all" | "attention" | "failopen";
 
 export function GuardrailPoliciesPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<View>("all");
   const [open, setOpen] = useState<GuardrailPolicySummary | null>(null);
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
+  const { namespace } = useNamespace();
 
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
-    api
-      .listGuardrailPolicies(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", policies: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const fetchPolicies = useCallback(
+    (signal: AbortSignal) => api.listGuardrailPolicies(namespace, signal).then((res) => res.items),
+    [namespace],
+  );
+  const { state: loadState, reload } = useLoad(fetchPolicies);
 
   const all = useMemo(
-    () => (loadState.kind === "ready" ? loadState.policies : []),
+    () => (loadState.kind === "ready" ? loadState.data : []),
     [loadState],
   );
 
@@ -229,7 +205,7 @@ export function GuardrailPoliciesPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "guardrail policies",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => reload(),
         }
       : null;
 

@@ -12,6 +12,7 @@ import {
 } from "@/pages/dashboard-page";
 import { UNKNOWN, isKnown } from "@/components/kit";
 import { markRunCompleted } from "@/lib/first-run";
+import { NamespaceProvider } from "@/lib/namespace";
 import type { AgentSummary } from "@/lib/api";
 
 // Home (route "/", archetype A11) — the page a person judges the product by.
@@ -549,19 +550,34 @@ describe("Home (render proof)", () => {
     expect(within(spending).queryByText("$0.00")).toBeNull();
   });
 
-  it("collapses ONE panel to a forbidden state on a 403 — the page never fully 403s", async () => {
+  // Tenants are cluster-scoped, so anyone bound to a namespace is refused the list. That
+  // caller is not a tenant admin: Spending, which is drawn against tenant caps, is absent,
+  // and nothing on the page reports a refusal they never asked about.
+  it("a caller who cannot list tenants gets no Spending panel and no alert", async () => {
     routeFetch(
       { "/api/agents": agentsResponse(FLEET), "/api/providers": providersConnected },
-      { "/api/tenants": 403 },
+      { "/api/tenants": 403, "/api/tenants/usage": 403 },
     );
     renderHome();
 
-    expect(
-      await screen.findByText("You don't have permission to view tenants"),
-    ).toBeInTheDocument();
-    // The rest of the page still rendered.
-    expect(screen.getByTestId("home-fleet-bar")).toBeInTheDocument();
+    expect(await screen.findByTestId("home-fleet-bar")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("home-spending")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/permission to view tenants/)).toBeNull();
     expect(screen.getByTestId("home-needs-you")).toBeInTheDocument();
+  });
+
+  it("a tenant list that fails is still reported, with a retry", async () => {
+    routeFetch(
+      { "/api/agents": agentsResponse(FLEET), "/api/providers": providersConnected },
+      { "/api/tenants": 500 },
+    );
+    renderHome();
+
+    const spending = await screen.findByTestId("home-spending");
+    expect(
+      await within(spending).findByText("The budgets could not be read"),
+    ).toBeInTheDocument();
   });
 
   it("counts the workspaces that refused the queue instead of reading them as empty", async () => {
@@ -765,9 +781,58 @@ describe("Home — the first-run path (the aha entry point)", () => {
     window.localStorage.clear();
   });
 
+  // Home scoped to one workspace asks about that workspace. (This test used to render under All
+  // workspaces, which spans team-b too; it now renders the workspace it is about.)
   it("does not let a run in another workspace check the step off here", async () => {
     window.localStorage.clear();
+    window.localStorage.setItem("ctxmesh.namespace", "team-a");
     markRunCompleted("team-b"); // a different workspace from the one being rendered
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    render(
+      <MemoryRouter>
+        <NamespaceProvider>
+          <DashboardPage />
+        </NamespaceProvider>
+      </MemoryRouter>,
+    );
+
+    const pill = await screen.findByTestId("home-setup-progress");
+    expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+    window.localStorage.clear();
+  });
+
+  it("checks the run step off in the workspace the run went to", async () => {
+    window.localStorage.clear();
+    window.localStorage.setItem("ctxmesh.namespace", "team-a");
+    markRunCompleted("team-a");
+    routeFetch({
+      "/api/agents": agentsResponse(FLEET),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    render(
+      <MemoryRouter>
+        <NamespaceProvider>
+          <DashboardPage />
+        </NamespaceProvider>
+      </MemoryRouter>,
+    );
+
+    await screen.findByTestId("home-page");
+    await waitFor(() => expect(screen.queryByTestId("first-run-checklist")).toBeNull());
+    expect(screen.queryByTestId("home-setup-progress")).toBeNull();
+    window.localStorage.clear();
+  });
+
+  // A chat records the namespace it ran in, never the all-workspaces scope, so under All workspaces
+  // a run in any workspace has to count or the step never checks off there.
+  it("checks the run step off under All workspaces after a run in any workspace", async () => {
+    window.localStorage.clear();
+    markRunCompleted("team-b");
     routeFetch({
       "/api/agents": agentsResponse(FLEET),
       "/api/providers": providersConnected,
@@ -775,9 +840,29 @@ describe("Home — the first-run path (the aha entry point)", () => {
     });
     renderHome();
 
-    const pill = await screen.findByTestId("home-setup-progress");
-    expect(pill).toHaveTextContent(/Setup 2 \/ 3/);
+    await screen.findByTestId("home-page");
+    await waitFor(() => expect(screen.queryByTestId("first-run-checklist")).toBeNull());
+    expect(screen.queryByTestId("home-setup-progress")).toBeNull();
     window.localStorage.clear();
+  });
+
+  // m184.16: the run step lands where the person can talk to the agent they just made.
+  it("sends 'Run your agent' to the Playground with the newest agent already picked", async () => {
+    window.localStorage.clear();
+    routeFetch({
+      "/api/agents": agentsResponse([
+        agent({ name: "older-agent", namespace: "team-a", createdAt: "2026-10-01T09:00:00Z" }),
+        agent({ name: "just-made", namespace: "team-a", createdAt: "2026-10-11T09:00:00Z" }),
+        agent({ name: "no-timestamp", namespace: "team-a" }),
+      ]),
+      "/api/providers": providersConnected,
+      "/api/runs": { runs: [] },
+    });
+    renderHome();
+
+    const cta = await screen.findByTestId("first-run-cta");
+    expect(cta).toHaveTextContent(/Run your agent/);
+    expect(cta).toHaveAttribute("href", "/playground?agent=just-made&ns=team-a");
   });
 
   it("renders the checklist when setup is incomplete (no providers)", async () => {

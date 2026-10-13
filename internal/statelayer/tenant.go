@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // tenantLabel is the AUTHORITATIVE namespace label the Tenant controller stamps
@@ -48,9 +48,9 @@ import (
 // ambiguity). The stamped label is the reconciled truth, so it can never diverge
 // from what the launcher was injected with.
 //
-// The value is the shared api/v1alpha1.TenantLabel — one source of truth with the
+// The value is the shared api/v1beta1.TenantLabel — one source of truth with the
 // controller that stamps it, so this security-critical key can never drift.
-const tenantLabel = agentsv1alpha1.TenantLabel
+const tenantLabel = agentsv1beta1.TenantLabel
 
 // TenantResolver maps a namespace to the id of the tenant that owns it.
 type TenantResolver interface {

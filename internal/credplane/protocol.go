@@ -14,29 +14,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package credplane is the CENTRAL TOKEN SERVICE + its client (ADR 0030 §1, increment 5 —
-// the scaling split). One central Deployment in the locked credential namespace runs the
-// credresolve backend behind an internal mTLS API; the per-pod egress sidecars DELEGATE
-// cache-miss resolution to it instead of each embedding the backend. This consolidates the
-// two operations that hit ceilings — grant-Secret reads and OAuth refresh — behind ONE
-// global singleflight, so a busy multi-user fleet does N-sidecar work as one refresh, and
-// the rotating-refresh-token race across pods (ADR 0029 §6 R3) disappears.
-//
-// The wire protocol is a tiny JSON request/response over mTLS. The Client implements
-// credresolve.CredentialResolver, so a sidecar swaps an embedded backend for a delegating
-// client with no other change.
 package credplane
+
+import (
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentmemory/recall"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/knowledge/retrieval"
+)
 
 // The internal API paths.
 const (
 	pathResolve = "/v1/resolve"
 	pathRevoke  = "/v1/revoke"
 	pathStore   = "/v1/store"
+	// Long-term memory (ADR 0045) and managed-RAG retrieval (ADR 0061 Fork 3). The token service is the ONLY
+	// holder of CONTROLPLANE_DSN + the pgvector stores — agent pods never get DB credentials; their launcher
+	// proxies here with the agent's own projected token, and the namespace and agent come from that token
+	// (ADR 0154). The ingestion WRITE path is the run-worker holding the knowledge store directly (m68.6).
+	pathMemoryRemember  = "/v1/memory/remember"
+	pathMemorySearch    = "/v1/memory/search"
+	pathKnowledgeSearch = "/v1/knowledge/search"
 )
 
 // resolveRequest asks the central service to resolve the OBO credential for one
-// (namespace, server, userHash). userHash is the ALREADY-HASHED invoking user (from the
-// sidecar's verified run capability) — the raw username never crosses this API.
+// (namespace, server, userHash). userHash is the ALREADY-HASHED invoking user — the raw
+// username never crosses this API. The service resolves for the forwarded capability's user
+// and boundary in the caller's namespace and refuses a request whose fields disagree.
 type resolveRequest struct {
 	Namespace string `json:"namespace"`
 	// Boundary is the trust boundary the personal grant is scoped to (ADR 0033); "" =
@@ -47,8 +49,8 @@ type resolveRequest struct {
 }
 
 // resolveResponse returns the resolved credential OR a structured error code. The token
-// Value crosses the mTLS link server-to-server (sidecar ← central) and is injected by the
-// sidecar — it never reaches the agent container.
+// Value crosses server-to-server (sidecar ← central) and is injected by the sidecar — it
+// never reaches the agent container.
 type resolveResponse struct {
 	Kind  string `json:"kind,omitempty"`
 	Value string `json:"value,omitempty"`
@@ -73,7 +75,7 @@ type revokeResponse struct {
 // storeRequest asks the central service to PERSIST a user's grant to the config-selected
 // backend (the SPI write path, ADR 0032) — the BFF OAuth callback delegates here so DB /
 // remote-vault creds stay in the token-service, not the user-facing BFF. Token fields are
-// secret and cross only the mTLS link.
+// secret; only a platform caller may send them.
 type storeRequest struct {
 	Namespace          string `json:"namespace"`
 	Boundary           string `json:"boundary,omitempty"`
@@ -92,6 +94,25 @@ type storeRequest struct {
 // else "internal").
 type storeResponse struct {
 	Error string `json:"error,omitempty"`
+}
+
+// memoryRememberResponse reports a remember outcome ("" ok, "invalid", "unsupported" or "internal"). The
+// request is recall.RememberRequest.
+type memoryRememberResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
+// memorySearchResponse carries the nearest memories, or an error code. The request is recall.SearchRequest.
+type memorySearchResponse struct {
+	Results []recall.Hit `json:"results"`
+	Error   string       `json:"error,omitempty"`
+}
+
+// knowledgeSearchResponse carries the retrieved chunks, or an error code. The request is
+// retrieval.SearchRequest.
+type knowledgeSearchResponse struct {
+	Results []retrieval.Hit `json:"results"`
+	Error   string          `json:"error,omitempty"`
 }
 
 // Stable error codes on the wire (never a raw error string — that could leak internals).

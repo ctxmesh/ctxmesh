@@ -49,7 +49,7 @@ function recordingFetch(opts: {
         return j({ namespace: "", allowed: opts.caps ?? { agentdeployments: { create: true } } });
       if (url.split("?")[0] === "/api/providers" && method === "GET")
         return j({ providers: opts.providers ?? [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "anthropic", ready: true }] });
-      if (url === "/api/tools")
+      if (url.split("?")[0] === "/api/tools")
         return j({ tools: opts.tools ?? [] });
       if (url === "/api/agents/generate" && method === "POST") {
         const r = opts.generate
@@ -331,7 +331,8 @@ describe("CreateAgentPage — the shared review, tool picker + Create", () => {
 
   it("the tool picker loads GET /api/tools with curated + user-added + schema/pending badges", async () => {
     const calls = await reachReviewViaGenerate();
-    expect(calls.find((c) => c.url === "/api/tools")).toBeDefined();
+    // The picker reads the catalog of the namespace the agent is created in.
+    expect(calls.find((c) => c.url === "/api/tools?namespace=default")).toBeDefined();
     // Both tools render; the pending one carries the honest badge; a schema tool
     // shows the schema badge.
     const list = await screen.findByTestId("tool-picker-list");
@@ -489,7 +490,7 @@ describe("CreateAgentPage — refine chat + draft lifecycle (m71.4/m71.5)", () =
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
-        if (url === "/api/tools")
+        if (url.split("?")[0] === "/api/tools")
           return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")
           return j({ agentYAML: "name: test-agent\nruntime: managed\n", expanded: "kind: AgentDeployment\n", model: "claude-sonnet-4" });
@@ -696,7 +697,7 @@ describe("CreateAgentPage — m72.1 smart defaults", () => {
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [providerEntry], items: [providerEntry] });
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url.startsWith("/api/modelroutes")) return j({ items: [] });
         if (url.startsWith("/api/promptversions")) return j({ items: [] });
         if (url === "/api/agents/check-requirements" && method === "POST")
@@ -790,7 +791,7 @@ describe("CreateAgentPage — m72.3 check-requirements checklist (advisory)", ()
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4-6"], secretName: "s", ready: true }] });
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")
           return j({ agentYAML: "name: test-agent\nruntime: managed\nmodel:\n  route: anthropic\ntools:\n  - get_order\n", expanded: "", model: "claude-sonnet-4-6" });
         if (url === "/api/agents/check-requirements" && method === "POST")
@@ -881,7 +882,7 @@ describe("CreateAgentPage — m72.5 recipe gallery", () => {
           { name: "order-bot", title: "Order Bot", description: "Handles order queries.", icon: "🛒", spec: recipeSpec },
           { name: "summarizer", title: "Summarizer", description: "Condenses long docs.", icon: "📝", spec: "name: summarizer\nruntime: managed\n" },
         ]});
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/check-requirements" && method === "POST")
           return j({ model: { required: false, connected: true }, tools: [] });
         if (url === "/api/expand" && method === "POST")
@@ -956,7 +957,7 @@ describe("CreateAgentPage — m74 P1-2: ?recipe=<name> pre-fills the create flow
           return j({ recipes: [
             { name: "order-bot", title: "Order Bot", description: "Handles orders.", icon: "🛒", spec: recipeSpec },
           ]});
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/check-requirements" && method === "POST")
           return j({ model: { required: false, connected: true }, tools: [] });
         if (url === "/api/expand" && method === "POST")
@@ -1047,7 +1048,7 @@ describe("CreateAgentPage — a requirement that wasn't checked is not a satisfi
           return j({ namespace: "", allowed: { agentdeployments: { create: true } } });
         if (url.split("?")[0] === "/api/providers" && method === "GET")
           return j({ providers: [{ name: "anthropic", namespace: "default", provider: "anthropic", displayName: "Anthropic", models: ["claude-sonnet-4"], secretName: "s", ready: true }] });
-        if (url === "/api/tools") return j({ tools: [] });
+        if (url.split("?")[0] === "/api/tools") return j({ tools: [] });
         if (url === "/api/agents/generate" && method === "POST")
           return j({ agentYAML: "name: req-agent\nruntime: managed\ntools:\n  - get_order\n", expanded: "kind: AgentDeployment\n", model: "m" });
         if (url === "/api/agents/check-requirements" && method === "POST") {
@@ -1143,5 +1144,186 @@ describe("CreateAgentPage — the wizard's discard guard is armed", () => {
 
     expect(await screen.findByTestId("create-entrance")).toBeInTheDocument();
     expect(screen.queryByText("Discard your changes?")).toBeNull();
+  });
+});
+
+// The config builder became the agent.yaml entrance (m184.43): every thing it did is
+// reachable here — author any field, preview the server-side expansion, apply into a
+// workspace, see what was created — and the form fields it had that Configure lacked
+// are now in Configure's Optional step.
+describe("CreateAgentPage — the agent.yaml entrance", () => {
+  function renderAt(path: string) {
+    return render(
+      <MemoryRouter initialEntries={[path]}>
+        <ToastProvider>
+          <NamespaceProvider>
+            <CapabilitiesProvider>
+              <CreateAgentPage />
+            </CapabilitiesProvider>
+          </NamespaceProvider>
+        </ToastProvider>
+      </MemoryRouter>,
+    );
+  }
+
+  const YAML = "name: yaml-agent\nimage: ghcr.io/acme/agent:v1\nscaling:\n  min: 2\n  max: 5\n";
+
+  async function writeAndReview(yaml: string) {
+    const input = await screen.findByTestId("agent-yaml-input");
+    fireEvent.change(input, { target: { value: yaml } });
+    fireEvent.click(screen.getByTestId("yaml-review"));
+  }
+
+  it("opens directly from ?mode=yaml, which /config redirects to", async () => {
+    recordingFetch({});
+    renderAt("/agents/new?mode=yaml");
+    expect(await screen.findByTestId("yaml-flow")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-yaml-input")).toHaveValue(
+      "name: my-agent\nruntime: managed\nsystemPrompt: |\n  You are a helpful assistant.\n",
+    );
+  });
+
+  it("is a way in from the entrance", async () => {
+    recordingFetch({});
+    renderPage();
+    fireEvent.click(await screen.findByTestId("entrance-yaml"));
+    expect(await screen.findByTestId("yaml-flow")).toBeInTheDocument();
+  });
+
+  it("needs no connected provider, and the provider gate offers it", async () => {
+    recordingFetch({ providers: [] });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Write the agent.yaml instead" }));
+    expect(await screen.findByTestId("yaml-flow")).toBeInTheDocument();
+  });
+
+  it("previews the server-side expansion of exactly the file written, then applies it", async () => {
+    const calls = recordingFetch({
+      expand: () => ({ ok: true, text: "kind: AgentDeployment\nmetadata:\n  name: yaml-agent\n" }),
+      create: () => ({
+        ok: true,
+        json: {
+          created: [
+            { kind: "AgentDeployment", name: "yaml-agent", namespace: "default" },
+            { kind: "AgentScalingPolicy", name: "yaml-agent", namespace: "default" },
+          ],
+        },
+      }),
+    });
+    renderAt("/agents/new?mode=yaml");
+    await writeAndReview(YAML);
+    expect(await screen.findByTestId("shared-review")).toBeInTheDocument();
+    expect(screen.getByTestId("friendly-summary")).toHaveTextContent(/yaml-agent/);
+
+    fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
+    expect(await screen.findByTestId("advanced-yaml")).toHaveTextContent("name: yaml-agent");
+    const expand = calls.find((c) => c.url === "/api/expand");
+    expect(expand?.body).toBe(YAML);
+
+    fireEvent.click(screen.getByTestId("create-button"));
+    expect(await screen.findByTestId("create-success")).toBeInTheDocument();
+    expect(screen.getByText("AgentScalingPolicy")).toBeInTheDocument();
+    const create = calls.find((c) => c.url === "/api/agents" && c.method === "POST");
+    expect(JSON.parse(create!.body)).toMatchObject({ agentYAML: YAML, namespace: "default" });
+  });
+
+  it("returns from the review to the file as it was written", async () => {
+    recordingFetch({});
+    renderAt("/agents/new?mode=yaml");
+    await writeAndReview(YAML);
+    await screen.findByTestId("shared-review");
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByTestId("agent-yaml-input")).toHaveValue(YAML);
+  });
+
+  it("asks for a name before the review, and sends nothing", async () => {
+    const calls = recordingFetch({});
+    renderAt("/agents/new?mode=yaml");
+    await writeAndReview("image: ghcr.io/acme/agent:v1\n");
+    expect(await screen.findByText("The file needs a top-level name: line.")).toBeInTheDocument();
+    expect(screen.queryByTestId("shared-review")).toBeNull();
+    expect(calls.some((c) => c.url === "/api/expand" || c.url === "/api/agents")).toBe(false);
+  });
+
+  it("lets a caller who cannot create preview, and offers them no Create", async () => {
+    const calls = recordingFetch({ caps: { agentdeployments: { create: false } } });
+    renderAt("/agents/new?mode=yaml");
+    await writeAndReview(YAML);
+    expect(await screen.findByTestId("create-readonly-note")).toBeInTheDocument();
+    expect(screen.queryByTestId("create-button")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Preview CRD/ }));
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/expand")).toBe(true));
+  });
+});
+
+describe("CreateAgentPage — Configure carries every config-builder field", () => {
+  async function toOptional() {
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "cfg-agent" } });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByLabelText("System prompt");
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByLabelText("CPU request");
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    await screen.findByText("Cost budget");
+  }
+
+  it("sets the budget's soft threshold, the eval gate's mode and its scorers", async () => {
+    recordingFetch({});
+    renderPage();
+    await pickConfigure();
+    await toOptional();
+
+    fireEvent.click(screen.getByLabelText("Cost budget"));
+    fireEvent.change(screen.getByLabelText("Per agent (USD)"), { target: { value: "10.00" } });
+    fireEvent.change(screen.getByLabelText("Soft alert threshold (%)"), { target: { value: "70" } });
+    fireEvent.click(screen.getByLabelText("Eval gate"));
+    fireEvent.change(screen.getByLabelText("Suite name"), { target: { value: "quality" } });
+    fireEvent.change(screen.getByLabelText("Dataset ref"), { target: { value: "golden" } });
+    fireEvent.change(screen.getByLabelText("Threshold"), { target: { value: "0.8" } });
+    fireEvent.change(screen.getByLabelText("Gate"), { target: { value: "warn" } });
+    fireEvent.change(screen.getByLabelText("Name", { selector: "#cfg-scorer-0-name" }), { target: { value: "exact" } });
+    fireEvent.click(screen.getByRole("button", { name: /Add scorer/ }));
+    fireEvent.change(screen.getByLabelText("Name", { selector: "#cfg-scorer-1-name" }), { target: { value: "judge" } });
+    fireEvent.change(screen.getByLabelText("Type", { selector: "#cfg-scorer-1-type" }), { target: { value: "llm" } });
+    fireEvent.change(screen.getByLabelText("Weight", { selector: "#cfg-scorer-1-weight" }), { target: { value: "2" } });
+
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Review \+ tools/ }));
+    await screen.findByTestId("shared-review");
+    fireEvent.click(screen.getByTestId("advanced-toggle"));
+    const yaml = (await screen.findByTestId("advanced-yaml")).textContent ?? "";
+    expect(yaml).toMatch(/softThresholdPct: 70/);
+    expect(yaml).toMatch(/gate: warn/);
+    expect(yaml).toMatch(/name: exact/);
+    expect(yaml).toMatch(/name: judge/);
+    expect(yaml).toMatch(/type: llm/);
+    expect(yaml).toMatch(/weight: 2/);
+  });
+
+  it("shows a scorer's error on the step that holds it", async () => {
+    recordingFetch({});
+    renderPage();
+    await pickConfigure();
+    await toOptional();
+    fireEvent.click(screen.getByLabelText("Eval gate"));
+    fireEvent.change(screen.getByLabelText("Suite name"), { target: { value: "quality" } });
+    fireEvent.change(screen.getByLabelText("Dataset ref"), { target: { value: "golden" } });
+    fireEvent.change(screen.getByLabelText("Threshold"), { target: { value: "0.8" } });
+    fireEvent.click(screen.getByRole("button", { name: /Continue/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Review \+ tools/ }));
+    expect(await screen.findByText("Scorer name is required.")).toBeInTheDocument();
+    expect(screen.queryByTestId("shared-review")).toBeNull();
+  });
+
+  it("removes a scorer, but never the last one", async () => {
+    recordingFetch({});
+    renderPage();
+    await pickConfigure();
+    await toOptional();
+    fireEvent.click(screen.getByLabelText("Eval gate"));
+    expect(screen.getByRole("button", { name: "Remove scorer 1" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: /Add scorer/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove scorer 2" }));
+    expect(screen.queryByRole("button", { name: "Remove scorer 2" })).toBeNull();
   });
 });

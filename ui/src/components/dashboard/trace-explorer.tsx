@@ -83,10 +83,12 @@ import { cn } from "@/lib/utils";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/** Tool spans are SPAN-typed but carry a name that starts with "tool:" or
- *  "tool_". Classify defensively — false negatives are fine (still a SPAN). */
+/** A tool call arrives from Langfuse typed TOOL. Traces recorded before that
+ *  carry it as a SPAN whose name starts with "tool:" / "tool_" / "tool " —
+ *  classified defensively, so a false negative is still shown as a SPAN. */
 function isToolSpan(span: SpanSummary, isRoot: boolean): boolean {
   if (isRoot) return false;
+  if (span.type === "TOOL") return true;
   if (span.type !== "SPAN") return false;
   const n = span.name.toLowerCase();
   return n.startsWith("tool:") || n.startsWith("tool_") || n.startsWith("tool ");

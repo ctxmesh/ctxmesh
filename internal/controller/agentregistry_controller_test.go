@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,7 +38,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
+	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
 )
 
 // newRegistryReconciler builds an AgentRegistryReconciler on the envtest client.
@@ -63,11 +68,11 @@ func reconcileRegistry(t *testing.T, r *AgentRegistryReconciler, name, namespace
 
 // mkRegistryMesh creates an AgentRegistry with the given registryId and a
 // memberSelector matching {registry: <selectorVal>}.
-func mkRegistryMesh(t *testing.T, name, namespace, registryID, selectorVal string) *agentsv1alpha1.AgentRegistry {
+func mkRegistryMesh(t *testing.T, name, namespace, registryID, selectorVal string) *agentsv1beta1.AgentRegistry {
 	t.Helper()
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId: registryID,
 			MemberSelector: metav1.LabelSelector{
 				MatchLabels: map[string]string{"registry": selectorVal},
@@ -82,11 +87,11 @@ func mkRegistryMesh(t *testing.T, name, namespace, registryID, selectorVal strin
 
 // mkLabeledAgent creates an AgentDeployment carrying the given labels (used to
 // join a registry via its memberSelector).
-func mkLabeledAgent(t *testing.T, name, namespace string, lbls map[string]string) *agentsv1alpha1.AgentDeployment {
+func mkLabeledAgent(t *testing.T, name, namespace string, lbls map[string]string) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	a := &agentsv1alpha1.AgentDeployment{
+	a := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: lbls},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -94,6 +99,16 @@ func mkLabeledAgent(t *testing.T, name, namespace string, lbls map[string]string
 	}
 	require.NoError(t, k8sClient.Create(testCtx, a))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, a) })
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(a), a))
+	return a
+}
+
+// mkMemberAgent creates a labelled agent and reconciles it once, which records the registry it
+// belongs to in status.registryRef: the membership every other controller reads.
+func mkMemberAgent(t *testing.T, name, namespace string, lbls map[string]string) *agentsv1beta1.AgentDeployment {
+	t.Helper()
+	a := mkLabeledAgent(t, name, namespace, lbls)
+	reconcileNN(t, newReconciler(), name, namespace)
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(a), a))
 	return a
 }
@@ -125,6 +140,9 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 	mkLabeledAgent(t, "np-agent-outsider", namespace, map[string]string{"registry": "other"})
 
 	reg := mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	for _, agent := range []string{"np-agent-bravo", "np-agent-alpha", "np-agent-outsider"} {
+		reconcileNN(t, newReconciler(), agent, namespace)
+	}
 
 	r := newRegistryReconciler()
 	reconcileRegistry(t, r, regName, namespace)
@@ -231,8 +249,8 @@ func TestRegistry_TwoMembers_NetworkPolicyAndStatus(t *testing.T) {
 		"Langfuse egress must allow the langfuse-web :3000 port")
 
 	// Platform backends: model gateway / object store / state-layer PROXY / token-service
-	// all live in ctxmesh.
-	assert.True(t, egressNS[agentEngineSystemNamespace],
+	// all live in the platform namespace, the default for a reconciler built without one.
+	assert.True(t, egressNS[DefaultPlatformNamespace],
 		"egress must allow the platform backends (gateway/object-store/proxy)")
 	assert.True(t, egressTCPPorts[modelGatewayPort], "egress must allow the model gateway :4000")
 	// M97 (audit P1-A): raw Valkey :6379 MUST NOT be in the registry-member egress — mirrors the M94 tenant-NP
@@ -278,13 +296,13 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -296,11 +314,35 @@ func TestRegistry_MemberEnvInjected(t *testing.T) {
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
 
-	reconcileNN(t, newReconciler(), agentName, namespace)
+	r := newReconciler()
+	r.OBOEgress.CapabilityPublicKeyB64 = "dGVzdC1jYXBhYmlsaXR5LXB1YmxpYy1rZXktMzJieXQ="
+	reconcileNN(t, r, agentName, namespace)
 
 	ksvc := getKsvc(t, agentName, namespace)
 	userContainer := ksvc.Spec.Template.Spec.Containers[0]
 	envMap := envByName(userContainer.Env)
+
+	// ADR 0153: what attested AMP needs, as the API server stored it. The token is projected for the
+	// BFF's audience, and the posture defaults to require.
+	assert.Equal(t, bffPodTokenMountPath+"/token", envMap[envBFFPodTokenPath])
+	assert.Equal(t, r.OBOEgress.CapabilityPublicKeyB64, envMap[envMCPCapPublicKey])
+	assert.Equal(t, strconv.FormatBool(true), envMap[envAMPRequireAttestation])
+	var tokenVols int
+	for _, v := range ksvc.Spec.Template.Spec.Volumes {
+		if v.Name == bffPodTokenVolume {
+			tokenVols++
+			require.NotNil(t, v.Projected)
+			assert.Equal(t, runcap.BFFPodAudience, v.Projected.Sources[0].ServiceAccountToken.Audience)
+		}
+	}
+	assert.Equal(t, 1, tokenVols, "a member projects its BFF-audience token once")
+	var tokenMounts int
+	for _, m := range userContainer.VolumeMounts {
+		if m.Name == bffPodTokenVolume && m.MountPath == bffPodTokenMountPath && m.ReadOnly {
+			tokenMounts++
+		}
+	}
+	assert.Equal(t, 1, tokenMounts)
 
 	assert.Equal(t, registryID, envMap["AGENT_REGISTRY_ID"], "AGENT_REGISTRY_ID must be injected")
 	assert.Equal(t, "orchestrator", envMap["AGENT_ROLE"], "AGENT_ROLE from spec.role")
@@ -365,18 +407,18 @@ func TestRegistry_MemberWithMemory_AgentNameOnce(t *testing.T) {
 	// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired):
 	// the memory path injects AGENT_NAME (but not POD_NAMESPACE); the registry path
 	// must then dedupe AGENT_NAME and add POD_NAMESPACE.
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
-			SessionMemory:  &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
+			SessionMemory:  &agentsv1beta1.SessionMemorySpec{Scope: "session", Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -421,18 +463,18 @@ func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
 		proxyURL   = "http://ctxmesh-statelayer-proxy.ctxmesh.svc:8080"
 	)
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
-			SessionMemory:  &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
+			SessionMemory:  &agentsv1beta1.SessionMemorySpec{Scope: "session", Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.mem.svc:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -478,11 +520,11 @@ func TestRegistry_MemberWithMemory_ProxyTokenInjected(t *testing.T) {
 // so resolveMemory sees the agent as memory-enabled. addr "" ⇒ cluster-default backend.
 func setAgentSessionMemory(t *testing.T, namespace, agentName, scope, addr string) {
 	t.Helper()
-	var ad agentsv1alpha1.AgentDeployment
+	var ad agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKey{Namespace: namespace, Name: agentName}, &ad))
-	sm := &agentsv1alpha1.SessionMemorySpec{Scope: scope}
+	sm := &agentsv1beta1.SessionMemorySpec{Scope: scope}
 	if addr != "" {
-		sm.Backend = &agentsv1alpha1.MemoryBackend{Addr: addr}
+		sm.Backend = &agentsv1beta1.MemoryBackend{Addr: addr}
 	}
 	ad.Spec.SessionMemory = sm
 	require.NoError(t, k8sClient.Update(testCtx, &ad))
@@ -499,12 +541,12 @@ func TestMemory_SharedScopeInjectedForMember(t *testing.T) {
 	)
 	mkRegistryMesh(t, registryID, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: agentName, Namespace: namespace,
 			Labels: map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
 		},
 	}
@@ -527,9 +569,9 @@ func TestMemory_SharedScopeNotInjectedForNonMember(t *testing.T) {
 	const namespace = "default"
 	const agentName = "lonely-shared-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace}, // no registry label
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
 		},
 	}
@@ -550,13 +592,13 @@ func TestMemory_FoldedSessionMemoryField(t *testing.T) {
 	const namespace = "default"
 	const agentName = "folded-mem-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{
 				Scope:   "session",
-				Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
+				Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
 			},
 		},
 	}
@@ -581,16 +623,16 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 	const namespace = "default"
 	const proxyURL = "http://statelayer-proxy.ctxmesh.svc:8080"
 
-	mkAgent := func(name string, sm *agentsv1alpha1.SessionMemorySpec) *agentsv1alpha1.AgentDeployment {
-		return &agentsv1alpha1.AgentDeployment{
+	mkAgent := func(name string, sm *agentsv1beta1.SessionMemorySpec) *agentsv1beta1.AgentDeployment {
+		return &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-			Spec: agentsv1alpha1.AgentDeploymentSpec{
+			Spec: agentsv1beta1.AgentDeploymentSpec{
 				Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
 				SessionMemory: sm,
 			},
 		}
 	}
-	envFor := func(t *testing.T, agent *agentsv1alpha1.AgentDeployment, proxy string) map[string]string {
+	envFor := func(t *testing.T, agent *agentsv1beta1.AgentDeployment, proxy string) map[string]string {
 		t.Helper()
 		require.NoError(t, k8sClient.Create(testCtx, agent))
 		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
@@ -599,10 +641,10 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 		reconcileNN(t, r, agent.Name, namespace)
 		return envByName(getKsvc(t, agent.Name, namespace).Spec.Template.Spec.Containers[0].Env)
 	}
-	backend := &agentsv1alpha1.MemoryBackend{Addr: "valkey.svc:6379"}
+	backend := &agentsv1beta1.MemoryBackend{Addr: "valkey.svc:6379"}
 
 	t.Run("private+perUser+proxy injects MEMORY_PER_USER", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-on", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-on", &agentsv1beta1.SessionMemorySpec{
 			Scope: "session", PerUser: true, Backend: backend,
 		}), proxyURL)
 		assert.Equal(t, "true", env["MEMORY_PER_USER"],
@@ -611,14 +653,14 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 	})
 
 	t.Run("perUser off is inert", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-off", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-off", &agentsv1beta1.SessionMemorySpec{
 			Scope: "session", Backend: backend,
 		}), proxyURL)
 		assert.NotContains(t, env, "MEMORY_PER_USER", "default (perUser off) injects nothing")
 	})
 
 	t.Run("proxy-less install does not inject", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-noproxy", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-noproxy", &agentsv1beta1.SessionMemorySpec{
 			Scope: "session", PerUser: true, Backend: backend,
 		}), "")
 		assert.NotContains(t, env, "MEMORY_PER_USER",
@@ -626,7 +668,7 @@ func TestMemory_PerUserSessionInjectsEnv(t *testing.T) {
 	})
 
 	t.Run("shared scope never gets per-user", func(t *testing.T) {
-		env := envFor(t, mkAgent("peruser-shared", &agentsv1alpha1.SessionMemorySpec{
+		env := envFor(t, mkAgent("peruser-shared", &agentsv1beta1.SessionMemorySpec{
 			Scope: "shared", PerUser: true, Backend: backend,
 		}), proxyURL)
 		assert.NotContains(t, env, "MEMORY_PER_USER",
@@ -640,11 +682,11 @@ func TestMemory_LongTermFoldedField(t *testing.T) {
 	const namespace = "default"
 	const agentName = "longterm-mem-agent"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
-			LongTermMemory: &agentsv1alpha1.LongTermMemorySpec{
+			LongTermMemory: &agentsv1beta1.LongTermMemorySpec{
 				Enabled: true, PerUser: true, EmbeddingRoute: "embed-v1",
 			},
 		},
@@ -669,15 +711,15 @@ func TestMemory_FoldedSharedScopeForMember(t *testing.T) {
 	const agentName = "folded-shared-member"
 	mkRegistryMesh(t, registryID, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: agentName, Namespace: namespace, Labels: map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080, Role: "worker",
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{
 				Scope:   "shared",
-				Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
+				Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey.folded.svc:6379"},
 			},
 		},
 	}
@@ -738,13 +780,13 @@ func TestRegistry_MemberRemoved(t *testing.T) {
 	)
 
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
-	a1 := mkLabeledAgent(t, "churn-stay", namespace, map[string]string{"registry": registryID})
-	a2 := mkLabeledAgent(t, "churn-leave", namespace, map[string]string{"registry": registryID})
+	a1 := mkMemberAgent(t, "churn-stay", namespace, map[string]string{"registry": registryID})
+	a2 := mkMemberAgent(t, "churn-leave", namespace, map[string]string{"registry": registryID})
 
 	r := newRegistryReconciler()
 	reconcileRegistry(t, r, regName, namespace)
 
-	var reg agentsv1alpha1.AgentRegistry
+	var reg agentsv1beta1.AgentRegistry
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: regName, Namespace: namespace}, &reg))
 	assert.ElementsMatch(t, []string{"churn-stay", "churn-leave"}, reg.Status.Members,
 		"both agents are members initially")
@@ -754,6 +796,7 @@ func TestRegistry_MemberRemoved(t *testing.T) {
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(a2), a2))
 	a2.Labels = map[string]string{"registry": "gone"}
 	require.NoError(t, k8sClient.Update(testCtx, a2))
+	reconcileNN(t, newReconciler(), "churn-leave", namespace)
 
 	reconcileRegistry(t, r, regName, namespace)
 
@@ -769,6 +812,139 @@ func TestRegistry_MemberRemoved(t *testing.T) {
 		"a departed member must lose AGENT_REGISTRY_ID on re-render")
 }
 
+// TestRegistry_StatusRegistryRef: the agent's reconcile records the registry its revision was
+// built with in status.registryRef — the first by name when two registries select it — and clears
+// it when the agent leaves. The BFF reads an agent's registry from here.
+func TestRegistry_StatusRegistryRef(t *testing.T) {
+	const namespace = "default"
+	mkRegistryMesh(t, "ref-mesh-b", namespace, "ref-mesh-b", "ref-mesh")
+	mkRegistryMesh(t, "ref-mesh-a", namespace, "ref-mesh-a", "ref-mesh")
+	agent := mkLabeledAgent(t, "ref-mesh-member", namespace, map[string]string{"registry": "ref-mesh"})
+
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Equal(t, "ref-mesh-a", agent.Status.RegistryRef, "two registries select it: the first by name")
+	ksvc := getKsvc(t, agent.Name, namespace)
+	assert.Equal(t, "ref-mesh-a", envByName(ksvc.Spec.Template.Spec.Containers[0].Env)["AGENT_REGISTRY_ID"],
+		"status names the registry the revision was built with")
+
+	agent.Labels = map[string]string{"registry": "elsewhere"}
+	require.NoError(t, k8sClient.Update(testCtx, agent))
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Empty(t, agent.Status.RegistryRef, "an agent that left every registry records none")
+}
+
+// TestRegistry_SameIDInTwoNamespacesIsTwoBoundaries: a registryId is chosen by the registry's
+// author, so a registry in another namespace can copy it. Each member's egress sidecar serves its
+// own namespace's boundary, so a capability minted for one registry's run is refused by the other's.
+func TestRegistry_SameIDInTwoNamespacesIsTwoBoundaries(t *testing.T) {
+	const registryID = "copied-id"
+	boundaries := map[string]string{}
+	for _, ns := range []string{"boundary-ns-a", "boundary-ns-b"} {
+		if err := k8sClient.Create(testCtx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}}); err != nil &&
+			!apierrors.IsAlreadyExists(err) {
+			require.NoError(t, err)
+		}
+		mkRegistryMesh(t, "squad", ns, registryID, "squad")
+		agent := mkLabeledAgent(t, "squad-worker", ns, map[string]string{"registry": "squad"})
+		mkRegistry(t, "tools", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: "http://wc.svc/mcp"})
+		binding := mkBinding(t, "squad-worker-wc", ns, agentsv1beta1.MCPToolBindingSpec{
+			AgentRef: agent.Name, RegistryRef: "tools", ToolName: "word-count",
+			Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: "http://wc.svc/mcp"},
+		})
+		reconcileNN(t, newReconciler(), agent.Name, ns)
+		reconcileBinding(t, newBindingReconciler(), binding.Name, ns)
+
+		sidecar, ok := containerByName(getKsvc(t, agent.Name, ns).Spec.Template.Spec.Containers, egressSidecarContainerName)
+		require.True(t, ok, "a tool-bound member runs the egress sidecar")
+		b, ok := envValue(sidecar, "EGRESS_BOUNDARY")
+		require.True(t, ok)
+		assert.Equal(t, credresolve.RegistryBoundary(ns, registryID), b.Value,
+			"the sidecar serves the boundary the BFF mints and the token service resolves with")
+		boundaries[ns] = b.Value
+	}
+	assert.NotEqual(t, boundaries["boundary-ns-a"], boundaries["boundary-ns-b"],
+		"two registries with one id in two namespaces are two boundaries")
+}
+
+// TestRegistry_DuplicateIDInOneNamespaceIsRefused: the id is what pods, NetworkPolicies, the shared
+// scratchpad and credential boundaries are keyed by, so a second registry declaring an id its
+// namespace already holds is refused and gives no agent membership. Deleting the holder hands the
+// id to it.
+func TestRegistry_DuplicateIDInOneNamespaceIsRefused(t *testing.T) {
+	const namespace = "default"
+	holder := mkRegistryMesh(t, "dup-id-a", namespace, "dup-id", "dup-id-a")
+	mkRegistryMesh(t, "dup-id-b", namespace, "dup-id", "dup-id-b")
+	agent := mkLabeledAgent(t, "dup-id-worker", namespace, map[string]string{"registry": "dup-id-b"})
+
+	reconcileRegistry(t, newRegistryReconciler(), "dup-id-b", namespace)
+	var refused agentsv1beta1.AgentRegistry
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "dup-id-b", Namespace: namespace}, &refused))
+	ready := apimeta.FindStatusCondition(refused.Status.Conditions, conditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, reasonDuplicateRegistryID, ready.Reason)
+	assert.Contains(t, ready.Message, "dup-id-a", "the condition names the registry that holds the id")
+	assert.Empty(t, refused.Status.Members)
+
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Empty(t, agent.Status.RegistryRef, "a refused registry gives its selected agents no membership")
+	assert.NotContains(t, envByName(getKsvc(t, agent.Name, namespace).Spec.Template.Spec.Containers[0].Env),
+		"AGENT_REGISTRY_ID")
+
+	require.NoError(t, k8sClient.Delete(testCtx, holder))
+	reconcileRegistry(t, newRegistryReconciler(), "dup-id-b", namespace)
+	reconcileNN(t, newReconciler(), agent.Name, namespace)
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "dup-id-b", Namespace: namespace}, &refused))
+	ready = apimeta.FindStatusCondition(refused.Status.Conditions, conditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionTrue, ready.Status, "with the holder gone the id is this registry's")
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
+	assert.Equal(t, "dup-id-b", agent.Status.RegistryRef)
+}
+
+// TestMembership_AgentSelectedByTwoRegistriesBelongsToOne: an agent that two registries select joins
+// one, recorded in status.registryRef, and every controller agrees: the registry's members, a team's
+// roster check and a workflow's step check all read that record rather than the selectors.
+func TestMembership_AgentSelectedByTwoRegistriesBelongsToOne(t *testing.T) {
+	const ns = "default"
+	mkRegistryMesh(t, "both-b", ns, "both-b", "both")
+	mkRegistryMesh(t, "both-a", ns, "both-a", "both")
+	agent := mkMemberAgent(t, "both-worker", ns, map[string]string{"registry": "both"})
+	require.Equal(t, "both-a", agent.Status.RegistryRef, "the first registry by name")
+
+	for _, name := range []string{"both-a", "both-b"} {
+		reconcileRegistry(t, newRegistryReconciler(), name, ns)
+	}
+	var regA, regB agentsv1beta1.AgentRegistry
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "both-a", Namespace: ns}, &regA))
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: "both-b", Namespace: ns}, &regB))
+	assert.Equal(t, []string{"both-worker"}, regA.Status.Members)
+	assert.Empty(t, regB.Status.Members, "the other registry's selector matches, but the agent is not its member")
+
+	mkAgentTeam(t, "both-team-a", ns, "both-a", "both-worker", map[string]string{"w": "both-worker"})
+	mkAgentTeam(t, "both-team-b", ns, "both-b", "both-worker", map[string]string{"w": "both-worker"})
+	reconcileTeam(t, newTeamReconciler(), "both-team-a", ns)
+	reconcileTeam(t, newTeamReconciler(), "both-team-b", ns)
+	assert.Equal(t, metav1.ConditionTrue, teamReadyCond(t, "both-team-a", ns).Status)
+	teamB := teamReadyCond(t, "both-team-b", ns)
+	assert.Equal(t, metav1.ConditionFalse, teamB.Status)
+	assert.Equal(t, reasonNotRegistryMember, teamB.Reason)
+	assert.Contains(t, teamB.Message, `a member of registry "both-a", not "both-b"`)
+
+	steps := []agentsv1beta1.WorkflowStep{{Name: "a", AgentRef: "both-worker"}}
+	mkWorkflow(t, "both-wf-a", ns, "both-a", steps)
+	mkWorkflow(t, "both-wf-b", ns, "both-b", steps)
+	reconcileWorkflow(t, newWorkflowReconciler(), "both-wf-a", ns)
+	reconcileWorkflow(t, newWorkflowReconciler(), "both-wf-b", ns)
+	assert.Equal(t, metav1.ConditionTrue, wfValidatedCond(t, "both-wf-a", ns).Status)
+	wfB := wfValidatedCond(t, "both-wf-b", ns)
+	assert.Equal(t, metav1.ConditionFalse, wfB.Status)
+	assert.Equal(t, reasonWorkflowNotMember, wfB.Reason)
+}
+
 // TestRegistry_EmptySelectorNoMembers verifies an empty memberSelector selects
 // NO members (a footgun guard: an all-selecting registry would isolate every
 // agent in the namespace).
@@ -779,9 +955,9 @@ func TestRegistry_EmptySelectorNoMembers(t *testing.T) {
 		registryID = "empty-sel-mesh"
 	)
 
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: regName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryID,
 			MemberSelector: metav1.LabelSelector{}, // empty
 		},
@@ -812,12 +988,12 @@ func TestRegistry_CustomGuardsInjected(t *testing.T) {
 		agentName  = "guarded-member"
 	)
 
-	reg := &agentsv1alpha1.AgentRegistry{
+	reg := &agentsv1beta1.AgentRegistry{
 		ObjectMeta: metav1.ObjectMeta{Name: regName, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentRegistrySpec{
+		Spec: agentsv1beta1.AgentRegistrySpec{
 			RegistryId:     registryID,
 			MemberSelector: metav1.LabelSelector{MatchLabels: map[string]string{"registry": registryID}},
-			Guards:         &agentsv1alpha1.RegistryGuards{MaxDepth: 3, HopBudget: 5},
+			Guards:         &agentsv1beta1.RegistryGuards{MaxDepth: 3, HopBudget: 5},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, reg))
@@ -832,9 +1008,11 @@ func TestRegistry_CustomGuardsInjected(t *testing.T) {
 	assert.Equal(t, "5", envMap["A2A_HOP_BUDGET"], "custom hopBudget must be injected")
 }
 
-// TestRegistry_UserRoleEnvWins verifies a user-set AGENT_ROLE in spec.env is not
-// overwritten by spec.role (user-override-wins, like AGENT_NAME).
-func TestRegistry_UserRoleEnvWins(t *testing.T) {
+// TestRegistry_RoleInSpecEnvIsThePlatforms: AGENT_ROLE is identity (ADR 0153). A callee admits an AMP
+// call only when the envelope's role equals the one the platform attests from spec.role, so a value in
+// spec.env is not used and the attempt is reported. (It used to win; an agent claiming a role its spec
+// does not hold would now fail every hop, and could otherwise claim a role it was not given.)
+func TestRegistry_RoleInSpecEnvIsThePlatforms(t *testing.T) {
 	const (
 		namespace  = "default"
 		regName    = "roleoverride-mesh"
@@ -844,18 +1022,21 @@ func TestRegistry_UserRoleEnvWins(t *testing.T) {
 
 	mkRegistryMesh(t, regName, namespace, registryID, registryID)
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      agentName,
 			Namespace: namespace,
 			Labels:    map[string]string{"registry": registryID},
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
 			Role:           "worker",
-			Env:            []corev1.EnvVar{{Name: "AGENT_ROLE", Value: "reviewer"}},
+			Env: []corev1.EnvVar{
+				{Name: "AGENT_ROLE", Value: "reviewer"},
+				{Name: "AGENT_REGISTRY_ID", Value: "someone-elses-registry"},
+			},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, agent))
@@ -865,15 +1046,17 @@ func TestRegistry_UserRoleEnvWins(t *testing.T) {
 	reconcileNN(t, newReconciler(), agentName, namespace)
 	ksvc := getKsvc(t, agentName, namespace)
 
-	// Exactly one AGENT_ROLE entry, holding the user's value.
-	var roleEntries []corev1.EnvVar
-	for _, e := range ksvc.Spec.Template.Spec.Containers[0].Env {
-		if e.Name == "AGENT_ROLE" {
-			roleEntries = append(roleEntries, e)
-		}
-	}
-	require.Len(t, roleEntries, 1, "controller must not inject a duplicate AGENT_ROLE")
-	assert.Equal(t, "reviewer", roleEntries[0].Value, "user-set AGENT_ROLE must win")
+	env := ksvc.Spec.Template.Spec.Containers[0].Env
+	require.Equal(t, 1, countEnv(env, "AGENT_ROLE"), "controller must not inject a duplicate AGENT_ROLE")
+	require.Equal(t, 1, countEnv(env, "AGENT_REGISTRY_ID"))
+	assert.Equal(t, "worker", envByName(env)["AGENT_ROLE"], "spec.role, never spec.env")
+	assert.Equal(t, registryID, envByName(env)["AGENT_REGISTRY_ID"], "the resolved registry, never spec.env")
+
+	var stored agentsv1beta1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), &stored))
+	cond := apimeta.FindStatusCondition(stored.Status.Conditions, conditionPlatformEnvIgnored)
+	require.NotNil(t, cond)
+	assert.Contains(t, cond.Message, "AGENT_REGISTRY_ID, AGENT_ROLE")
 }
 
 // TestRegistry_NetworkPolicyIdempotent verifies re-reconciling a registry does
@@ -1043,4 +1226,101 @@ func namespaceSelectorValues(peers []networkingv1.NetworkPolicyPeer) []string {
 		}
 	}
 	return out
+}
+
+// getAsyncDeliveryPolicy fetches the registry's async delivery NetworkPolicy, or nil when there is none.
+func getAsyncDeliveryPolicy(t *testing.T, registryName, namespace string) *networkingv1.NetworkPolicy {
+	t.Helper()
+	var np networkingv1.NetworkPolicy
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: registryName + asyncDeliveryPolicySuffix, Namespace: namespace}, &np)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	require.NoError(t, err)
+	return &np
+}
+
+// TestRegistry_AsyncDeliveryPolicy_AdmitsTheDispatcherOnJetStream verifies that,
+// on the JetStream backend, the BFF's dispatcher may reach the registry's
+// eventing members on the ports their agents listen on, and nothing more: the
+// peer is the BFF's pods in the platform namespace (both selectors in one peer),
+// the target is eventing members only, and the rule is the policy's only one.
+// Without JetStream there is no such policy, and one left over is deleted.
+func TestRegistry_AsyncDeliveryPolicy_AdmitsTheDispatcherOnJetStream(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "delivery-mesh"
+		registryID = "delivery-mesh"
+	)
+	member := map[string]string{"registry": registryID}
+	mkLabeledAgent(t, "delivery-serving", namespace, member)
+	eventing := mkLabeledAgent(t, "delivery-eventing", namespace, member)
+	eventing.Spec.ExecutionModel, eventing.Spec.Port = "eventing", 9090
+	require.NoError(t, k8sClient.Update(testCtx, eventing))
+	other := mkLabeledAgent(t, "delivery-eventing-b", namespace, member)
+	other.Spec.ExecutionModel = "eventing"
+	require.NoError(t, k8sClient.Update(testCtx, other))
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	for _, agent := range []string{"delivery-serving", "delivery-eventing", "delivery-eventing-b"} {
+		reconcileNN(t, newReconciler(), agent, namespace)
+	}
+
+	r := newRegistryReconciler()
+	r.PlatformNamespace = "ctxmesh-system"
+	reconcileRegistry(t, r, regName, namespace)
+	assert.Nil(t, getAsyncDeliveryPolicy(t, regName, namespace), "no JetStream backend: no delivery policy")
+
+	r.AsyncBackend = AsyncBackend{Kind: asyncBackendJetStream, NATSURL: "nats://nats.broker.svc:4222"}
+	reconcileRegistry(t, r, regName, namespace)
+	np := getAsyncDeliveryPolicy(t, regName, namespace)
+	require.NotNil(t, np, "JetStream: the dispatcher must be admitted")
+
+	require.Len(t, np.OwnerReferences, 1)
+	assert.Equal(t, regName, np.OwnerReferences[0].Name)
+	assert.Equal(t, map[string]string{registryIDLabel: registryID}, np.Spec.PodSelector.MatchLabels)
+	assert.Equal(t, []metav1.LabelSelectorRequirement{
+		{Key: eventingWorkloadLabel, Operator: metav1.LabelSelectorOpExists},
+	}, np.Spec.PodSelector.MatchExpressions, "only the registry's eventing members' pods")
+	assert.Equal(t, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, np.Spec.PolicyTypes)
+	assert.Empty(t, np.Spec.Egress)
+
+	require.Len(t, np.Spec.Ingress, 1, "one rule")
+	rule := np.Spec.Ingress[0]
+	require.Len(t, rule.From, 1, "one peer")
+	peer := rule.From[0]
+	require.NotNil(t, peer.NamespaceSelector, "never any pod in any namespace")
+	require.NotNil(t, peer.PodSelector, "never every pod of the platform namespace")
+	assert.Equal(t, map[string]string{namespaceNameLabel: "ctxmesh-system"}, peer.NamespaceSelector.MatchLabels,
+		"the namespace the platform is installed into")
+	assert.Equal(t, map[string]string{"control-plane": "bff"}, peer.PodSelector.MatchLabels, "the BFF's pods")
+	ports := make([]int32, 0, len(rule.Ports))
+	for _, p := range rule.Ports {
+		require.NotNil(t, p.Protocol)
+		assert.Equal(t, corev1.ProtocolTCP, *p.Protocol)
+		ports = append(ports, p.Port.IntVal)
+	}
+	assert.Equal(t, []int32{8080, 9090}, ports, "the ports the eventing agents listen on, and no other")
+
+	r.AsyncBackend = AsyncBackend{}
+	reconcileRegistry(t, r, regName, namespace)
+	assert.Nil(t, getAsyncDeliveryPolicy(t, regName, namespace), "leaving JetStream deletes the policy")
+}
+
+// TestRegistry_AsyncDeliveryPolicy_NoEventingMember verifies that a registry with
+// no eventing member gets no delivery policy, even on JetStream: serving agents
+// receive through the Knative route the registry policy already admits.
+func TestRegistry_AsyncDeliveryPolicy_NoEventingMember(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "serving-only-mesh"
+		registryID = "serving-only-mesh"
+	)
+	mkLabeledAgent(t, "serving-only-a", namespace, map[string]string{"registry": registryID})
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	reconcileNN(t, newReconciler(), "serving-only-a", namespace)
+
+	r := newRegistryReconciler()
+	r.AsyncBackend = AsyncBackend{Kind: asyncBackendJetStream, NATSURL: "nats://nats.broker.svc:4222"}
+	reconcileRegistry(t, r, regName, namespace)
+	assert.Nil(t, getAsyncDeliveryPolicy(t, regName, namespace))
 }

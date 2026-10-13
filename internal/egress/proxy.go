@@ -65,7 +65,7 @@ type toolCapture struct {
 type ProxyConfig struct {
 	// Verifier checks the run capability against the platform public key + audience.
 	Verifier *runcap.Verifier
-	// Resolver resolves the invoking user's OBO credential (credresolve.K8sBackend in prod).
+	// Resolver resolves the invoking user's OBO credential (the token-service client in production).
 	Resolver credresolve.CredentialResolver
 	// Namespace is the grant SOURCE namespace — the agent's own namespace (POD_NAMESPACE),
 	// the key under which its users' grants were consented.
@@ -349,7 +349,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Resolve THIS user's OBO credential for THIS server, within the run's trust boundary
 	// (ADR 0033): the capability carries the boundary (the invoking agent's registry, or the
 	// agent when standalone), so an agent resolves only grants scoped to its own boundary.
-	cred, err := p.cfg.Resolver.Resolve(r.Context(), p.cfg.Namespace, runCap.Boundary, route.Name, runCap.User)
+	// The token service resolves only for the capability it is handed (ADR 0154), so it travels too.
+	cred, err := p.cfg.Resolver.Resolve(runcap.WithToken(r.Context(), token), p.cfg.Namespace, runCap.Boundary, route.Name, runCap.User)
 	switch {
 	case err == nil:
 		// Have the invoking user's fresh token — inject it below.

@@ -25,6 +25,7 @@ package controller
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,8 +37,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 	"github.com/ctxmesh/ctxmesh/internal/egress"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
@@ -51,7 +53,7 @@ var m82EgressConfig = OBOEgressConfig{
 	SidecarImage:           "egress-sidecar:test",
 	CapabilityPublicKeyB64: "PUBKEY",
 	CapabilityAudience:     "aud",
-	CredentialNamespace:    "ae-credentials",
+	TokenServiceURL:        "http://token-service.test:8443",
 }
 
 func newM82Reconciler() *AgentDeploymentReconciler {
@@ -69,7 +71,7 @@ func newM82BindingReconciler() *MCPToolBindingReconciler {
 // mkRegistryAnnotated seeds a ToolRegistry with annotations (e.g. the OAuth auth-type, so its remote
 // tools resolve as OBO tools — ServerName=RegistryRef, OAuth=true — the strongest tool class in ADR
 // 0074 §2). Mirrors mkRegistry but carries the annotation map through the store.
-func mkRegistryAnnotated(t *testing.T, name, namespace string, annotations map[string]string, tools ...agentsv1alpha1.ToolEntry) {
+func mkRegistryAnnotated(t *testing.T, name, namespace string, annotations map[string]string, tools ...agentsv1beta1.ToolEntry) {
 	t.Helper()
 	storeTools := make([]toolregistry.ToolEntry, len(tools))
 	for i, te := range tools {
@@ -104,22 +106,22 @@ func TestM82_FrontsAllToolClasses_ThroughEgressSidecar(t *testing.T) {
 	// OBO registry (OAuth=true) with a remote tool; a separate plain registry (no auth annotation)
 	// with a plain-remote tool + an in-pod sidecar tool.
 	mkRegistryAnnotated(t, "m82-obo", ns, map[string]string{mcpAuthTypeAnnotation: mcpOAuthAuthType},
-		agentsv1alpha1.ToolEntry{Name: "obo_tool", URL: oboURL})
+		agentsv1beta1.ToolEntry{Name: "obo_tool", URL: oboURL})
 	mkRegistry(t, "m82-plain", ns,
-		agentsv1alpha1.ToolEntry{Name: "plain_tool", URL: plainURL},
-		agentsv1alpha1.ToolEntry{Name: "echo_tool", Image: sidecarImage},
+		agentsv1beta1.ToolEntry{Name: "plain_tool", URL: plainURL},
+		agentsv1beta1.ToolEntry{Name: "echo_tool", Image: sidecarImage},
 	)
-	oboBinding := mkBinding(t, "m82-obo-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+	oboBinding := mkBinding(t, "m82-obo-b", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82-obo", ToolName: "obo_tool",
-		Mode: toolmanifest.ModeRemote, Server: agentsv1alpha1.ToolServer{URL: oboURL},
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: oboURL},
 	})
-	plainBinding := mkBinding(t, "m82-plain-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+	plainBinding := mkBinding(t, "m82-plain-b", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82-plain", ToolName: "plain_tool",
-		Mode: toolmanifest.ModeRemote, Server: agentsv1alpha1.ToolServer{URL: plainURL},
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: plainURL},
 	})
-	sidecarBinding := mkBinding(t, "m82-echo-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+	sidecarBinding := mkBinding(t, "m82-echo-b", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82-plain", ToolName: "echo_tool",
-		Mode: toolmanifest.ModeSidecar, Server: agentsv1alpha1.ToolServer{Image: sidecarImage},
+		Mode: toolmanifest.ModeSidecar, Server: agentsv1beta1.ToolServer{Image: sidecarImage},
 	})
 
 	reconcileNN(t, newM82Reconciler(), agent.Name, ns)
@@ -184,14 +186,14 @@ func TestM82_ToolPolicyConfigMap_DeliveredAndMounted(t *testing.T) {
 	const ns = "default"
 	const url = "http://mcp-open.default.svc.cluster.local/mcp"
 
-	agent := &agentsv1alpha1.AgentDeployment{
+	agent := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "m82-policy", Namespace: ns},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
-			Runtime: &agentsv1alpha1.RuntimeSpec{
-				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+			Runtime: &agentsv1beta1.RuntimeSpec{
+				ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 					Default: "deny",
-					Overrides: []agentsv1alpha1.ToolPolicyOverride{
+					Overrides: []agentsv1beta1.ToolPolicyOverride{
 						{Name: "safe_tool", Rule: "allow"},
 					},
 				},
@@ -201,10 +203,10 @@ func TestM82_ToolPolicyConfigMap_DeliveredAndMounted(t *testing.T) {
 	require.NoError(t, k8sClient.Create(testCtx, agent))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
 
-	mkRegistry(t, "m82-pol-reg", ns, agentsv1alpha1.ToolEntry{Name: "safe_tool", URL: url})
-	binding := mkBinding(t, "m82-pol-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "m82-pol-reg", ns, agentsv1beta1.ToolEntry{Name: "safe_tool", URL: url})
+	binding := mkBinding(t, "m82-pol-b", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82-pol-reg", ToolName: "safe_tool",
-		Mode: toolmanifest.ModeRemote, Server: agentsv1alpha1.ToolServer{URL: url},
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: url},
 	})
 
 	reconcileNN(t, newM82Reconciler(), agent.Name, ns)
@@ -253,10 +255,10 @@ func TestM82_ToolPolicyConfigMap_DeliveredAndMounted(t *testing.T) {
 
 	// A tool agent WITHOUT a toolPolicy gets NO policy ConfigMap + no TOOL_POLICY_FILE (permissive).
 	plain := mkAgent(t, "m82-nopolicy", ns)
-	mkRegistry(t, "m82-np-reg", ns, agentsv1alpha1.ToolEntry{Name: "t", URL: url})
-	npBinding := mkBinding(t, "m82-np-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "m82-np-reg", ns, agentsv1beta1.ToolEntry{Name: "t", URL: url})
+	npBinding := mkBinding(t, "m82-np-b", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: plain.Name, RegistryRef: "m82-np-reg", ToolName: "t",
-		Mode: toolmanifest.ModeRemote, Server: agentsv1alpha1.ToolServer{URL: url},
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: url},
 	})
 	reconcileNN(t, newM82Reconciler(), plain.Name, ns)
 	reconcileBinding(t, newM82BindingReconciler(), npBinding.Name, ns)
@@ -288,14 +290,41 @@ func TestM82_NonToolAgent_NoSidecar(t *testing.T) {
 	assert.Error(t, err, "a non-tool agent gets NO <agent>-toolpolicy ConfigMap")
 }
 
+// The egress sidecar resolves every tool credential through the token service and exits at startup
+// without one, so a tool-bound agent on an install with no TOKEN_SERVICE_URL must fail to render with a
+// message naming the setting, not deploy a pod whose sidecar CrashLoops.
+func TestM82_ToolAgentWithoutTokenService_RefusesToRender(t *testing.T) {
+	const ns = "default"
+	agent := mkAgent(t, "m82-no-ts", ns)
+	const url = "http://mcp-echo.default.svc.cluster.local/mcp"
+	mkRegistry(t, "reg-no-ts", ns, agentsv1beta1.ToolEntry{Name: "word-count", URL: url})
+	mkBinding(t, "no-ts-wc", ns, agentsv1beta1.MCPToolBindingSpec{
+		AgentRef: agent.Name, RegistryRef: "reg-no-ts", ToolName: "word-count",
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: url},
+	})
+
+	r := newM82Reconciler()
+	r.OBOEgress.TokenServiceURL = ""
+	_, err := r.Reconcile(testCtx, reconcile.Request{NamespacedName: types.NamespacedName{Name: agent.Name, Namespace: ns}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TOKEN_SERVICE_URL")
+	var ksvc servingv1.Service
+	assert.True(t, apierrors.IsNotFound(k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &ksvc)),
+		"no Service is created for a tool agent whose sidecar could not start")
+
+	// A tool-less agent needs no token service and still deploys.
+	plain := mkAgent(t, "m82-no-ts-plain", ns)
+	reconcileNN(t, r, plain.Name, ns)
+}
+
 // mkAgentWithToolPolicy creates an AgentDeployment carrying spec.runtime.toolPolicy (M82.3 tests).
-func mkAgentWithToolPolicy(t *testing.T, name, namespace string, policy *agentsv1alpha1.ToolPolicySpec) *agentsv1alpha1.AgentDeployment {
+func mkAgentWithToolPolicy(t *testing.T, name, namespace string, policy *agentsv1beta1.ToolPolicySpec) *agentsv1beta1.AgentDeployment {
 	t.Helper()
-	a := &agentsv1alpha1.AgentDeployment{
+	a := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
-			Runtime: &agentsv1alpha1.RuntimeSpec{ToolPolicy: policy},
+			Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: policy},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, a))
@@ -316,12 +345,11 @@ func sidecarPortEnv(t *testing.T, c corev1.Container) string {
 	return ""
 }
 
-// countInPodToolContainers counts the sidecar-mode TOOL containers ("tool-<bindingName>"), EXCLUDING
-// the discovery sidecar ("tool-discovery"), which also carries the "tool-" prefix.
+// countInPodToolContainers counts the sidecar-mode TOOL containers ("tool-<bindingName>").
 func countInPodToolContainers(containers []corev1.Container) int {
 	n := 0
 	for _, c := range containers {
-		if len(c.Name) > 5 && c.Name[:5] == "tool-" && c.Name != DiscoveryContainerName {
+		if len(c.Name) > 5 && c.Name[:5] == "tool-" {
 			n++
 		}
 	}
@@ -341,29 +369,29 @@ func TestM82_DeniedInPodTool_StructurallyNonDeployed(t *testing.T) {
 
 	// deny the MIDDLE tool. Binding names order the localhost ports (a→3001, b→3002, c→3003 pre-filter),
 	// so denying tool_b (binding m82d-b) removes the MIDDLE port — the footgun case.
-	agent := mkAgentWithToolPolicy(t, "m82-deny-mid", ns, &agentsv1alpha1.ToolPolicySpec{
+	agent := mkAgentWithToolPolicy(t, "m82-deny-mid", ns, &agentsv1beta1.ToolPolicySpec{
 		Default: "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{
+		Overrides: []agentsv1beta1.ToolPolicyOverride{
 			{Name: "tool_b", Rule: "deny"},
 		},
 	})
 
 	mkRegistry(t, "m82d-reg", ns,
-		agentsv1alpha1.ToolEntry{Name: "tool_a", Image: img},
-		agentsv1alpha1.ToolEntry{Name: "tool_b", Image: img},
-		agentsv1alpha1.ToolEntry{Name: "tool_c", Image: img},
+		agentsv1beta1.ToolEntry{Name: "tool_a", Image: img},
+		agentsv1beta1.ToolEntry{Name: "tool_b", Image: img},
+		agentsv1beta1.ToolEntry{Name: "tool_c", Image: img},
 	)
-	ba := mkBinding(t, "m82d-a", ns, agentsv1alpha1.MCPToolBindingSpec{
+	ba := mkBinding(t, "m82d-a", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82d-reg", ToolName: "tool_a",
-		Mode: toolmanifest.ModeSidecar, Server: agentsv1alpha1.ToolServer{Image: img},
+		Mode: toolmanifest.ModeSidecar, Server: agentsv1beta1.ToolServer{Image: img},
 	})
-	bb := mkBinding(t, "m82d-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+	bb := mkBinding(t, "m82d-b", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82d-reg", ToolName: "tool_b",
-		Mode: toolmanifest.ModeSidecar, Server: agentsv1alpha1.ToolServer{Image: img},
+		Mode: toolmanifest.ModeSidecar, Server: agentsv1beta1.ToolServer{Image: img},
 	})
-	bc := mkBinding(t, "m82d-c", ns, agentsv1alpha1.MCPToolBindingSpec{
+	bc := mkBinding(t, "m82d-c", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82d-reg", ToolName: "tool_c",
-		Mode: toolmanifest.ModeSidecar, Server: agentsv1alpha1.ToolServer{Image: img},
+		Mode: toolmanifest.ModeSidecar, Server: agentsv1beta1.ToolServer{Image: img},
 	})
 
 	reconcileNN(t, newM82Reconciler(), agent.Name, ns)
@@ -425,7 +453,7 @@ func TestM82_DeniedInPodTool_StructurallyNonDeployed(t *testing.T) {
 	assert.Equal(t, 2, countInPodToolContainers(containers), "deny agent deploys 2 in-pod tool containers")
 
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(agent), agent))
-	agent.Spec.Runtime.ToolPolicy = &agentsv1alpha1.ToolPolicySpec{Default: "allow"} // flip tool_b to allow
+	agent.Spec.Runtime.ToolPolicy = &agentsv1beta1.ToolPolicySpec{Default: "allow"} // flip tool_b to allow
 	require.NoError(t, k8sClient.Update(testCtx, agent))
 	reconcileNN(t, newM82Reconciler(), agent.Name, ns)
 
@@ -446,16 +474,16 @@ func TestM82_InPodTool_RequireApproval_ReadyFalse(t *testing.T) {
 	const ns = "default"
 	const img = "ghcr.io/ctxmesh/echo-tool:latest"
 
-	agent := mkAgentWithToolPolicy(t, "m82-ra-inpod", ns, &agentsv1alpha1.ToolPolicySpec{
+	agent := mkAgentWithToolPolicy(t, "m82-ra-inpod", ns, &agentsv1beta1.ToolPolicySpec{
 		Default: "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{
+		Overrides: []agentsv1beta1.ToolPolicyOverride{
 			{Name: "gated_tool", Rule: "require-approval"},
 		},
 	})
-	mkRegistry(t, "m82ra-reg", ns, agentsv1alpha1.ToolEntry{Name: "gated_tool", Image: img})
-	b := mkBinding(t, "m82ra-b", ns, agentsv1alpha1.MCPToolBindingSpec{
+	mkRegistry(t, "m82ra-reg", ns, agentsv1beta1.ToolEntry{Name: "gated_tool", Image: img})
+	b := mkBinding(t, "m82ra-b", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82ra-reg", ToolName: "gated_tool",
-		Mode: toolmanifest.ModeSidecar, Server: agentsv1alpha1.ToolServer{Image: img},
+		Mode: toolmanifest.ModeSidecar, Server: agentsv1beta1.ToolServer{Image: img},
 	})
 
 	result := reconcileNN(t, newM82Reconciler(), agent.Name, ns)
@@ -463,7 +491,7 @@ func TestM82_InPodTool_RequireApproval_ReadyFalse(t *testing.T) {
 	// setReadyFalse yields an empty Result + nil error (no requeue on user input).
 	assert.Empty(t, result.RequeueAfter, "require-approval rejection must not requeue")
 
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &updated))
 	cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady)
 	require.NotNil(t, cond, "Ready condition must be set")
@@ -487,24 +515,24 @@ func TestM82_RemoteDeniedTool_Unchanged(t *testing.T) {
 	const ns = "default"
 	const url = "http://mcp-open.default.svc.cluster.local/mcp"
 
-	agent := mkAgentWithToolPolicy(t, "m82-remote-deny", ns, &agentsv1alpha1.ToolPolicySpec{
+	agent := mkAgentWithToolPolicy(t, "m82-remote-deny", ns, &agentsv1beta1.ToolPolicySpec{
 		Default: "allow",
-		Overrides: []agentsv1alpha1.ToolPolicyOverride{
+		Overrides: []agentsv1beta1.ToolPolicyOverride{
 			{Name: "remote_denied", Rule: "deny"},
 			{Name: "remote_gated", Rule: "require-approval"},
 		},
 	})
 	mkRegistry(t, "m82rd-reg", ns,
-		agentsv1alpha1.ToolEntry{Name: "remote_denied", URL: url},
-		agentsv1alpha1.ToolEntry{Name: "remote_gated", URL: url},
+		agentsv1beta1.ToolEntry{Name: "remote_denied", URL: url},
+		agentsv1beta1.ToolEntry{Name: "remote_gated", URL: url},
 	)
-	bd := mkBinding(t, "m82rd-d", ns, agentsv1alpha1.MCPToolBindingSpec{
+	bd := mkBinding(t, "m82rd-d", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82rd-reg", ToolName: "remote_denied",
-		Mode: toolmanifest.ModeRemote, Server: agentsv1alpha1.ToolServer{URL: url},
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: url},
 	})
-	bg := mkBinding(t, "m82rd-g", ns, agentsv1alpha1.MCPToolBindingSpec{
+	bg := mkBinding(t, "m82rd-g", ns, agentsv1beta1.MCPToolBindingSpec{
 		AgentRef: agent.Name, RegistryRef: "m82rd-reg", ToolName: "remote_gated",
-		Mode: toolmanifest.ModeRemote, Server: agentsv1alpha1.ToolServer{URL: url},
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: url},
 	})
 
 	reconcileNN(t, newM82Reconciler(), agent.Name, ns)
@@ -513,7 +541,7 @@ func TestM82_RemoteDeniedTool_Unchanged(t *testing.T) {
 
 	// The agent is Ready-eligible (NOT rejected): a remote require-approval is wire-enforceable, so no
 	// InPodToolRequireApprovalUnsupported. The ksvc exists.
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &updated))
 	if cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady); cond != nil {
 		assert.NotEqual(t, reasonInPodToolRequireApprovalUnsupported, cond.Reason,
@@ -547,8 +575,8 @@ func TestM82_PureAllowAgent_ByteForByte(t *testing.T) {
 	const ns = "default"
 	const img = "ghcr.io/ctxmesh/echo-tool:latest"
 
-	build := func(name string, policy *agentsv1alpha1.ToolPolicySpec, regSuffix string) toolmanifest.Manifest {
-		var agent *agentsv1alpha1.AgentDeployment
+	build := func(name string, policy *agentsv1beta1.ToolPolicySpec, regSuffix string) toolmanifest.Manifest {
+		var agent *agentsv1beta1.AgentDeployment
 		if policy == nil {
 			agent = mkAgent(t, name, ns)
 		} else {
@@ -556,16 +584,16 @@ func TestM82_PureAllowAgent_ByteForByte(t *testing.T) {
 		}
 		reg := "m82pa-reg" + regSuffix
 		mkRegistry(t, reg, ns,
-			agentsv1alpha1.ToolEntry{Name: "t1", Image: img},
-			agentsv1alpha1.ToolEntry{Name: "t2", Image: img},
+			agentsv1beta1.ToolEntry{Name: "t1", Image: img},
+			agentsv1beta1.ToolEntry{Name: "t2", Image: img},
 		)
-		b1 := mkBinding(t, name+"-b1", ns, agentsv1alpha1.MCPToolBindingSpec{
+		b1 := mkBinding(t, name+"-b1", ns, agentsv1beta1.MCPToolBindingSpec{
 			AgentRef: agent.Name, RegistryRef: reg, ToolName: "t1",
-			Mode: toolmanifest.ModeSidecar, Server: agentsv1alpha1.ToolServer{Image: img},
+			Mode: toolmanifest.ModeSidecar, Server: agentsv1beta1.ToolServer{Image: img},
 		})
-		b2 := mkBinding(t, name+"-b2", ns, agentsv1alpha1.MCPToolBindingSpec{
+		b2 := mkBinding(t, name+"-b2", ns, agentsv1beta1.MCPToolBindingSpec{
 			AgentRef: agent.Name, RegistryRef: reg, ToolName: "t2",
-			Mode: toolmanifest.ModeSidecar, Server: agentsv1alpha1.ToolServer{Image: img},
+			Mode: toolmanifest.ModeSidecar, Server: agentsv1beta1.ToolServer{Image: img},
 		})
 		reconcileNN(t, newM82Reconciler(), agent.Name, ns)
 		reconcileBinding(t, newM82BindingReconciler(), b1.Name, ns)
@@ -582,7 +610,7 @@ func TestM82_PureAllowAgent_ByteForByte(t *testing.T) {
 	}
 
 	noPolicy := build("m82-pa-none", nil, "n")
-	allAllow := build("m82-pa-allow", &agentsv1alpha1.ToolPolicySpec{Default: "allow"}, "a")
+	allAllow := build("m82-pa-allow", &agentsv1beta1.ToolPolicySpec{Default: "allow"}, "a")
 
 	// The advertised manifest tool SET is identical between the no-policy and all-allow agents (the
 	// endpoints differ only by the agent-independent sidecar base, which is the same here).
@@ -592,4 +620,119 @@ func TestM82_PureAllowAgent_ByteForByte(t *testing.T) {
 	aaNames := map[string]bool{allAllow.Tools[0].Name: true, allAllow.Tools[1].Name: true}
 	assert.Equal(t, npNames, aaNames, "a pure-allow policy advertises the same tool set as no policy")
 	assert.True(t, npNames["t1"] && npNames["t2"], "both in-pod tools are advertised under a pure-allow policy")
+}
+
+// TestToolPolicy_InlineApproval_DeliveredToSidecar proves the egress ConfigMap carries require-approval
+// from the agent's own toolPolicy (ADR 0152 §2): the approval requirement a separate approval policy used
+// to merge in is now written inline, and it reaches the sidecar the same way. A remote tool keeps the
+// agent Ready-eligible (require-approval is wire-enforced for it).
+func TestToolPolicy_InlineApproval_DeliveredToSidecar(t *testing.T) {
+	const ns = "default"
+	const url = "http://mcp-open.default.svc.cluster.local/mcp"
+
+	agent := mkAgentWithToolPolicy(t, "tp-inline-approval", ns, &agentsv1beta1.ToolPolicySpec{
+		Default:   "require-approval",
+		Overrides: []agentsv1beta1.ToolPolicyOverride{{Name: "read_docs", Rule: "allow"}},
+		Approvers: []agentsv1beta1.Approver{{Kind: "Group", Name: approverSentinel}},
+	})
+	mkRegistry(t, "tp-ia-reg", ns,
+		agentsv1beta1.ToolEntry{Name: "send_email", URL: url},
+		agentsv1beta1.ToolEntry{Name: "read_docs", URL: url},
+	)
+	b := mkBinding(t, "tp-ia-b", ns, agentsv1beta1.MCPToolBindingSpec{
+		AgentRef: agent.Name, RegistryRef: "tp-ia-reg", ToolName: "send_email",
+		Mode: toolmanifest.ModeRemote, Server: agentsv1beta1.ToolServer{URL: url},
+	})
+
+	reconcileNN(t, newM82Reconciler(), agent.Name, ns)
+	reconcileBinding(t, newM82BindingReconciler(), b.Name, ns)
+
+	var cm corev1.ConfigMap
+	require.NoError(t, k8sClient.Get(testCtx,
+		client.ObjectKey{Name: toolPolicyConfigMapName(agent.Name), Namespace: ns}, &cm),
+		"the <agent>-toolpolicy ConfigMap must be created")
+	p, err := egress.ParseToolPolicy(cm.Data[toolPolicyConfigMapKey])
+	require.NoError(t, err, "the delivered policy must parse")
+	assert.Equal(t, "require-approval", p.RuleFor("send_email"), "the inline default requires approval")
+	assert.Equal(t, "allow", p.RuleFor("read_docs"), "an inline allow override wins over the default")
+	assert.NotContains(t, cm.Data[toolPolicyConfigMapKey], approverSentinel,
+		"approvers are enforced by the BFF; the sidecar's policy carries none")
+
+	var ksvc servingv1.Service
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &ksvc))
+	sawRuntime := false
+	for _, c := range ksvc.Spec.Template.Spec.Containers {
+		for _, e := range c.Env {
+			if e.Name == "AGENT_RUNTIME" {
+				sawRuntime = true
+			}
+			assert.NotContains(t, e.Value, approverSentinel, "container %s env %s carries an approver", c.Name, e.Name)
+		}
+	}
+	assert.True(t, sawRuntime, "AGENT_RUNTIME is injected, without approvers")
+
+	var updated agentsv1beta1.AgentDeployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: agent.Name, Namespace: ns}, &updated))
+	if cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady); cond != nil {
+		assert.NotEqual(t, metav1.ConditionFalse, cond.Status,
+			"a remote require-approval tool must not hold the agent NotReady: %s", cond.Message)
+	}
+
+	// The version snapshot keeps the approval rules (they run) and leaves out the approvers (they do
+	// not, and a rollback never restores them).
+	hash, err := specHash(updated.Spec)
+	require.NoError(t, err)
+	av, ok := storedVersion(t, testVersionStore, agent.Name, ns, agent.Name+"-"+hash)
+	require.True(t, ok)
+	require.NotNil(t, av.Snapshot.Runtime)
+	require.NotNil(t, av.Snapshot.Runtime.ToolPolicy)
+	assert.Equal(t, "require-approval", av.Snapshot.Runtime.ToolPolicy.Default, "the snapshot keeps the rules")
+	assert.Empty(t, av.Snapshot.Runtime.ToolPolicy.Approvers, "the snapshot carries no approvers")
+	snapHash, err := specHash(av.Snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, hash, snapHash, "the snapshot hashes to its version's name")
+}
+
+// TestToolPolicy_LongestServiceAccountApproverAccepted: the longest possible ServiceAccount username
+// (a 63-character namespace and a 253-character name) fits the approver name limit.
+func TestToolPolicy_LongestServiceAccountApproverAccepted(t *testing.T) {
+	const ns = "default"
+	username := "system:serviceaccount:" + strings.Repeat("n", 63) + ":" + strings.Repeat("s", 253)
+	require.Len(t, username, 339)
+	agent := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "tp-approver-longest-sa", Namespace: ns},
+		Spec: agentsv1beta1.AgentDeploymentSpec{
+			Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
+			Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{
+				Approvers: []agentsv1beta1.Approver{{Kind: "User", Name: username}},
+			}},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, agent), "the longest ServiceAccount username is a valid approver")
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, agent) })
+}
+
+// TestToolPolicy_ApproverShapeValidatedAtAdmission: an approver kind outside User|Group, an empty
+// name, or a name longer than any Kubernetes username is rejected by the API server.
+func TestToolPolicy_ApproverShapeValidatedAtAdmission(t *testing.T) {
+	const ns = "default"
+	for name, approver := range map[string]agentsv1beta1.Approver{
+		"tp-approver-kind": {Kind: "ServiceAccount", Name: "ci"},
+		"tp-approver-name": {Kind: "User", Name: ""},
+		"tp-approver-long": {Kind: "User", Name: strings.Repeat("a", 340)},
+	} {
+		agent := &agentsv1beta1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+			Spec: agentsv1beta1.AgentDeploymentSpec{
+				Image: "ghcr.io/ctxmesh/example-agent:latest", ExecutionModel: "serving", Port: 8080,
+				Runtime: &agentsv1beta1.RuntimeSpec{ToolPolicy: &agentsv1beta1.ToolPolicySpec{
+					Approvers: []agentsv1beta1.Approver{approver},
+				}},
+			},
+		}
+		err := k8sClient.Create(testCtx, agent)
+		require.Error(t, err, "%s: an invalid approver must be rejected", name)
+		assert.True(t, apierrors.IsInvalid(err), "%s: rejection must be a validation error, got %v", name, err)
+		assert.Contains(t, err.Error(), "approvers")
+	}
 }

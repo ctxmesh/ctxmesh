@@ -249,6 +249,10 @@ func (s *pgStore) filter(opts controlplane.ListOptions) (string, []any) {
 	if opts.Namespace != "" {
 		add("namespace = $%d", opts.Namespace)
 	}
+	if opts.Namespaces != nil {
+		// pgx may bind an empty []string as NULL; COALESCE keeps it the empty set, which matches nothing.
+		add("namespace = ANY(COALESCE($%d::text[], '{}'::text[]))", opts.Namespaces)
+	}
 	if s := strings.TrimSpace(opts.Search); s != "" {
 		add(`name ILIKE '%%' || $%d || '%%' ESCAPE '\'`, escapeLike(s))
 	}

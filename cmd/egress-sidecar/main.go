@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,11 +35,6 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8s.io/apimachinery/pkg/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
@@ -46,9 +42,8 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
-// defaultCapabilityAudience mirrors the BFF default (internal/bff) — the credential-plane
-// audience run capabilities are minted for and this sidecar verifies against.
-const defaultCapabilityAudience = "ctxmesh-credential-plane"
+// defaultCapabilityAudience is the audience the BFF mints run capabilities for when none is set.
+const defaultCapabilityAudience = runcap.DefaultAudience
 
 const (
 	defaultListenAddr   = "127.0.0.1:8081"
@@ -58,8 +53,7 @@ const (
 )
 
 func main() {
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-	log := ctrl.Log.WithName("egress-sidecar")
+	log := logr.FromSlogHandler(slog.NewJSONHandler(os.Stderr, nil)).WithName("egress-sidecar")
 	if err := run(log); err != nil {
 		log.Error(err, "egress-sidecar exited with error")
 		os.Exit(1)
@@ -107,13 +101,11 @@ func run(log logr.Logger) error {
 		}
 	}
 
-	// The agent's own namespace is the grant SOURCE namespace; the locked credential
-	// namespace holds the grant Secrets. POD_NAMESPACE is injected by the downward API.
+	// The agent's own namespace is the grant SOURCE namespace the token service resolves in.
 	podNS := strings.TrimSpace(os.Getenv("POD_NAMESPACE"))
 	if podNS == "" {
 		return errors.New("POD_NAMESPACE is required (the agent's namespace — the grant source)")
 	}
-	credentialNS := strings.TrimSpace(os.Getenv("MCP_CREDENTIAL_NAMESPACE"))
 	// The agent identity this sidecar serves (ns/name); a capability minted for another
 	// agent is rejected. Optional — empty skips the agent-scope check.
 	expectedAgent := strings.TrimSpace(os.Getenv("EGRESS_AGENT"))
@@ -127,7 +119,7 @@ func run(log logr.Logger) error {
 		listenAddr = defaultListenAddr
 	}
 
-	resolver, err := buildResolver(log, routes, credentialNS)
+	resolver, err := buildResolver(log, os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -243,52 +235,23 @@ func run(log logr.Logger) error {
 	}
 }
 
-// buildResolver returns the sidecar's credential resolver: a DELEGATING client to the
-// central token service when TOKEN_SERVICE_URL is set (the scaling split — the global
-// singleflight + refresh live there, ADR 0030 §1), else an EMBEDDED credresolve backend
-// that reads grants directly (the first working cut). Both satisfy the same interface, so
-// the proxy is unchanged either way.
-func buildResolver(
-	log logr.Logger, routes egress.RouteTable, credentialNS string,
-) (credresolve.CredentialResolver, error) {
-	if tokenServiceURL := strings.TrimSpace(os.Getenv("TOKEN_SERVICE_URL")); tokenServiceURL != "" {
-		httpClient, err := delegatingHTTPClient(log)
-		if err != nil {
-			return nil, err
-		}
-		log.Info("egress-sidecar delegating resolution to the central token service", "url", tokenServiceURL)
-		return credplane.NewClient(tokenServiceURL, httpClient), nil
+// buildResolver returns the client of the central token service, which resolves and refreshes
+// every grant (ADR 0030 §1). TOKEN_SERVICE_URL is required: the sidecar holds no credential-store
+// access of its own, so without it no OBO tool call could be served.
+func buildResolver(log logr.Logger, getenv func(string) string) (credresolve.CredentialResolver, error) {
+	tokenServiceURL := strings.TrimSpace(getenv("TOKEN_SERVICE_URL"))
+	if tokenServiceURL == "" {
+		return nil, errors.New("TOKEN_SERVICE_URL is required (the token service resolves every tool credential)")
 	}
-
-	// Embedded: read grants directly (the sidecar SA is RBAC-scoped to Secret get in the
-	// credential namespace — Helm, m25.8).
-	scheme := runtime.NewScheme()
-	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		return nil, fmt.Errorf("build scheme: %w", err)
-	}
-	restCfg, err := ctrl.GetConfig()
+	httpClient, err := delegatingHTTPClient(log)
 	if err != nil {
-		return nil, fmt.Errorf("in-cluster config: %w", err)
+		return nil, err
 	}
-	k8sClient, err := client.New(restCfg, client.Options{Scheme: scheme})
-	if err != nil {
-		return nil, fmt.Errorf("build client: %w", err)
+	if httpClient, err = withTokenServiceCredential(httpClient, getenv); err != nil {
+		return nil, err
 	}
-	log.Info("egress-sidecar using an embedded credential backend (set TOKEN_SERVICE_URL to delegate)")
-	return credresolve.NewK8sBackend(credresolve.K8sBackendConfig{
-		Client:              k8sClient,
-		CredentialNamespace: credentialNS,
-		Exchanger:           &credresolve.HTTPTokenExchanger{},
-		AuthTypeIsOAuth: func(_ context.Context, _, server string) (bool, error) {
-			route, ok := routes[server]
-			return ok && route.OAuth, nil
-		},
-		Audit: func(e credresolve.AuditEvent) {
-			// Credential-class provenance (never a token) — ADR 0029 §7 R8.
-			log.Info("egress grant use",
-				"action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
-		},
-	}), nil
+	log.Info("egress-sidecar resolving credentials through the token service", "url", tokenServiceURL)
+	return credplane.NewClient(tokenServiceURL, httpClient), nil
 }
 
 // delegatingHTTPClient builds the HTTP client the sidecar uses to reach the central token

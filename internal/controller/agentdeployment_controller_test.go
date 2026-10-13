@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 )
 
@@ -43,10 +43,11 @@ import (
 // after C7b (ADR 0090): even a "bare" agent (no bindings/overrides) runs its own per-agent identity SA
 // (agent-<name>), a structural pod-spec element folded into the digest. Appended to the spec-hash base
 // (`{name}-{specHash}` → `{name}-{specHash}-h<digest>`).
-// Uses the production hardeningFold rather than repeating it, so the expected revision name
-// cannot drift from the one the controller produces.
-var bareIdentitySuffix = "-h" + hardeningFold(combinedBindingDigest("", "", "", "", "", "",
-	universalIdentitySADigest(false), "", "", ""), false)
+// Uses the production folds rather than repeating them, so the expected revision name
+// cannot drift from the one the controller produces. These test namespaces hold no
+// langfuse-otlp Secret, so trace export is off.
+var bareIdentitySuffix = "-h" + traceExportFold(hardeningFold(combinedBindingDigest("", "", "", "", "", "",
+	universalIdentitySADigest(false), "", "", ""), false), false)
 
 // newReconciler constructs an AgentDeploymentReconciler backed by the envtest
 // API server.
@@ -62,10 +63,11 @@ func newReconciler() *AgentDeploymentReconciler {
 		// reject the Service by container index. Tests must therefore supply one -- same shape of
 		// lesson as EventingAvailable above: a production-correct default that every construction
 		// site has to state.
-		OBOEgress: OBOEgressConfig{SidecarImage: "test.local/egress-sidecar:test"},
+		OBOEgress: OBOEgressConfig{SidecarImage: "test.local/egress-sidecar:test", TokenServiceURL: "http://token-service.test:8443"},
 		Client:    k8sClient,
 		Scheme:    k8sClient.Scheme(),
 		Registry:  NewPostgresRegistryReader(testRegStore),
+		Versions:  testVersionStore,
 		// Dev posture (OPS-2): the envtest suite seeds the bundled dev data plane (dev Langfuse
 		// Secret, dev MinIO), so the reconciler injects the dev object-store + feedback creds — the
 		// behavior these suites assert. A production render sets this false (no dev-cred injection);
@@ -85,7 +87,7 @@ func reconcileNN(t *testing.T, r *AgentDeploymentReconciler, name, namespace str
 }
 
 // TestReconcile_CreatesAgentVersionAndKsvc is the primary integration test:
-// create an AgentDeployment → reconcile → assert AgentVersion + Knative Service
+// create an AgentDeployment → reconcile → assert the recorded version + Knative Service
 // created with the correct fields and owner references.
 func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	const (
@@ -95,12 +97,12 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 		port      = int32(8080)
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          image,
 			ExecutionModel: "serving",
 			Port:           port,
@@ -117,25 +119,16 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	r := newReconciler()
 	reconcileNN(t, r, name, namespace)
 
-	// ── Assert AgentVersion ───────────────────────────────────────────────────
+	// ── Assert the recorded version ───────────────────────────────────────────
 	hash, err := specHash(deploy.Spec)
 	require.NoError(t, err)
 	versionName := fmt.Sprintf("%s-%s", name, hash)
 
-	var av agentsv1alpha1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: versionName, Namespace: namespace}, &av),
-		"AgentVersion %q must exist after reconcile", versionName)
-
-	assert.Equal(t, name, av.Spec.DeploymentName, "AgentVersion.Spec.DeploymentName")
-	assert.Equal(t, deploy.Spec, av.Spec.Snapshot, "AgentVersion.Spec.Snapshot == original spec")
-
-	require.Len(t, av.OwnerReferences, 1, "AgentVersion must have exactly one owner ref")
-	ownerRef := av.OwnerReferences[0]
-	assert.Equal(t, name, ownerRef.Name, "ownerRef.Name == deployment name")
-	require.NotNil(t, ownerRef.Controller, "ownerRef.Controller must be set")
-	assert.True(t, *ownerRef.Controller, "ownerRef.Controller must be true")
-	assert.Equal(t, deploy.UID, ownerRef.UID, "ownerRef.UID matches deployment UID")
+	av, ok, err := testVersionStore.Get(testCtx, namespace, string(deploy.UID), versionName)
+	require.NoError(t, err)
+	require.True(t, ok, "version %q must be recorded after reconcile", versionName)
+	assert.Equal(t, name, av.Agent, "the version belongs to the deployment")
+	assert.Equal(t, deploy.Spec, av.Snapshot, "the snapshot == original spec")
 
 	// ── Assert Knative Service ────────────────────────────────────────────────
 	var ksvc servingv1.Service
@@ -219,7 +212,7 @@ func TestReconcile_CreatesAgentVersionAndKsvc(t *testing.T) {
 	assert.Equal(t, deploy.UID, ksvc.OwnerReferences[0].UID, "ksvc ownerRef.UID")
 
 	// ── Assert status.latestVersion ───────────────────────────────────────────
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	assert.Equal(t, versionName, updated.Status.LatestVersion, "status.latestVersion")
@@ -246,9 +239,9 @@ func TestReconcile_IdempotentRereconcile(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:latest",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -286,7 +279,7 @@ func TestReconcile_IdempotentRereconcile(t *testing.T) {
 		"ksvc ResourceVersion must be unchanged — no spurious update on re-reconcile")
 }
 
-// TestReconcile_SpecUpdate verifies that a spec change produces a new AgentVersion
+// TestReconcile_SpecUpdate verifies that a spec change records a new version
 // (with the new hash) and updates the ksvc template and status.latestVersion.
 func TestReconcile_SpecUpdate(t *testing.T) {
 	const (
@@ -294,12 +287,12 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:          "ghcr.io/ctxmesh/example-agent:v1",
 			ExecutionModel: "serving",
 			Port:           8080,
@@ -320,9 +313,9 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	require.NoError(t, err)
 	version1Name := fmt.Sprintf("%s-%s", name, hash1)
 
-	var av1 agentsv1alpha1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: version1Name, Namespace: namespace}, &av1))
+	_, ok, err := testVersionStore.Get(testCtx, namespace, string(deploy.UID), version1Name)
+	require.NoError(t, err)
+	require.True(t, ok)
 
 	// Update spec → new image
 	require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(deploy), deploy))
@@ -338,18 +331,14 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 	require.NotEqual(t, hash1, hash2, "spec hashes must differ after image change")
 	version2Name := fmt.Sprintf("%s-%s", name, hash2)
 
-	// New AgentVersion must exist
-	var av2 agentsv1alpha1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: version2Name, Namespace: namespace}, &av2),
-		"new AgentVersion %q must exist after spec update", version2Name)
-	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", av2.Spec.Snapshot.Image)
+	// The new version is recorded
+	av2, ok, err := testVersionStore.Get(testCtx, namespace, string(deploy.UID), version2Name)
+	require.NoError(t, err)
+	require.True(t, ok, "new version %q must be recorded after spec update", version2Name)
+	assert.Equal(t, "ghcr.io/ctxmesh/example-agent:v2", av2.Snapshot.Image)
 
-	// Old AgentVersion must still exist (versions are kept)
-	var av1Still agentsv1alpha1.AgentVersion
-	require.NoError(t, k8sClient.Get(testCtx,
-		types.NamespacedName{Name: version1Name, Namespace: namespace}, &av1Still),
-		"old AgentVersion %q must still exist", version1Name)
+	// The old version is kept, after the new one in newest-first order
+	assert.Equal(t, []string{version2Name, version1Name}, versionNames(t, testVersionStore, name, namespace))
 
 	// ksvc template must reflect new image and new revision name.
 	var ksvc servingv1.Service
@@ -362,7 +351,7 @@ func TestReconcile_SpecUpdate(t *testing.T) {
 		"revision name must change when spec changes")
 
 	// status.latestVersion must point to the new version
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	assert.Equal(t, version2Name, updated.Status.LatestVersion, "status.latestVersion after update")
@@ -376,14 +365,14 @@ func TestReconcile_ScalingAnnotations(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
-			Scaling: &agentsv1alpha1.ScalingSpec{
+			Scaling: &agentsv1beta1.ScalingSpec{
 				Min: 1,
 				Max: 5,
 			},
@@ -414,12 +403,12 @@ func TestReconcile_EnvAndResources(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 			Port:  9090,
 			Env: []corev1.EnvVar{
@@ -486,11 +475,11 @@ func TestReconcile_BudgetInjection(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
-			Budget: &agentsv1alpha1.BudgetSpec{
+			Budget: &agentsv1beta1.BudgetSpec{
 				PerConversationUSD: "0.50",
 				PerAgentUSD:        "10.00",
 				SoftThresholdPct:   75,
@@ -552,9 +541,9 @@ func TestReconcile_RecordCapableInjection(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:  "ghcr.io/ctxmesh/example-agent:latest",
 			Record: true,
 		},
@@ -614,9 +603,9 @@ func TestReconcile_NonRecordAgentUnchanged(t *testing.T) {
 		name      = "plain-agent"
 		namespace = "default"
 	)
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -653,12 +642,12 @@ func TestReconcile_BudgetPlusMemoryAgentNameOnce(t *testing.T) {
 
 	// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired);
 	// the memory path fires off spec.sessionMemory.
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:         "ghcr.io/ctxmesh/example-agent:latest",
-			Budget:        &agentsv1alpha1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80},
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session"},
+			Budget:        &agentsv1beta1.BudgetSpec{PerConversationUSD: "0.50", SoftThresholdPct: 80},
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{Scope: "session"},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
@@ -692,9 +681,9 @@ func TestReconcile_NoBudgetNoInjection(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 		},
 	}
@@ -733,24 +722,17 @@ func TestReconcile_NotFound(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
-// TestSidecarImageOverride proves the OPS-1 override: COLLECTOR_IMAGE / DISCOVERY_IMAGE
-// (Reconciler fields) replace the dev.local default constants on the injected sidecars,
-// so agents are schedulable off a kind cluster. Empty ⇒ the project defaults.
+// TestSidecarImageOverride proves the OPS-1 override: COLLECTOR_IMAGE (a Reconciler field)
+// replaces the dev.local default constant on the injected collector, so agents are schedulable
+// off a kind cluster. Empty ⇒ the project default.
 func TestSidecarImageOverride(t *testing.T) {
 	def := &AgentDeploymentReconciler{}
 	assert.Equal(t, telemetry.CollectorImage, def.collectorImage(), "empty ⇒ collector default")
-	assert.Equal(t, DiscoveryImage, def.discoveryImage(), "empty ⇒ discovery default")
 
-	ov := &AgentDeploymentReconciler{
-		CollectorImage: "reg.example.com/collector:1.2",
-		DiscoveryImage: "reg.example.com/discovery:3.4",
-	}
+	ov := &AgentDeploymentReconciler{CollectorImage: "reg.example.com/collector:1.2"}
 	assert.Equal(t, "reg.example.com/collector:1.2", ov.collectorImage())
-	assert.Equal(t, "reg.example.com/discovery:3.4", ov.discoveryImage())
 	assert.Equal(t, "reg.example.com/collector:1.2",
-		telemetry.Container("cm", nil, ov.collectorImage()).Image, "override flows to the collector sidecar")
-	assert.Equal(t, "reg.example.com/discovery:3.4",
-		discoverySidecarContainer(ov.discoveryImage()).Image, "override flows to the discovery sidecar")
+		telemetry.Container("cm", ov.collectorImage()).Image, "override flows to the collector sidecar")
 }
 
 // TestReconcile_RuntimeInjection verifies the M65.2 runtime env injection: when
@@ -764,17 +746,17 @@ func TestReconcile_RuntimeInjection(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
-			Runtime: &agentsv1alpha1.RuntimeSpec{
-				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+			Runtime: &agentsv1beta1.RuntimeSpec{
+				ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 					Default:       "allow",
 					ParallelLimit: 4,
 				},
-				Resilience: &agentsv1alpha1.ResilienceSpec{
-					ModelCall: &agentsv1alpha1.CallResilience{
+				Resilience: &agentsv1beta1.ResilienceSpec{
+					ModelCall: &agentsv1beta1.CallResilience{
 						TimeoutSeconds: 30,
 						MaxRetries:     2,
 					},
@@ -805,7 +787,7 @@ func TestReconcile_RuntimeInjection(t *testing.T) {
 	require.Nil(t, rtEnv.ValueFrom, "AGENT_RUNTIME must be a static value, not valueFrom (Knative webhook rejects it)")
 
 	// The JSON value must round-trip back to the original RuntimeSpec.
-	var got agentsv1alpha1.RuntimeSpec
+	var got agentsv1beta1.RuntimeSpec
 	require.NoError(t, json.Unmarshal([]byte(rtEnv.Value), &got),
 		"AGENT_RUNTIME JSON must unmarshal cleanly to RuntimeSpec")
 	require.NotNil(t, got.ToolPolicy, "ToolPolicy must survive the round trip")
@@ -842,12 +824,12 @@ func TestReconcile_RuntimeDigestRoll(t *testing.T) {
 		namespace = "default"
 	)
 
-	deployA := &agentsv1alpha1.AgentDeployment{
+	deployA := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
-			Runtime: &agentsv1alpha1.RuntimeSpec{
-				ToolPolicy: &agentsv1alpha1.ToolPolicySpec{
+			Runtime: &agentsv1beta1.RuntimeSpec{
+				ToolPolicy: &agentsv1beta1.ToolPolicySpec{
 					Default:       "allow",
 					ParallelLimit: 3,
 				},
@@ -895,9 +877,9 @@ func TestReconcile_NoRuntimeNoInjection(t *testing.T) {
 		namespace = "default"
 	)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image: "ghcr.io/ctxmesh/example-agent:latest",
 		},
 	}
@@ -947,9 +929,9 @@ func TestReconcile_C7b_PlainAgentIdentitySAAndPullSecretMirror(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-		Spec:       agentsv1alpha1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
+		Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest"},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
 	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
@@ -1012,11 +994,11 @@ func TestReconcile_IdentitySAConflict_ReadyFalse(t *testing.T) {
 	// StatelayerProxyURL + session memory so ensureAgentIdentitySA is actually
 	// reached (injectPodToken = true when StatelayerProxyURL != "" && hasMemory).
 	// Session memory is the folded spec field (ADR 0101 — MemoryBinding retired).
-	deploy := &agentsv1alpha1.AgentDeployment{
+	deploy := &agentsv1beta1.AgentDeployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: agentsv1alpha1.AgentDeploymentSpec{
+		Spec: agentsv1beta1.AgentDeploymentSpec{
 			Image:         "ghcr.io/ctxmesh/example-agent:latest",
-			SessionMemory: &agentsv1alpha1.SessionMemorySpec{Scope: "session", Backend: &agentsv1alpha1.MemoryBackend{Addr: "valkey:6379"}},
+			SessionMemory: &agentsv1beta1.SessionMemorySpec{Scope: "session", Backend: &agentsv1beta1.MemoryBackend{Addr: "valkey:6379"}},
 		},
 	}
 	require.NoError(t, k8sClient.Create(testCtx, deploy))
@@ -1037,7 +1019,7 @@ func TestReconcile_IdentitySAConflict_ReadyFalse(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result, "conflict must yield an empty Result (no explicit requeue)")
 
 	// Ready must be False with the IdentitySAConflict reason.
-	var updated agentsv1alpha1.AgentDeployment
+	var updated agentsv1beta1.AgentDeployment
 	require.NoError(t, k8sClient.Get(testCtx,
 		types.NamespacedName{Name: name, Namespace: namespace}, &updated))
 	cond := apimeta.FindStatusCondition(updated.Status.Conditions, conditionReady)

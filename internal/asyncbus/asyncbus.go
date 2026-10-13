@@ -63,9 +63,8 @@ type Message struct {
 	// ID is the envelope's messageId — the idempotency key. Backends that support native deduplication
 	// use it; consumers dedupe on it regardless, because at-least-once is the contract.
 	ID string
-	// Subject routes the message. It is the registry id (optionally suffixed per target agent), so a
-	// consumer subscribes to exactly the traffic of the registry it serves — the same boundary the
-	// per-registry Knative Broker draws today.
+	// Subject routes the message: the sender's registry, then the receiver's namespace and name
+	// (jsname.AgentSubject), so one durable consumer holds exactly the hops waiting for one agent.
 	Subject string
 	// Data is the encoded CloudEvent body, moved verbatim.
 	Data []byte

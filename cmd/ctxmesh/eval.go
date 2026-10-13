@@ -51,7 +51,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/eval"
 	"github.com/ctxmesh/ctxmesh/internal/expand"
@@ -306,9 +305,6 @@ func buildEvalScheme() (*runtime.Scheme, error) {
 	if err := clientgoscheme.AddToScheme(s); err != nil {
 		return nil, err
 	}
-	if err := agentsv1alpha1.AddToScheme(s); err != nil {
-		return nil, err
-	}
 	if err := agentsv1beta1.AddToScheme(s); err != nil {
 		return nil, fmt.Errorf("adding agents/v1beta1: %w", err)
 	}
@@ -324,13 +320,13 @@ func buildEvalScheme() (*runtime.Scheme, error) {
 // and the first EvalSuite found; other kinds (PromptVersion, MCPToolBinding) are
 // silently skipped — the eval gate only needs these two.
 func decodeEvalManifests(manifests []byte, scheme *runtime.Scheme) (
-	*agentsv1alpha1.AgentDeployment, *agentsv1alpha1.EvalSuite, error,
+	*agentsv1beta1.AgentDeployment, *agentsv1beta1.EvalSuite, error,
 ) {
 	dec := utilyaml.NewYAMLOrJSONDecoder(bufio.NewReader(bytes.NewReader(manifests)), 4096)
 	codec := serializer.NewCodecFactory(scheme).UniversalDeserializer()
 
-	var ad *agentsv1alpha1.AgentDeployment
-	var es *agentsv1alpha1.EvalSuite
+	var ad *agentsv1beta1.AgentDeployment
+	var es *agentsv1beta1.EvalSuite
 
 	for {
 		var raw runtime.RawExtension
@@ -349,11 +345,11 @@ func decodeEvalManifests(manifests []byte, scheme *runtime.Scheme) (
 			continue
 		}
 		switch typed := obj.(type) {
-		case *agentsv1alpha1.AgentDeployment:
+		case *agentsv1beta1.AgentDeployment:
 			if ad == nil {
 				ad = typed
 			}
-		case *agentsv1alpha1.EvalSuite:
+		case *agentsv1beta1.EvalSuite:
 			if es == nil {
 				es = typed
 			}
@@ -372,8 +368,8 @@ func applyEvalResources(
 	ctx context.Context,
 	k8sClient client.Client,
 	errOut io.Writer,
-	es *agentsv1alpha1.EvalSuite,
-	ad *agentsv1alpha1.AgentDeployment,
+	es *agentsv1beta1.EvalSuite,
+	ad *agentsv1beta1.AgentDeployment,
 ) error {
 	if es != nil {
 		if err := applyObject(ctx, k8sClient, errOut, es); err != nil {
@@ -435,7 +431,7 @@ func pollGateStatus(
 	k8sClient client.Client,
 	errOut io.Writer,
 	namespace, name string,
-) (*agentsv1alpha1.GateStatus, error) {
+) (*agentsv1beta1.GateStatus, error) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -446,7 +442,7 @@ func pollGateStatus(
 		case <-ctx.Done():
 			return nil, fmt.Errorf("timed out waiting for terminal gate phase: %w", ctx.Err())
 		case <-ticker.C:
-			var current agentsv1alpha1.AgentDeployment
+			var current agentsv1beta1.AgentDeployment
 			if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, &current); err != nil {
 				_, _ = fmt.Fprintf(errOut, "ctxmesh eval: get %s: %v (retrying…)\n", name, err)
 				continue
@@ -469,7 +465,7 @@ func pollGateStatus(
 // computeDecision determines whether the run passes (exit 0) or fails (exit 1)
 // by comparing the gate score to fv.minScore. Returns the report and the exit
 // code. This is a pure function — no I/O — so it is trivially unit-testable.
-func computeDecision(fv evalFlagValues, gate *agentsv1alpha1.GateStatus) (EvalReport, int, *evalError) {
+func computeDecision(fv evalFlagValues, gate *agentsv1beta1.GateStatus) (EvalReport, int, *evalError) {
 	report := EvalReport{
 		Candidate: fv.candidate,
 		Namespace: fv.namespace,
@@ -605,8 +601,8 @@ func teardownEvalResources(
 	ctx context.Context,
 	k8sClient client.Client,
 	errOut io.Writer,
-	es *agentsv1alpha1.EvalSuite,
-	ad *agentsv1alpha1.AgentDeployment,
+	es *agentsv1beta1.EvalSuite,
+	ad *agentsv1beta1.AgentDeployment,
 ) {
 	if ad != nil {
 		if err := k8sClient.Delete(ctx, ad); err != nil && !apierrors.IsNotFound(err) {

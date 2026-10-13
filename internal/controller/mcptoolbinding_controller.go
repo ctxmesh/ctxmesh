@@ -31,29 +31,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
-	"github.com/ctxmesh/ctxmesh/internal/toolpush"
 )
 
 // bindingFinalizer guards binding deletion so the agent's tool state converges
 // BEFORE the object disappears: without it, the delete event reaches Reconcile
 // after the object is gone and the agentRef is unrecoverable — the removed tool
-// would linger in tools.json (which freshly-rolled pods cold-read) and live
-// sidecars would never receive the shrink push. The deletion branch re-syncs
-// the agent (CM + push, with the dying binding excluded), then releases the
+// would linger in tools.json, which running agents follow. The deletion branch
+// re-syncs the agent (the CM, with the dying binding excluded), then releases the
 // finalizer.
 const bindingFinalizer = "agents.ctxmesh.ai/tools-sync"
 
 // MCPToolBindingReconciler reconciles MCPToolBinding objects (specs/mcp-tools.md).
 //
-// It owns the COLD (durable) and HOT (push) sides of a binding, but NOT the pod
-// template — the single-writer rule reserves the ksvc for the AgentDeployment
-// reconciler. On any binding or registry event it:
+// It owns the <agent>-tools ConfigMap, but NOT the pod template — the single-writer
+// rule reserves the ksvc for the AgentDeployment reconciler. Running agents follow the
+// ConfigMap: the kubelet projects each update into the pod and the launcher re-reads it.
+// On any binding or registry event it:
 //
 //  1. resolves the triggering agent's FULL binding set (listed in the binding's
 //     namespace and filtered by spec.agentRef client-side);
@@ -61,9 +59,8 @@ const bindingFinalizer = "agents.ctxmesh.ai/tools-sync"
 //     and writes the Ready condition (Bound / UnregisteredTool / RegistryMismatch
 //     / RegistryNotFound);
 //  3. renders the manifest from the valid bindings and CreateOrUpdate's the
-//     <agent>-tools ConfigMap (durable backing, owned by the AgentDeployment);
-//  4. PUSHes the manifest to every ready pod of the agent (best-effort, non-fatal);
-//  5. requeues the AgentDeployment so it re-renders the pod template (the
+//     <agent>-tools ConfigMap (owned by the AgentDeployment);
+//  4. requeues the AgentDeployment so it re-renders the pod template (the
 //     structural side of the change) — via an owner-less watch map, no annotations.
 //
 // Deletion is handled via bindingFinalizer: the terminating binding is excluded
@@ -72,8 +69,6 @@ const bindingFinalizer = "agents.ctxmesh.ai/tools-sync"
 type MCPToolBindingReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// Pusher pushes manifests to discovery sidecars. Nil → a default Pusher.
-	Pusher *toolpush.Pusher
 	// OBOEgress configures OBO egress-sidecar injection (ADR 0030). Disabled (default)
 	// ⇒ no manifest rewrite — remote endpoints stay verbatim (no drift).
 	OBOEgress OBOEgressConfig
@@ -82,7 +77,7 @@ type MCPToolBindingReconciler struct {
 	// authoritative path, and the envtest path (no DB). A production build wires
 	// the Postgres reader only at the M43 read-switch, and MUST wire this AND the
 	// AgentDeployment reconciler's Registry from the SAME reader instance: the two
-	// reconcilers compute the pushed manifest and the pod template from the same
+	// reconcilers compute the manifest and the pod template from the same
 	// resolveAgentBindings logic, so different readers would silently drift them.
 	Registry RegistryReader
 	// RegistryChanges, when non-nil, feeds ToolRegistry-change events from the
@@ -101,14 +96,6 @@ func (r *MCPToolBindingReconciler) registryReader() RegistryReader {
 	return r.Registry
 }
 
-// pusher returns the configured pusher or a lazily-created default.
-func (r *MCPToolBindingReconciler) pusher() *toolpush.Pusher {
-	if r.Pusher == nil {
-		r.Pusher = &toolpush.Pusher{}
-	}
-	return r.Pusher
-}
-
 // RBAC — STANDALONE marker block. Markers inside a type's doc comment are
 // silently ignored by controller-gen; they must be their own comment group
 // immediately above a func for the generator to pick them up.
@@ -116,22 +103,21 @@ func (r *MCPToolBindingReconciler) pusher() *toolpush.Pusher {
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=mcptoolbindings,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=mcptoolbindings/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.ctxmesh.ai,resources=mcptoolbindings/finalizers,verbs=update
-// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 // Reconcile resolves the agent referenced by the triggering binding and syncs
-// the whole agent's tool state (validate → status → ConfigMap → push).
+// the whole agent's tool state (validate → status → ConfigMap).
 //
 // Lifecycle:
 //   - live binding → ensure bindingFinalizer, then sync the agent.
 //   - terminating binding (deletionTimestamp set) → sync the agent FIRST (the
 //     dying binding is excluded from the render set by listAgentBindings, so
-//     the CM shrinks and live sidecars get the shrink push), THEN release the
+//     the CM shrinks and running agents follow it), THEN release the
 //     finalizer. Sync errors keep the finalizer → the delete retries, so the
 //     agent can never be left with stale tool state.
 //   - NotFound → the finalizer flow already converged the agent before the
 //     object vanished; nothing to key on.
 func (r *MCPToolBindingReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var binding agentsv1alpha1.MCPToolBinding
+	var binding agentsv1beta1.MCPToolBinding
 	if err := r.Get(ctx, req.NamespacedName, &binding); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
@@ -183,16 +169,16 @@ func (r *MCPToolBindingReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 // (nothing to own them); those are cleaned up out of band.
 func (r *MCPToolBindingReconciler) ensureOwnedByAgent(
 	ctx context.Context,
-	binding *agentsv1alpha1.MCPToolBinding,
+	binding *agentsv1beta1.MCPToolBinding,
 ) error {
 	for i := range binding.OwnerReferences {
 		o := &binding.OwnerReferences[i]
-		if o.Kind == "AgentDeployment" && o.Name == binding.Spec.AgentRef {
+		if o.Kind == kindAgentDeployment && o.Name == binding.Spec.AgentRef {
 			return nil // already owned by this agent
 		}
 	}
 
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if err := r.Get(ctx, client.ObjectKey{Namespace: binding.Namespace, Name: binding.Spec.AgentRef}, &agent); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil // agent not present yet — adopt on a later reconcile
@@ -210,7 +196,7 @@ func (r *MCPToolBindingReconciler) ensureOwnedByAgent(
 }
 
 // syncAgent resolves the agent's full binding set, validates + statuses every
-// binding, writes the durable ConfigMap, and pushes to ready pods.
+// binding, and writes the ConfigMap running agents follow.
 func (r *MCPToolBindingReconciler) syncAgent(
 	ctx context.Context,
 	namespace, agentName string,
@@ -234,19 +220,9 @@ func (r *MCPToolBindingReconciler) syncAgent(
 	// manifest exists; the binding reconciler only reflects that reality. OBO/remote bindings pass
 	// through verbatim (wire-enforced at the sidecar, m82.2).
 	var tp resolvedToolPolicy
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr == nil {
-		// Merge the agent's ApprovalPolicy (M139, ADR 0111) so this manifest drops the SAME tools the
-		// pod does. A dangling approvalPolicyRef holds the AgentDeployment NotReady (no pod → this
-		// manifest has no reader), so reflect the inline policy only rather than erroring the binding.
-		ap, aerr := resolveApprovalPolicy(ctx, r.Client, &agent)
-		if aerr != nil {
-			if _, ok := asApprovalPolicyResolveError(aerr); !ok {
-				return ctrl.Result{}, fmt.Errorf("resolving approval policy for agent %s/%s: %w", namespace, agentName, aerr)
-			}
-			ap = nil
-		}
-		if tp, err = resolveToolPolicy(&agent, ap); err != nil {
+		if tp, err = resolveToolPolicy(&agent); err != nil {
 			return ctrl.Result{}, fmt.Errorf("resolving tool policy for agent %s/%s: %w", namespace, agentName, err)
 		}
 	} else if !apierrors.IsNotFound(getErr) {
@@ -260,20 +236,16 @@ func (r *MCPToolBindingReconciler) syncAgent(
 	// always-on, no flag. EVERY tool is fronted through the per-pod egress sidecar
 	// (RewriteAllForEgress), so the SDK-facing manifest matches the pod template the deployment
 	// reconciler writes (both derive from RewriteAllForEgress — a split would silently drift the
-	// pushed manifest from the injected sidecar's route table). This supersedes the M78 record-only
+	// manifest from the injected sidecar's route table). This supersedes the M78 record-only
 	// and ADR 0030 OBO-only rewrites (OBO tools keep their ServerName route + OAuth injection, so
 	// the front-all table is a strict superset). RewriteAllForEgress leaves a no-tool manifest
 	// unchanged, so a tool-less agent is byte-for-byte unchanged.
 	manifest, _ = toolmanifest.RewriteAllForEgress(manifest, valid, egressSidecarBaseURL)
 
-	// ── Durable backing: CreateOrUpdate <agent>-tools ConfigMap ──────────────
+	// ── CreateOrUpdate <agent>-tools ConfigMap ───────────────────────────────
 	if err := r.syncToolsConfigMap(ctx, namespace, agentName, manifest); err != nil {
 		return ctrl.Result{}, err
 	}
-
-	// ── Hot path: push to every ready pod of the agent (best-effort) ─────────
-	r.pushToReadyPods(ctx, namespace, agentName, manifest)
-
 	return ctrl.Result{}, nil
 }
 
@@ -349,7 +321,7 @@ func (r *MCPToolBindingReconciler) syncToolsConfigMap(
 	namespace, agentName string,
 	manifest toolmanifest.Manifest,
 ) error {
-	var agent agentsv1alpha1.AgentDeployment
+	var agent agentsv1beta1.AgentDeployment
 	if getErr := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: agentName}, &agent); getErr != nil {
 		if !apierrors.IsNotFound(getErr) {
 			return fmt.Errorf("getting AgentDeployment %s for CM ownership: %w", agentName, getErr)
@@ -389,53 +361,6 @@ func (r *MCPToolBindingReconciler) syncToolsConfigMap(
 	return nil
 }
 
-// pushToReadyPods lists the agent's ready pods (by the Knative service label)
-// and POSTs the manifest to each sidecar. Best-effort: every failure is logged
-// and swallowed — the ConfigMap backing guarantees eventual consistency and a
-// waking pod reads it (specs/mcp-tools.md — "Push fails"). The push is NOT
-// envtest-verifiable (no kubelet schedules pods, no pod IPs) → the m4.7 e2e
-// covers the live propagation path.
-func (r *MCPToolBindingReconciler) pushToReadyPods(
-	ctx context.Context,
-	namespace, agentName string,
-	manifest toolmanifest.Manifest,
-) {
-	log := logf.FromContext(ctx)
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods,
-		client.InNamespace(namespace),
-		client.MatchingLabels{knativeServiceLabel: agentName},
-	); err != nil {
-		log.Error(err, "listing agent pods for manifest push; relying on ConfigMap backing", "agent", agentName)
-		return
-	}
-
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if !podReady(pod) || pod.Status.PodIP == "" {
-			continue
-		}
-		url := toolpush.PushURL(pod.Status.PodIP)
-		if err := r.pusher().Push(ctx, url, manifest); err != nil {
-			// Non-fatal: log and continue; CM backing converges regardless.
-			log.Info("manifest push failed (non-fatal; ConfigMap backing converges)",
-				"pod", pod.Name, "podIP", pod.Status.PodIP, "err", err.Error())
-			continue
-		}
-		log.Info("pushed manifest to discovery sidecar", "pod", pod.Name, "version", manifest.Version)
-	}
-}
-
-// podReady reports whether a pod has a True PodReady condition.
-func podReady(pod *corev1.Pod) bool {
-	for _, c := range pod.Status.Conditions {
-		if c.Type == corev1.PodReady {
-			return c.Status == corev1.ConditionTrue
-		}
-	}
-	return false
-}
-
 // SetupWithManager registers the reconciler and the secondary watches. No
 // field index is involved anywhere in this feature: watch map functions read
 // spec fields straight off the event object, and reconcile-time binding
@@ -465,7 +390,7 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			if regName == "" {
 				return nil
 			}
-			var list agentsv1alpha1.MCPToolBindingList
+			var list agentsv1beta1.MCPToolBindingList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(regNS)); err != nil {
 				return nil
 			}
@@ -485,11 +410,11 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// now be written with its owner ref; delete: the CM must be removed).
 	mapAgentToBindings := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			agent, ok := obj.(*agentsv1alpha1.AgentDeployment)
+			agent, ok := obj.(*agentsv1beta1.AgentDeployment)
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.MCPToolBindingList
+			var list agentsv1beta1.MCPToolBindingList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(agent.Namespace)); err != nil {
 				return nil
 			}
@@ -506,8 +431,8 @@ func (r *MCPToolBindingReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	)
 
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.MCPToolBinding{}).
-		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToBindings).
+		For(&agentsv1beta1.MCPToolBinding{}).
+		Watches(&agentsv1beta1.AgentDeployment{}, mapAgentToBindings).
 		Named("mcptoolbinding")
 
 	// ToolRegistry change trigger: the leader-elected Postgres poll source

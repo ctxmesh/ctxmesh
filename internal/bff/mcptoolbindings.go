@@ -19,6 +19,7 @@ package bff
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -28,12 +29,23 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
 
 // mcpToolBindingKind is the CRD kind name for an MCPToolBinding (used in error
 // messages and the rename guard so they match the API server's kind strings).
 const mcpToolBindingKind = "MCPToolBinding"
+
+// resourceMCPToolBindings is the binding's resource, which a bind authorizes on.
+const resourceMCPToolBindings = "mcptoolbindings"
+
+// The two MCPToolBinding modes (MCPToolBindingSpec.Mode).
+const (
+	toolModeRemote  = "remote"
+	toolModeSidecar = "sidecar"
+)
 
 // Hot-update propagation states. The MCPToolBinding detail surfaces the
 // propagation status HONESTLY, derived from the controller-observed Ready condition:
@@ -123,24 +135,31 @@ type MCPToolBindingListResponse struct {
 	NextCursor string                  `json:"nextCursor"`
 }
 
-// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body. The caller
-// submits the binding spec (agentRef, registryRef, toolName, mode, server). The
-// CRD's CEL validation enforces mode-specific server fields at admission.
+// MCPToolBindingCreateRequest is the POST /api/mcptoolbindings body: the binding spec,
+// shaped like MCPToolBindingSpec. The server it names, or the one that provides the tool
+// when registryRef is left out, must be one the caller may use. registryRef, mode and
+// server may be left out, and are then read from the tool's entry on that server (the
+// console's bind wizard sends only the agent, the tool and the server it picked the tool
+// from). The CRD's CEL validation enforces mode-specific
+// server fields at admission.
 type MCPToolBindingCreateRequest struct {
 	// Name is the object's metadata.name. Required.
 	Name string `json:"name"`
-	// Namespace scopes the created object; empty → default namespace.
+	// Namespace scopes the created object, and the agent and the MCP server it names;
+	// empty → default namespace.
 	Namespace string `json:"namespace"`
 	// AgentRef names the AgentDeployment (same namespace). Required.
 	AgentRef string `json:"agentRef"`
-	// RegistryRef names the ToolRegistry (same namespace). Required.
-	RegistryRef string `json:"registryRef"`
+	// RegistryRef names the ToolRegistry (same namespace). Empty → the first MCP server,
+	// by name, that provides the tool.
+	RegistryRef string `json:"registryRef,omitempty"`
 	// ToolName is the catalog key in the referenced ToolRegistry. Required.
 	ToolName string `json:"toolName"`
-	// Mode is "sidecar" or "remote". Required.
-	Mode string `json:"mode"`
-	// Server locates the tool server for the selected mode. Required.
-	Server ToolServerDTO `json:"server"`
+	// Mode is "sidecar" or "remote". Empty → "remote" when the server pins the tool to a
+	// URL, "sidecar" when it pins an image.
+	Mode string `json:"mode,omitempty"`
+	// Server locates the tool server for the selected mode. Empty → the server's pin.
+	Server ToolServerDTO `json:"server,omitzero"`
 }
 
 // MCPToolBindingUpdateRequest is the PUT /api/mcptoolbindings/{ns}/{name} body.
@@ -201,8 +220,8 @@ func propagationStatusFromConditions(conds []metav1.Condition) string {
 // listMCPToolBindingsForCRUD lists MCPToolBindings via the caller-scoped client
 // (CRUD surface — distinct from the topology helper listMCPToolBindings in
 // adapters.go, which accepts the AgentReader interface).
-func listMCPToolBindingsForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1alpha1.MCPToolBindingList, error) {
-	var out agentsv1alpha1.MCPToolBindingList
+func listMCPToolBindingsForCRUD(ctx context.Context, r client.Client, opts ...client.ListOption) (*agentsv1beta1.MCPToolBindingList, error) {
+	var out agentsv1beta1.MCPToolBindingList
 	if err := r.List(ctx, &out, opts...); err != nil {
 		return nil, err
 	}
@@ -213,7 +232,7 @@ func listMCPToolBindingsForCRUD(ctx context.Context, r client.Client, opts ...cl
 
 // newMCPToolBindingSummary projects an MCPToolBinding onto the compact list DTO,
 // including the HONEST propagation status from the controller's Ready condition.
-func newMCPToolBindingSummary(b *agentsv1alpha1.MCPToolBinding) MCPToolBindingSummary {
+func newMCPToolBindingSummary(b *agentsv1beta1.MCPToolBinding) MCPToolBindingSummary {
 	ready, phase := phaseFromConditions(b.Status.Conditions)
 	return MCPToolBindingSummary{
 		Name:              b.Name,
@@ -233,7 +252,7 @@ func newMCPToolBindingSummary(b *agentsv1alpha1.MCPToolBinding) MCPToolBindingSu
 // The propagation status is the key novel field: it is derived from the
 // controller-observed Ready condition and is NEVER fabricated ("applied" /
 // "propagated" only when Ready=True; failure reason or "pending" otherwise).
-func newMCPToolBindingDetail(b *agentsv1alpha1.MCPToolBinding) MCPToolBindingDetail {
+func newMCPToolBindingDetail(b *agentsv1beta1.MCPToolBinding) MCPToolBindingDetail {
 	ready, phase := phaseFromConditions(b.Status.Conditions)
 	return MCPToolBindingDetail{
 		Name:        b.Name,
@@ -303,7 +322,7 @@ func (s *Server) handleListMCPToolBindings(w http.ResponseWriter, r *http.Reques
 		opts = append(opts, client.InNamespace(namespace))
 	}
 
-	list, err := listMCPToolBindingsForCRUD(r.Context(), caller, opts...)
+	list, err := listMCPToolBindingsForCRUD(r.Context(), s.acrossWorkspaces(caller), opts...)
 	if err != nil {
 		if status, msg, isRBAC := classifyReadError(err); isRBAC {
 			writeError(w, status, msg)
@@ -348,7 +367,7 @@ func (s *Server) handleGetMCPToolBinding(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var b agentsv1alpha1.MCPToolBinding
+	var b agentsv1beta1.MCPToolBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &b); err != nil {
 		s.writeGetError(w, err, "MCP tool binding")
 		return
@@ -396,35 +415,41 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "agentRef is required")
 		return
 	}
-	if strings.TrimSpace(req.RegistryRef) == "" {
-		writeError(w, http.StatusBadRequest, "registryRef is required")
-		return
-	}
 	if strings.TrimSpace(req.ToolName) == "" {
 		writeError(w, http.StatusBadRequest, "toolName is required")
 		return
 	}
-	if strings.TrimSpace(req.Mode) == "" {
-		writeError(w, http.StatusBadRequest, "mode is required")
-		return
-	}
 
-	ns := req.Namespace
+	ns := strings.TrimSpace(req.Namespace)
 	if ns == "" {
 		ns = defaultCreateNamespace
 	}
+	req.RegistryRef = strings.TrimSpace(req.RegistryRef)
+	req.ToolName = strings.TrimSpace(req.ToolName)
+	req.Mode = strings.TrimSpace(req.Mode)
+	loc, cErr := s.usableBindingServer(r.Context(), caller, authz.VerbCreate, ns, req.RegistryRef, req.ToolName)
+	if cErr == nil {
+		cErr = fillBindingFromServer(loc, &req)
+	}
+	if cErr != nil {
+		if cErr.status >= http.StatusInternalServerError {
+			s.log.Error(cErr.logged(), "bind tool: resolving its MCP server failed", "namespace", ns, "tool", req.ToolName)
+		}
+		writeError(w, cErr.status, cErr.msg)
+		return
+	}
 
-	binding := &agentsv1alpha1.MCPToolBinding{
+	binding := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      strings.TrimSpace(req.Name),
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    strings.TrimSpace(req.AgentRef),
-			RegistryRef: strings.TrimSpace(req.RegistryRef),
-			ToolName:    strings.TrimSpace(req.ToolName),
-			Mode:        strings.TrimSpace(req.Mode),
-			Server: agentsv1alpha1.ToolServer{
+			RegistryRef: req.RegistryRef,
+			ToolName:    req.ToolName,
+			Mode:        req.Mode,
+			Server: agentsv1beta1.ToolServer{
 				Image: req.Server.Image,
 				URL:   req.Server.URL,
 			},
@@ -446,6 +471,92 @@ func (s *Server) handleCreateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusCreated, newMCPToolBindingDetail(binding))
+}
+
+// usableBindingServer finds tool on the MCP server registryRef names, or on the first server by
+// name that provides it when registryRef is empty, among the servers the caller may use, and
+// enforces the bind-time owner guard: a personal server binds only for its owner (ADR 0029). Every
+// create and update of a binding passes through it, so a binding can only ever name a server its
+// author may use. The caller's permission for verb on bindings in ns is checked first, so a caller
+// who may not bind learns nothing about the namespace's servers.
+func (s *Server) usableBindingServer(ctx context.Context, caller client.Client, verb, ns, registryRef, tool string) (toolLoc, *createError) {
+	if cErr := s.authzRefusal(
+		s.authorizeStore(ctx, caller, verb, resourceMCPToolBindings, ns, ""),
+		"bind tools in namespace "+ns); cErr != nil {
+		return toolLoc{}, cErr
+	}
+	username, err := callerUsername(ctx, caller)
+	if err != nil {
+		if apierrors.IsUnauthorized(err) {
+			return toolLoc{}, &createError{status: http.StatusUnauthorized, msg: msgTokenRejected}
+		}
+		return toolLoc{}, &createError{status: http.StatusInternalServerError, msg: "failed to resolve the caller's identity", cause: err}
+	}
+	callerOwner := userGrantHash(username)
+	regs, err := usableToolRegistries(ctx, s.toolRegistryStore, ns, callerOwner)
+	switch {
+	case errors.Is(err, errNoToolRegistryStore):
+		return toolLoc{}, &createError{status: http.StatusNotImplemented, msg: msgToolRegistryStoreRequired}
+	case err != nil:
+		return toolLoc{}, &createError{
+			status: http.StatusInternalServerError,
+			msg:    fmt.Sprintf("failed to read the MCP servers in namespace %q", ns), cause: err,
+		}
+	}
+
+	// Another user's private server is not among regs, so naming it is refused exactly like naming a
+	// server that does not exist: the refusal does not say whether it does.
+	loc, found := findRegistryTool(regs, registryRef, tool)
+	switch {
+	case !found && registryRef != "":
+		return toolLoc{}, &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+			"tool %q is not provided by an MCP server %q you can use in namespace %q", tool, registryRef, ns)}
+	case !found:
+		return toolLoc{}, &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+			"tool %q is not provided by any MCP server you can use in namespace %q — add the MCP server that provides it first",
+			tool, ns)}
+	case loc.scope == scopePersonal && loc.owner != callerOwner:
+		return toolLoc{}, &createError{status: http.StatusForbidden, msg: fmt.Sprintf(
+			"tool %q is on a personal MCP server you do not own — only its owner can bind it", tool)}
+	}
+	return loc, nil
+}
+
+// fillBindingFromServer completes what a create left out from the tool's entry on its server:
+// registryRef, mode, and the server the entry pins.
+func fillBindingFromServer(loc toolLoc, req *MCPToolBindingCreateRequest) *createError {
+	req.RegistryRef = loc.registry
+	if req.Mode == "" {
+		switch {
+		case loc.url != "":
+			req.Mode = toolModeRemote
+		case loc.image != "":
+			req.Mode = toolModeSidecar
+		default:
+			return &createError{status: http.StatusBadRequest, msg: fmt.Sprintf(
+				"MCP server %q does not say where tool %q runs: give mode and server", loc.registry, req.ToolName)}
+		}
+	}
+	if req.Server.URL == "" && req.Server.Image == "" {
+		req.Server = ToolServerDTO{URL: loc.url, Image: loc.image}
+	}
+	return nil
+}
+
+// findRegistryTool finds tool in the named registry, or in the first registry (regs is
+// sorted by name) that provides it when registry is empty.
+func findRegistryTool(regs []toolregistry.ToolRegistry, registry, tool string) (toolLoc, bool) {
+	for i := range regs {
+		if registry != "" && regs[i].Name != registry {
+			continue
+		}
+		for _, t := range regs[i].Tools {
+			if t.Name == tool {
+				return toolLocIn(&regs[i], t), true
+			}
+		}
+	}
+	return toolLoc{}, false
 }
 
 // --- PUT /api/mcptoolbindings/{ns}/{name} -----------------------------------
@@ -506,22 +617,30 @@ func (s *Server) handleUpdateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "mode is required")
 		return
 	}
+	if _, cErr := s.usableBindingServer(r.Context(), caller, authz.VerbUpdate, ns,
+		strings.TrimSpace(req.RegistryRef), strings.TrimSpace(req.ToolName)); cErr != nil {
+		if cErr.status >= http.StatusInternalServerError {
+			s.log.Error(cErr.logged(), "update tool binding: resolving its MCP server failed", "namespace", ns, "name", name)
+		}
+		writeError(w, cErr.status, cErr.msg)
+		return
+	}
 
 	// Build a minimal apply object carrying only the identity + the desired spec.
 	// SSA co-ownership means the console owns exactly the spec fields it sends;
 	// the controller retains ownership of status (the Ready condition / propagation
 	// state). The propagation status is NEVER clobbered here.
-	apply := &agentsv1alpha1.MCPToolBinding{
+	apply := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
 		},
-		Spec: agentsv1alpha1.MCPToolBindingSpec{
+		Spec: agentsv1beta1.MCPToolBindingSpec{
 			AgentRef:    strings.TrimSpace(req.AgentRef),
 			RegistryRef: strings.TrimSpace(req.RegistryRef),
 			ToolName:    strings.TrimSpace(req.ToolName),
 			Mode:        strings.TrimSpace(req.Mode),
-			Server: agentsv1alpha1.ToolServer{
+			Server: agentsv1beta1.ToolServer{
 				Image: req.Server.Image,
 				URL:   req.Server.URL,
 			},
@@ -546,7 +665,7 @@ func (s *Server) handleUpdateMCPToolBinding(w http.ResponseWriter, r *http.Reque
 
 	// Re-read the live object so the response reflects what the API server persisted
 	// (including the current controller-observed propagation status).
-	var live agentsv1alpha1.MCPToolBinding
+	var live agentsv1beta1.MCPToolBinding
 	if err := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: name}, &live); err != nil {
 		s.log.Error(err, "re-read MCPToolBinding after apply failed", "name", name, "namespace", ns)
 		writeError(w, http.StatusInternalServerError, "MCP tool binding updated but could not be re-read")
@@ -579,7 +698,7 @@ func (s *Server) handleDeleteMCPToolBinding(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	b := &agentsv1alpha1.MCPToolBinding{
+	b := &agentsv1beta1.MCPToolBinding{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name},
 	}
 	if err := caller.Delete(r.Context(), b); err != nil {

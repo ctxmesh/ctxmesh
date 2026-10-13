@@ -231,3 +231,79 @@ func TestDiscoverMCPOAuthConfigUnreachable(t *testing.T) {
 	var de *oauthDiscoveryError
 	assert.ErrorAs(t, err, &de)
 }
+
+// TestDiscoverMCPOAuthConfigRefusesNonHTTPEndpoints: the browser is sent to the authorization
+// endpoint, so metadata naming a javascript: or data: one is refused before any client is
+// registered or anything is stored.
+func TestDiscoverMCPOAuthConfigRefusesNonHTTPEndpoints(t *testing.T) {
+	for _, tc := range []struct{ name, authorize, token string }{
+		{"javascript authorize", "javascript:alert(document.domain)", "/token"},
+		{"data authorize", "data:text/html,<script>alert(1)</script>", "/token"},
+		{"ftp token", "/authorize", "ftp://as.example/token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			abs := func(v string) string {
+				if v[0] == '/' {
+					return srv.URL + v
+				}
+				return v
+			}
+			dcrHit := false
+			mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(oauthProtectedResourceMeta{Resource: srv.URL, AuthorizationServers: []string{srv.URL}})
+			})
+			mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(oauthServerMeta{
+					Issuer:                srv.URL,
+					AuthorizationEndpoint: abs(tc.authorize),
+					TokenEndpoint:         abs(tc.token),
+					RegistrationEndpoint:  srv.URL + "/register",
+				})
+			})
+			mux.HandleFunc("/register", func(w http.ResponseWriter, _ *http.Request) {
+				dcrHit = true
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]string{"client_id": "dyn"})
+			})
+
+			_, err := discoverMCPOAuthConfig(context.Background(), srv.Client(), srv.URL+"/mcp", "", "https://console.example/api/mcp/oauth/callback")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "not an absolute http or https URL")
+			assert.False(t, dcrHit, "no client is registered for a refused server")
+		})
+	}
+}
+
+// TestOAuthConfigValidateSchemes: only absolute http and https endpoints pass. http stays allowed
+// because dev clusters and the e2e OAuth fixture serve it.
+func TestOAuthConfigValidateSchemes(t *testing.T) {
+	valid := mcpOAuthConfig{
+		AuthorizationEndpoint: "https://as.example/authorize",
+		TokenEndpoint:         "https://as.example/token",
+		ClientID:              "c",
+		RedirectURI:           "https://console.example/api/mcp/oauth/callback",
+	}
+	require.Nil(t, valid.validate())
+	plain := valid
+	plain.AuthorizationEndpoint, plain.TokenEndpoint = "http://as.local:8080/authorize", "HTTP://as.local:8080/token"
+	assert.Nil(t, plain.validate(), "http is allowed")
+
+	for _, bad := range []string{
+		"javascript:alert(1)", "javascript://as.example/%0aalert(1)", "data:text/html,x",
+		"ftp://as.example/authorize", "/authorize", "as.example/authorize", "https:///authorize",
+	} {
+		c := valid
+		c.AuthorizationEndpoint = bad
+		e := c.validate()
+		if assert.NotNil(t, e, "authorizationEndpoint %q", bad) {
+			assert.Equal(t, http.StatusBadRequest, e.status)
+			assert.Contains(t, e.msg, "auth.authorizationEndpoint")
+		}
+		c = valid
+		c.TokenEndpoint = bad
+		assert.NotNil(t, c.validate(), "tokenEndpoint %q", bad)
+	}
+}

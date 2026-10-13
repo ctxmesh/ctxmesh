@@ -226,6 +226,10 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 			want[probe{res, verb, "prod", agentsAPIGroup}] = true
 		}
 	}
+	// The read-gated resources (the Approvals and Alerts nav gates) are asked about list only.
+	for _, res := range readGatedResources {
+		want[probe{res, verbList, "prod", agentsAPIGroup}] = true
+	}
 	want[probe{"pods", "get", "prod", ""}] = true // the logs subresource probe (core group)
 	// The core-group Secret verbs are DERIVED from the flow registry, not hardcoded: connect
 	// needs create, and rotate needs update because upsertObject falls back to Update when the
@@ -233,6 +237,10 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	// about the wrong object entirely; the write that matters is the Secret.
 	for _, verb := range flowNeedsCoreSecretVerbs() {
 		want[probe{"secrets", verb, "prod", ""}] = true
+	}
+	// Tenants are cluster-scoped: probed with no namespace whatever namespace was asked for.
+	for _, verb := range tenantProbeVerbs {
+		want[probe{resourceTenants, verb, "", agentsAPIGroup}] = true
 	}
 	require.Contains(t, flowNeedsCoreSecretVerbs(), verbUpdate,
 		"rotate must contribute a core-secret update probe, or the flow evaluates an unprobed cell")
@@ -247,7 +255,8 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	var body CapabilitiesResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "prod", body.Namespace)
-	require.Len(t, body.Allowed, len(goldenResources)+2) // golden kinds + "logs" + "secrets"
+	// golden kinds + read-gated kinds + "logs" + "secrets" + "tenants"
+	require.Len(t, body.Allowed, len(goldenResources)+len(readGatedResources)+3)
 	for _, res := range goldenResources {
 		require.Contains(t, body.Allowed, res)
 		for _, verb := range goldenVerbs {
@@ -260,6 +269,43 @@ func TestCapabilitiesBatchesTheMatrix(t *testing.T) {
 	// optimistic-allow and re-opens the flow that refuses with the key already sent.
 	require.Contains(t, body.Allowed, resSecrets)
 	assert.True(t, body.Allowed[resSecrets][verbCreate], "the secrets capability should reflect the core-group SSAR")
+	assert.True(t, body.Allowed[resourceTenants][verbList], "the tenants capability should reflect the cluster-scoped SSAR")
+	for _, res := range readGatedResources {
+		assert.Equal(t, map[string]bool{verbList: true}, body.Allowed[res], "%s is probed for list alone", res)
+	}
+}
+
+// TestCapabilitiesReadGatedResourcesTrackTheCaller proves the Approvals and Alerts gates hide
+// for a caller who cannot list workflows or alertpolicies: the cell is a definite false, which
+// the console reads as a deny, and not a missing cell, which it reads as allowed.
+func TestCapabilitiesReadGatedResourcesTrackTheCaller(t *testing.T) {
+	for _, denied := range readGatedResources {
+		t.Run(denied, func(t *testing.T) {
+			c := fake.NewClientBuilder().
+				WithScheme(testScheme(t)).
+				WithInterceptorFuncs(ssarInterceptor(func(resource, _, _ string) bool {
+					return resource != denied
+				})).
+				Build()
+			s := newCallerServer(t, &fakeCallerClientFactory{client: c})
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/capabilities?namespace=prod", nil)
+			req.Header.Set("Authorization", "Bearer t")
+			s.Handler().ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusOK, rec.Code)
+			var body CapabilitiesResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			require.Contains(t, body.Allowed[denied], verbList, "a missing cell reads as allowed in the console")
+			assert.False(t, body.Allowed[denied][verbList])
+			for _, other := range readGatedResources {
+				if other != denied {
+					assert.True(t, body.Allowed[other][verbList], "%s must not follow %s's answer", other, denied)
+				}
+			}
+		})
+	}
 }
 
 // TestCapabilitiesProbesLogsGate proves the synthetic `logs` capability tracks the caller's
@@ -423,6 +469,90 @@ func TestNamespacesLists(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Len(t, body.Namespaces, 3)
 	assert.Equal(t, []NamespaceSummary{{Name: "dev"}, {Name: "prod"}, {Name: "staging"}}, body.Namespaces)
+}
+
+// TestNamespacesFlagsPlatformNamespaces: a cluster-wide caller's list includes the control plane's
+// and Kubernetes' own namespaces, sorted among their workspaces. The BFF flags those so the
+// console's first visit skips them: the install namespace, the MCP credential namespace, kube-*,
+// knative-*, cert-manager and *-system. Workspaces stay unflagged, and the flag does not reorder
+// the list.
+func TestNamespacesFlagsPlatformNamespaces(t *testing.T) {
+	names := []string{
+		"calico-system", "cert-manager", "cert-manager-tests", "ctxmesh", "ctxmesh-credentials", "default",
+		"knative-serving", "kube-node-lease", "kube-system", "team-a", "zz-system-tools",
+	}
+	objs := make([]client.Object, 0, len(names))
+	for _, n := range names {
+		objs = append(objs, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: n}})
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(objs...).Build()
+	s := NewServer(Options{
+		CallerClients:          &fakeCallerClientFactory{client: c},
+		Scheme:                 testScheme(t),
+		Auth:                   AllowAll{},
+		InstallNamespace:       "ctxmesh",
+		MCPCredentialNamespace: "ctxmesh-credentials",
+		Log:                    logr.Discard(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/namespaces", nil)
+	req.Header.Set("Authorization", "Bearer cluster-admin-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body NamespaceListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []NamespaceSummary{
+		{Name: "calico-system", Platform: true},
+		{Name: "cert-manager", Platform: true},
+		{Name: "cert-manager-tests"},
+		{Name: "ctxmesh", Platform: true},
+		{Name: "ctxmesh-credentials", Platform: true},
+		{Name: "default"},
+		{Name: "knative-serving", Platform: true},
+		{Name: "kube-node-lease", Platform: true},
+		{Name: "kube-system", Platform: true},
+		{Name: "team-a"},
+		{Name: "zz-system-tools"},
+	}, body.Namespaces)
+	assert.NotContains(t, rec.Body.String(), `"platform":false`, "the flag is omitted when false")
+}
+
+// TestNamespacesFallbackFlagsNothing: a caller who cannot list namespaces gets only the namespaces
+// they work in, and their first visit is unchanged, so no namespace is flagged there even when it
+// is the install namespace.
+func TestNamespacesFallbackFlagsNothing(t *testing.T) {
+	ctx := context.Background()
+	store := namespacetenant.NewMemStore()
+	require.NoError(t, store.SetMembers(ctx, "tenant-a", []string{"ctxmesh", "team-a"}))
+	c := fake.NewClientBuilder().
+		WithScheme(testScheme(t)).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "namespaces"}, "", assert.AnError)
+			},
+			Create: ssarInterceptor(func(_, _, _ string) bool { return true }).Create,
+		}).
+		Build()
+	s := NewServer(Options{
+		CallerClients:        &fakeCallerClientFactory{client: c},
+		Scheme:               testScheme(t),
+		Auth:                 AllowAll{},
+		InstallNamespace:     "ctxmesh",
+		NamespaceTenantStore: store,
+		Log:                  logr.Discard(),
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/namespaces", nil)
+	req.Header.Set("Authorization", "Bearer team-token")
+	s.Handler().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body NamespaceListResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, []NamespaceSummary{{Name: "ctxmesh"}, {Name: "team-a"}}, body.Namespaces)
 }
 
 // TestNamespacesEmptyNotNull proves an empty result is {"namespaces":[]} (not

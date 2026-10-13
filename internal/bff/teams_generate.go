@@ -27,7 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	sigsyaml "sigs.k8s.io/yaml"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
@@ -126,7 +125,7 @@ func (s *Server) handleGenerateTeam(w http.ResponseWriter, r *http.Request) {
 	//
 	// Read the AgentRegistry to get status.members, then resolve each member's
 	// AgentDeployment to exclude drafts. The eligible set is what we offer the model.
-	var registry agentsv1alpha1.AgentRegistry
+	var registry agentsv1beta1.AgentRegistry
 	if gErr := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: registryRef}, &registry); gErr != nil {
 		switch {
 		case apierrors.IsNotFound(gErr):
@@ -149,7 +148,7 @@ func (s *Server) handleGenerateTeam(w http.ResponseWriter, r *http.Request) {
 	eligibleNames := make([]string, 0, len(rawMembers))
 
 	for _, memberName := range rawMembers {
-		var ad agentsv1alpha1.AgentDeployment
+		var ad agentsv1beta1.AgentDeployment
 		if gErr := caller.Get(r.Context(), client.ObjectKey{Namespace: ns, Name: memberName}, &ad); gErr != nil {
 			// If we can't read it (not found / forbidden), skip it rather than hard-failing:
 			// the registry may have stale members or the caller may lack RBAC for some.

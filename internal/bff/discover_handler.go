@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/ctxmesh/ctxmesh/internal/credplane"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/embedding"
 	"github.com/ctxmesh/ctxmesh/internal/discovery"
 )
 
@@ -112,7 +112,7 @@ func (s *Server) handleDiscoverAgents(w http.ResponseWriter, r *http.Request) {
 	// proof-of-possession for this request (M142.5, ADR 0124) — so a copied token is not authority.
 	capab, capErr := s.verifyRuncapWithProof(r)
 	if capErr != nil {
-		writeError(w, http.StatusUnauthorized, capErr.Error())
+		writeRuncapError(w, capErr)
 		return
 	}
 
@@ -205,8 +205,8 @@ func (s *Server) discoveryCandidates(
 	return out, nil
 }
 
-// discoveryRerankFunc adapts the configured credplane.Reranker to the ranking package's function seam, so
-// internal/discovery stays free of a credplane dependency. nil ⇒ cosine-only ranking.
+// discoveryRerankFunc adapts the configured retrieval.Reranker to the ranking package's function seam, so
+// internal/discovery stays free of a retrieval dependency. nil ⇒ cosine-only ranking.
 func (s *Server) discoveryRerankFunc() discovery.Reranker {
 	if s.discoveryReranker == nil {
 		return nil
@@ -233,4 +233,4 @@ func clampDiscoverTopK(topK int) int {
 }
 
 // compile-time assertion that the BFF's embedder satisfies the ranking seam.
-var _ discovery.Embedder = (credplane.Embedder)(nil)
+var _ discovery.Embedder = (embedding.Embedder)(nil)

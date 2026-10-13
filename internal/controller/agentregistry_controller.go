@@ -39,7 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 const (
@@ -110,13 +110,13 @@ const (
 	langfuseNamespace = "langfuse"
 	langfusePort      = 3000
 
-	// agentEngineSystemNamespace hosts the platform backends the agent pod's
+	// The platform namespace (platformServices) hosts the backends the agent pod's
 	// launcher reaches on the model/memory/object-store/proxy paths:
 	//   - the LiteLLM model gateway (ctxmesh-gateway :4000) — MODEL_GATEWAY_URL;
 	//     breaking it breaks every LLM call.
 	//   - the Valkey state layer (ctxmesh-statelayer :6379) —
 	//     MEMORY_BACKEND_ADDR; the PROXY-LESS (pre-cutover) memory + async-dedupe path.
-	//   - the MinIO object store (ctxmesh-objectstore :9000) —
+	//   - the object store (ctxmesh-objectstore :9000) —
 	//     OBJECT_STORE_ADDR; breaking it breaks m7.6b blob offload.
 	//   - the state-layer proxy (ctxmesh-statelayer-proxy :8080) — the m53.7
 	//     cutover DEFAULT for memory + quota + async-dedup (STATELAYER_PROXY_URL); with
@@ -126,12 +126,11 @@ const (
 	//     (ADR 0045); omitting it breaks per-user long-term memory for members.
 	// All live in this one namespace, so a single namespace-scoped egress peer
 	// (restricted to these ports) covers them.
-	agentEngineSystemNamespace = "ctxmesh"
-	modelGatewayPort           = 4000
-	memoryBackendPort          = 6379
-	objectStorePort            = 9000
-	statelayerProxyPort        = 8080
-	tokenServicePort           = 8443
+	modelGatewayPort    = 4000
+	memoryBackendPort   = 6379
+	objectStorePort     = 9000
+	statelayerProxyPort = 8080
+	tokenServicePort    = 8443
 	// bffPort is the BFF's API port. A team SUPERVISOR's launcher calls the BFF's capability-authorized
 	// spawn edge (POST /api/internal/spawn) here (M64, ADR 0057); a registry member's default-deny egress
 	// must allow it or the spawn silently fails closed. Every member gets it (cheap, single port) — a
@@ -147,9 +146,9 @@ const (
 	registryDefaultHopBudget = int32(32)
 
 	// Ready-condition reasons for AgentRegistry reconciliation.
-	reasonRegistryReady   = "Ready"
-	reasonMultiRegistry   = "MultiRegistryConflict"
-	reasonInvalidSelector = "InvalidSelector"
+	reasonRegistryReady       = "Ready"
+	reasonInvalidSelector     = "InvalidSelector"
+	reasonDuplicateRegistryID = "DuplicateRegistryId"
 
 	// dlqNameSuffix names the per-registry dead-letter-queue sink
 	// (<registry>-dlq). It is a Knative Service the registry's Broker points its
@@ -217,6 +216,14 @@ type AgentRegistryReconciler struct {
 
 	client.Client
 	Scheme *runtime.Scheme
+
+	// PlatformNamespace is the namespace the platform is installed into, which members' egress policy
+	// admits. Empty means DefaultPlatformNamespace.
+	PlatformNamespace string
+
+	// AsyncBackend is the install's async backend. On JetStream the BFF's dispatcher delivers hops to
+	// eventing members, and a second policy admits it (reconcileAsyncDeliveryPolicy).
+	AsyncBackend AsyncBackend
 }
 
 // RBAC — STANDALONE marker block. Markers inside a type's doc comment are
@@ -235,7 +242,7 @@ type AgentRegistryReconciler struct {
 func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	var registry agentsv1alpha1.AgentRegistry
+	var registry agentsv1beta1.AgentRegistry
 	if err := r.Get(ctx, req.NamespacedName, &registry); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Registry deleted — its owned NetworkPolicy is GC'd by Kubernetes and
@@ -244,6 +251,20 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentRegistry: %w", err)
+	}
+
+	// ── Step 0: the registry must hold its id in this namespace ───────────────
+	if registry.DeletionTimestamp.IsZero() {
+		var inNamespace agentsv1beta1.AgentRegistryList
+		if err := r.List(ctx, &inNamespace, client.InNamespace(registry.Namespace)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("listing AgentRegistries: %w", err)
+		}
+		if holder := registryIDHolders(inNamespace.Items)[registry.Spec.RegistryId]; holder != registry.Name {
+			msg := fmt.Sprintf("registryId %q is held by registry %q in this namespace, which declared it first; "+
+				"this registry has no members until that one is deleted",
+				registry.Spec.RegistryId, holder)
+			return ctrl.Result{}, r.setStatus(ctx, &registry, nil, metav1.ConditionFalse, reasonDuplicateRegistryID, msg)
+		}
 	}
 
 	// ── Step 1: resolve membership ────────────────────────────────────────────
@@ -265,6 +286,9 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if err := r.reconcileNetworkPolicy(ctx, &registry); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling NetworkPolicy: %w", err)
 	}
+	if err := r.reconcileAsyncDeliveryPolicy(ctx, &registry, members); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling the async delivery NetworkPolicy: %w", err)
+	}
 
 	// ── Step 3: converge the async-eventing plane (DLQ sink + Broker) ─────────
 	// The per-registry Broker is the async AMP transport (specs/eventing-scaling.md
@@ -285,10 +309,9 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 // resolveMembers lists the AgentDeployments in the registry's namespace that
-// match spec.memberSelector. It filters client-side after a namespace List so
-// the same code path serves the cached manager client and the raw envtest
-// client alike (mirrors listAgentBindings — no field index, no label selector
-// pushed to the apiserver, which lets an empty selector still behave sanely).
+// belong to it (isRegistryMember). The selector is still parsed so a malformed
+// one is reported as InvalidSelector; membership itself is decided once, by the
+// AgentDeployment controller, so an agent two registries select is listed by one.
 //
 // An empty memberSelector ({}) matches nothing rather than every agent: an
 // all-selecting registry would be a footgun (it would network-isolate every
@@ -296,8 +319,8 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // matchLabels entry or matchExpressions to select members.
 func (r *AgentRegistryReconciler) resolveMembers(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
-) ([]agentsv1alpha1.AgentDeployment, error) {
+	registry *agentsv1beta1.AgentRegistry,
+) ([]agentsv1beta1.AgentDeployment, error) {
 	selector, err := metav1.LabelSelectorAsSelector(&registry.Spec.MemberSelector)
 	if err != nil {
 		return nil, fmt.Errorf("parsing memberSelector: %w", err)
@@ -307,17 +330,35 @@ func (r *AgentRegistryReconciler) resolveMembers(
 		return nil, nil
 	}
 
-	var all agentsv1alpha1.AgentDeploymentList
+	var all agentsv1beta1.AgentDeploymentList
 	if err := r.List(ctx, &all, client.InNamespace(registry.Namespace)); err != nil {
 		return nil, fmt.Errorf("listing AgentDeployments: %w", err)
 	}
-	out := make([]agentsv1alpha1.AgentDeployment, 0, len(all.Items))
+	out := make([]agentsv1beta1.AgentDeployment, 0, len(all.Items))
 	for i := range all.Items {
-		if selector.Matches(labels.Set(all.Items[i].Labels)) {
+		if isRegistryMember(&all.Items[i], registry.Name) {
 			out = append(out, all.Items[i])
 		}
 	}
 	return out, nil
+}
+
+// isRegistryMember reports whether the agent belongs to the named registry: the one the
+// AgentDeployment controller resolved for the agent's revision and recorded in
+// status.registryRef. Every reader of membership uses it rather than evaluating
+// memberSelectors, so an agent that two registries select is a member of exactly one.
+func isRegistryMember(agent *agentsv1beta1.AgentDeployment, registryName string) bool {
+	return registryName != "" && agent.Status.RegistryRef == registryName
+}
+
+// notRegistryMemberMessage explains why an agent is outside the registry a team or workflow
+// names as its trust boundary (what is "the workflow" or "the team").
+func notRegistryMemberMessage(agent *agentsv1beta1.AgentDeployment, registryName, what string) string {
+	if agent.Status.RegistryRef == "" {
+		return fmt.Sprintf("agent %q is not a member of registry %q (%s's trust boundary)", agent.Name, registryName, what)
+	}
+	return fmt.Sprintf("agent %q is a member of registry %q, not %q (%s's trust boundary)",
+		agent.Name, agent.Status.RegistryRef, registryName, what)
 }
 
 // reconcileNetworkPolicy CreateOrUpdate's the single per-registry NetworkPolicy,
@@ -357,7 +398,7 @@ func (r *AgentRegistryReconciler) resolveMembers(
 // WITHOUT re-severing the collector→Langfuse export that made M6 ship ingress-only.
 func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 ) error {
 	np := &networkingv1.NetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -460,7 +501,7 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 				},
 				{
 					// Platform backends in ctxmesh: the LiteLLM model
-					// gateway (:4000), the MinIO object store (:9000), the state-layer
+					// gateway (:4000), the object store (:9000), the state-layer
 					// PROXY (:8080, the m53.7 cutover default for memory/quota/dedup/
 					// spawn), the token-service (:8443, long-term memory OBO), and the
 					// BFF. One namespace peer, scoped to these ports.
@@ -473,7 +514,7 @@ func (r *AgentRegistryReconciler) reconcileNetworkPolicy(
 					// through the pod-authed :8080 proxy now.
 					To: []networkingv1.NetworkPolicyPeer{
 						{NamespaceSelector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{namespaceNameLabel: agentEngineSystemNamespace},
+							MatchLabels: map[string]string{namespaceNameLabel: newPlatformServices(r.PlatformNamespace).namespace},
 						}},
 					},
 					Ports: []networkingv1.NetworkPolicyPort{
@@ -541,7 +582,7 @@ func intstrPtr(port int) *intstr.IntOrString {
 // Knative's create-time revision defaults intact on re-reconcile.
 func (r *AgentRegistryReconciler) reconcileDLQSink(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 ) error {
 	dlq := &servingv1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -595,7 +636,7 @@ func (r *AgentRegistryReconciler) reconcileDLQSink(
 // addressable URL. Owned by the registry so it GCs on delete.
 func (r *AgentRegistryReconciler) reconcileBroker(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 ) error {
 	// Fail LOUDLY, never silently (ADR 0141). A registry whose Broker was quietly skipped looks
 	// reconciled while every eventing agent bound to it will never receive an event.
@@ -644,7 +685,7 @@ func (r *AgentRegistryReconciler) reconcileBroker(
 // when something actually changed (avoids resourceVersion churn / watch storms).
 func (r *AgentRegistryReconciler) setStatus(
 	ctx context.Context,
-	registry *agentsv1alpha1.AgentRegistry,
+	registry *agentsv1beta1.AgentRegistry,
 	members []string,
 	status metav1.ConditionStatus,
 	reason, message string,
@@ -672,6 +713,36 @@ func (r *AgentRegistryReconciler) setStatus(
 	return nil
 }
 
+// registryIDHolders maps each registryId declared in one namespace to the registry that holds it:
+// the oldest live registry declaring it, ties broken by name. A later registry declaring a held id
+// is refused, so "<namespace>/<registryId>" names exactly one registry. Pods, NetworkPolicies, the
+// shared scratchpad and credential boundaries are all keyed by the id, so two registries sharing
+// one would silently be one registry.
+func registryIDHolders(registries []agentsv1beta1.AgentRegistry) map[string]string {
+	holders := map[string]*agentsv1beta1.AgentRegistry{}
+	for i := range registries {
+		reg := &registries[i]
+		if !reg.DeletionTimestamp.IsZero() || reg.Spec.RegistryId == "" {
+			continue
+		}
+		if cur, ok := holders[reg.Spec.RegistryId]; !ok || declaredFirst(reg, cur) {
+			holders[reg.Spec.RegistryId] = reg
+		}
+	}
+	out := make(map[string]string, len(holders))
+	for id, reg := range holders {
+		out[id] = reg.Name
+	}
+	return out
+}
+
+func declaredFirst(a, b *agentsv1beta1.AgentRegistry) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.Name < b.Name
+}
+
 // registryMembership is the resolved registry context for a single agent, used
 // by the AgentDeployment reconciler to inject the member env + membership label
 // and to roll the revision when membership changes. The zero value (IsMember
@@ -695,10 +766,10 @@ type registryMembership struct {
 // identically).
 //
 // v1 rule: an agent is in AT MOST ONE registry. If the agent's labels match more
-// than one registry the first by name is chosen (deterministic); the extra
-// membership is a warning surfaced on that registry's status by its own
-// reconciler, not here. Terminating registries are excluded so membership drops
-// immediately on registry delete (revision roll).
+// than one registry the first by name is chosen (deterministic) and recorded in
+// status.registryRef, which every other reader uses. Terminating registries, and a
+// registry refused because an older one holds its id, are excluded, so membership
+// drops immediately on registry delete (revision roll).
 //
 // Guard defaults follow the CRD: maxDepth=8, hopBudget=32 when spec.guards is
 // nil or a field is zero. The AgentDeployment reconciler injects them as the
@@ -706,18 +777,19 @@ type registryMembership struct {
 func resolveAgentRegistry(
 	ctx context.Context,
 	c client.Client,
-	agent *agentsv1alpha1.AgentDeployment,
+	agent *agentsv1beta1.AgentDeployment,
 ) (registryMembership, error) {
-	var all agentsv1alpha1.AgentRegistryList
+	var all agentsv1beta1.AgentRegistryList
 	if err := c.List(ctx, &all, client.InNamespace(agent.Namespace)); err != nil {
 		return registryMembership{}, fmt.Errorf("listing AgentRegistries: %w", err)
 	}
 
 	agentLabels := labels.Set(agent.Labels)
-	var matches []agentsv1alpha1.AgentRegistry
+	holders := registryIDHolders(all.Items)
+	var matches []agentsv1beta1.AgentRegistry
 	for i := range all.Items {
 		reg := &all.Items[i]
-		if !reg.DeletionTimestamp.IsZero() {
+		if !reg.DeletionTimestamp.IsZero() || holders[reg.Spec.RegistryId] != reg.Name {
 			continue
 		}
 		selector, err := metav1.LabelSelectorAsSelector(&reg.Spec.MemberSelector)
@@ -774,11 +846,11 @@ func resolveAgentRegistry(
 func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	mapAgentToRegistries := handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, obj client.Object) []reconcile.Request {
-			agent, ok := obj.(*agentsv1alpha1.AgentDeployment)
+			agent, ok := obj.(*agentsv1beta1.AgentDeployment)
 			if !ok {
 				return nil
 			}
-			var list agentsv1alpha1.AgentRegistryList
+			var list agentsv1beta1.AgentRegistryList
 			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(agent.Namespace)); err != nil {
 				return nil
 			}
@@ -792,18 +864,42 @@ func (r *AgentRegistryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		},
 	)
 
+	// A registry's claim on its id depends on the other registries declaring it: deleting the
+	// holder hands the id to the next one, which must reconcile to take its members.
+	mapToSameIDRegistries := handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, obj client.Object) []reconcile.Request {
+			changed, ok := obj.(*agentsv1beta1.AgentRegistry)
+			if !ok {
+				return nil
+			}
+			var list agentsv1beta1.AgentRegistryList
+			if err := mgr.GetClient().List(ctx, &list, client.InNamespace(changed.Namespace)); err != nil {
+				return nil
+			}
+			var reqs []reconcile.Request
+			for i := range list.Items {
+				other := &list.Items[i]
+				if other.Name != changed.Name && other.Spec.RegistryId == changed.Spec.RegistryId {
+					reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(other)})
+				}
+			}
+			return reqs
+		},
+	)
+
 	// Knative Eventing is OPTIONAL (ADR 0141): owning a kind the cluster does not serve stops the
 	// manager from starting, which made eventing a hard prerequisite for everyone -- including
 	// users who never send an event.
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.AgentRegistry{}).
+		For(&agentsv1beta1.AgentRegistry{}).
 		Owns(&networkingv1.NetworkPolicy{})
 	if r.EventingAvailable {
 		b = b.Owns(&eventingv1.Broker{})
 	}
 	return b.
 		Owns(&servingv1.Service{}).
-		Watches(&agentsv1alpha1.AgentDeployment{}, mapAgentToRegistries).
+		Watches(&agentsv1beta1.AgentDeployment{}, mapAgentToRegistries).
+		Watches(&agentsv1beta1.AgentRegistry{}, mapToSameIDRegistries).
 		Named("agentregistry").
 		Complete(r)
 }

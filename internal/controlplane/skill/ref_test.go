@@ -16,7 +16,7 @@ func seeded(t *testing.T) (Store, Resolver) {
 	for _, body := range []string{"v1", "v2"} {
 		require.NoError(t, s.AddVersion(ctx, SkillVersion{
 			Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte(body)),
-			Source: SourceUpload, ObjectKey: "uploads/" + body,
+			Source: SourceUpload, ObjectKey: "skills/team-a/" + body,
 		}))
 	}
 	require.NoError(t, s.SetAlias(ctx, "team-a", "summarise", "stable", Digest([]byte("v1"))))

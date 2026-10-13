@@ -88,7 +88,7 @@ spec:
       labels:
         app.kubernetes.io/name: ctxmesh
         app.kubernetes.io/component: tenant-vwc-cleanup
-    spec:
+    spec:{{ include "ctxmesh.imagePullSecrets" (list $ 6) }}
       restartPolicy: Never
       serviceAccountName: ctxmesh-tenant-vwc-cleanup
       securityContext:

@@ -1,101 +1,114 @@
 /**
  * MemoryClient tests — parity with `sdk/python/tests/test_memory.py`.
  *
- * Exercises the :2998 wire contract (get/put/append/search) plus the long-term
- * (agent-scope, ADR 0045) paths. Tests use the mock plane from plane.ts so no
- * live launcher is required.
+ * Exercises the :2998 wire contract (get/put/append/search) plus the long-term (agent-scope, ADR
+ * 0045) paths, against the fake generated from sdk/launcher-routes.json. The fake answers with the
+ * launcher's proven goldens and records every request that breaks a route's schema; afterEach
+ * fails the test on any.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import * as capMod from "../src/_capability.js";
+import { CAPABILITY_HEADER, capabilityScope } from "../src/_capability.js";
+import { PlaneConfig, makeRunContext } from "../src/config.js";
 import { ConfigError, EndpointError } from "../src/errors.js";
 import { MemoryClient } from "../src/memory.js";
-import { startPlane, type MockPlane } from "../src/testing.js";
+import { FakeLauncher } from "./generated/fake-launcher.js";
 
-let plane: MockPlane;
+const CAP = CAPABILITY_HEADER.toLowerCase();
+
+let fake: FakeLauncher;
 
 beforeEach(async () => {
-  plane = await startPlane();
+  fake = await FakeLauncher.start();
 });
 
 afterEach(async () => {
-  await plane.stop();
-  vi.restoreAllMocks();
+  await fake.stop();
+  fake.assertConforms();
 });
+
+function config(overrides: Parameters<typeof PlaneConfig.forTest>[0] = {}): PlaneConfig {
+  return PlaneConfig.forTest({ memoryBaseUrl: fake.baseUrl, ...overrides });
+}
+
+function withCapability<T>(cap: string, fn: () => Promise<T>): Promise<T> {
+  return capabilityScope({ [CAPABILITY_HEADER]: cap }, fn);
+}
 
 // ── conversation memory (get/put/append/search) ───────────────────────────────
 
 describe("MemoryClient.get", () => {
-  it("GET /memory/{id} returns an empty list when nothing stored", async () => {
-    const client = new MemoryClient(plane.config);
-    const result = await client.get("conv-1");
-    expect(result).toEqual([]);
+  it("GET /memory/{id} returns the conversation the launcher sends", async () => {
+    const result = await new MemoryClient(config()).get("conv-1");
+    expect(result).toEqual(fake.golden("GET /memory/{conversationId}").response.body);
 
-    const req = plane.memory.requests[0];
+    const req = fake.received[0];
     expect(req?.method).toBe("GET");
     expect(req?.path).toBe("/memory/conv-1");
   });
 
-  it("returns the stored entries after put", async () => {
-    const client = new MemoryClient(plane.config);
-    await client.put([{ role: "user", content: "hello" }], "conv-2");
-    const result = await client.get("conv-2");
-    expect(result).toEqual([{ role: "user", content: "hello" }]);
+  it("returns an empty list for a conversation never written", async () => {
+    fake.useGolden("GET /memory/{conversationId}", "returns-an-empty-list-for-an-unknown-conversation");
+    expect(await new MemoryClient(config()).get("never-seen")).toEqual([]);
   });
 
   it("uses the client's default conversationId when none passed", async () => {
-    const client = new MemoryClient(plane.config, "default-conv");
-    await client.put([{ x: 1 }]);
-    const result = await client.get();
-    expect(result).toEqual([{ x: 1 }]);
+    await new MemoryClient(config(), "default-conv").get();
+    expect(fake.received[0]?.path).toBe("/memory/default-conv");
+  });
+
+  it("falls back to the run's conversationId", async () => {
+    await new MemoryClient(config({ run: makeRunContext({ conversationId: "from-env" }) })).get();
+    expect(fake.received[0]?.path).toBe("/memory/from-env");
   });
 
   it("throws ConfigError when memory is not wired", async () => {
-    const client = new MemoryClient(
-      { ...plane.config, memoryWired: false } as typeof plane.config,
-    );
+    const client = new MemoryClient(config({ memoryWired: false }));
     await expect(client.get("conv-1")).rejects.toBeInstanceOf(ConfigError);
+    expect(fake.received).toHaveLength(0);
   });
 });
 
 describe("MemoryClient.put", () => {
-  it("PUT /memory/{id} responds 204 and replaces the store", async () => {
-    const client = new MemoryClient(plane.config);
-    await client.put([{ role: "assistant", content: "hi" }], "conv-3");
+  it("PUT /memory/{id} sends the entries as one JSON array", async () => {
+    await new MemoryClient(config()).put([{ role: "assistant", content: "hi" }], "conv-3");
 
-    const req = plane.memory.requests[0];
+    const req = fake.received[0];
     expect(req?.method).toBe("PUT");
     expect(req?.path).toBe("/memory/conv-3");
     expect(req?.json()).toEqual([{ role: "assistant", content: "hi" }]);
   });
 
   it("throws ConfigError if entries is not an array", async () => {
-    const client = new MemoryClient(plane.config);
+    const client = new MemoryClient(config());
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await expect(client.put("not-an-array" as any, "conv-1")).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it("surfaces a stale If-Match refusal as EndpointError 412", async () => {
+    fake.useGolden("PUT /memory/{conversationId}", "refuses-a-stale-write");
+    const err = await new MemoryClient(config()).put([], "conv-1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EndpointError);
+    expect((err as EndpointError).status).toBe(412);
   });
 });
 
 describe("MemoryClient.append", () => {
-  it("POST /memory/{id}/append responds 204", async () => {
-    const client = new MemoryClient(plane.config);
-    await client.append({ role: "user", content: "world" }, "conv-4");
+  it("POST /memory/{id}/append sends one JSON value", async () => {
+    await new MemoryClient(config()).append({ role: "user", content: "world" }, "conv-4");
 
-    const req = plane.memory.requests[0];
+    const req = fake.received[0];
     expect(req?.method).toBe("POST");
     expect(req?.path).toBe("/memory/conv-4/append");
     expect(req?.json()).toEqual({ role: "user", content: "world" });
-    // No X-Message-Id header when none passed.
+    // No X-Message-Id header when none passed: the launcher mints one.
     expect(req?.headers["x-message-id"]).toBeUndefined();
   });
 
   it("relays X-Message-Id header when messageId is provided", async () => {
-    const client = new MemoryClient(plane.config);
-    await client.append({ x: 1 }, "conv-5", "msg-abc");
-
-    const req = plane.memory.requests[0];
-    expect(req?.headers["x-message-id"]).toBe("msg-abc");
+    await new MemoryClient(config()).append({ x: 1 }, "conv-5", "msg-abc");
+    expect(fake.received[0]?.headers["x-message-id"]).toBe("msg-abc");
   });
 });
 
@@ -103,246 +116,134 @@ describe("MemoryClient session memory forwards the run capability (M98, EU1a)", 
   it("get/put/append/search all relay X-Ctxmesh-Run-Capability when a cap is bound", async () => {
     // The launcher user-scopes per-user session memory off the forwarded run capability (ADR 0080);
     // when perUser is off it strips it, so the relay is always safe.
-    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-session-token");
-    const client = new MemoryClient(plane.config);
+    const client = new MemoryClient(config());
+    await withCapability("cap-session-token", async () => {
+      await client.get("c1");
+      await client.put([{ role: "user", content: "a" }], "c1");
+      await client.append({ role: "user", content: "b" }, "c1");
+      await client.search("b", "c1");
+    });
 
-    await client.get("c1");
-    await client.put([{ role: "user", content: "a" }], "c1");
-    await client.append({ role: "user", content: "b" }, "c1");
-    await client.search("b", "c1");
-
-    expect(plane.memory.requests.length).toBe(4);
-    for (const req of plane.memory.requests) {
-      expect(req?.headers["x-ctxmesh-run-capability"]).toBe("cap-session-token");
+    expect(fake.received).toHaveLength(4);
+    for (const req of fake.received) {
+      expect(req.headers[CAP]).toBe("cap-session-token");
     }
   });
 
   it("omits the capability header when none is bound (async/eventing turn)", async () => {
-    const client = new MemoryClient(plane.config);
-    await client.append({ role: "user", content: "x" }, "c2");
-    const req = plane.memory.requests[0];
-    expect(req?.headers["x-ctxmesh-run-capability"]).toBeUndefined();
+    await new MemoryClient(config()).append({ role: "user", content: "x" }, "c2");
+    expect(fake.received[0]?.headers[CAP]).toBeUndefined();
   });
 });
 
 describe("MemoryClient.search", () => {
-  it("GET /memory/{id}/search?q= returns matching entries", async () => {
-    const client = new MemoryClient(plane.config);
-    await client.put(
-      [{ text: "needle in a haystack" }, { text: "nothing" }],
-      "conv-6",
-    );
-    const results = await client.search("needle", "conv-6");
-    expect(results).toHaveLength(1);
-    expect((results[0] as Record<string, string>).text).toBe("needle in a haystack");
+  it("GET /memory/{id}/search?q= returns the entries the launcher matched", async () => {
+    const results = await new MemoryClient(config()).search("metric", "conv-1");
+    expect(results).toEqual(fake.golden("GET /memory/{conversationId}/search").response.body);
 
-    const req = plane.memory.requests[1]; // second request is the search
+    const req = fake.received[0];
     expect(req?.method).toBe("GET");
-    expect(req?.query.get("q")).toBe("needle");
+    expect(req?.path).toBe("/memory/conv-1/search");
+    expect(req?.query.get("q")).toBe("metric");
   });
 
-  it("empty query returns all entries", async () => {
-    const client = new MemoryClient(plane.config);
-    await client.put([{ a: 1 }, { b: 2 }], "conv-7");
-    const results = await client.search("", "conv-7");
-    expect(results).toHaveLength(2);
+  it("sends an empty q for an empty query, which the launcher treats as match-all", async () => {
+    await new MemoryClient(config()).search("", "conv-7");
+    expect(fake.received[0]?.query.get("q")).toBe("");
   });
 });
 
 describe("MemoryClient conversationId validation", () => {
   it("throws ConfigError for an empty conversationId", async () => {
-    const client = new MemoryClient(plane.config);
-    await expect(client.get("")).rejects.toBeInstanceOf(ConfigError);
+    await expect(new MemoryClient(config()).get("")).rejects.toBeInstanceOf(ConfigError);
   });
 
   it("throws ConfigError for a conversationId that is too long", async () => {
-    const client = new MemoryClient(plane.config);
-    const longId = "x".repeat(129);
-    await expect(client.get(longId)).rejects.toBeInstanceOf(ConfigError);
+    await expect(new MemoryClient(config()).get("x".repeat(129))).rejects.toBeInstanceOf(ConfigError);
   });
 
   it("throws ConfigError for a conversationId with a slash", async () => {
-    const client = new MemoryClient(plane.config);
-    await expect(client.get("bad/id")).rejects.toBeInstanceOf(ConfigError);
+    await expect(new MemoryClient(config()).get("bad/id")).rejects.toBeInstanceOf(ConfigError);
   });
 
   it("throws ConfigError for a conversationId with a colon", async () => {
-    const client = new MemoryClient(plane.config);
-    await expect(client.get("bad:id")).rejects.toBeInstanceOf(ConfigError);
+    await expect(new MemoryClient(config()).get("bad:id")).rejects.toBeInstanceOf(ConfigError);
   });
 
   it("throws ConfigError for a conversationId with whitespace", async () => {
-    const client = new MemoryClient(plane.config);
-    await expect(client.get("bad id")).rejects.toBeInstanceOf(ConfigError);
+    await expect(new MemoryClient(config()).get("bad id")).rejects.toBeInstanceOf(ConfigError);
+  });
+
+  it("refuses locally before the launcher would, so nothing is sent", async () => {
+    await new MemoryClient(config()).get("bad:id").catch(() => undefined);
+    expect(fake.received).toHaveLength(0);
   });
 });
 
 // ── long-term memory (ADR 0045) ──────────────────────────────────────────────
 
 describe("MemoryClient long-term memory", () => {
+  const longterm = () => new MemoryClient(config({ longtermWired: true }));
+
   it("throws ConfigError when longtermWired is false", async () => {
-    const client = new MemoryClient(plane.config); // forTest defaults longtermWired=false
+    const client = new MemoryClient(config()); // forTest defaults longtermWired=false
     await expect(client.remember("some content")).rejects.toBeInstanceOf(ConfigError);
     await expect(client.searchAgent("query")).rejects.toBeInstanceOf(ConfigError);
   });
 
   it("remember requires non-empty content", async () => {
-    // ConfigError is raised before the HTTP call, so no stub routes needed.
-    const longtermPlane = await startPlane();
-    try {
-      const config = {
-        ...longtermPlane.config,
-        longtermWired: true,
-        memoryBaseUrl: longtermPlane.memory.baseUrl,
-      } as typeof longtermPlane.config;
-
-      const client = new MemoryClient(config);
-      await expect(client.remember("")).rejects.toBeInstanceOf(ConfigError);
-      await expect(client.remember("   ")).rejects.toBeInstanceOf(ConfigError);
-    } finally {
-      await longtermPlane.stop();
-    }
+    await expect(longterm().remember("")).rejects.toBeInstanceOf(ConfigError);
+    await expect(longterm().remember("   ")).rejects.toBeInstanceOf(ConfigError);
+    expect(fake.received).toHaveLength(0);
   });
 
   it("remember POST /memory/agent/remember with 202", async () => {
-    const longtermPlane = await startPlane();
-    try {
-      const stub = longtermPlane.memory;
-      // normalisePath maps /memory/agent/remember → /memory/{id}/remember
-      stub["routes"].set("POST /memory/{id}/remember", () => ({ status: 202 }));
+    await longterm().remember("Important fact", { topic: "finance" });
 
-      const config = {
-        ...longtermPlane.config,
-        longtermWired: true,
-        memoryBaseUrl: longtermPlane.memory.baseUrl,
-      } as typeof longtermPlane.config;
-
-      const client = new MemoryClient(config);
-      await client.remember("Important fact", { topic: "finance" });
-
-      const req = stub.requests[0];
-      expect(req?.method).toBe("POST");
-      expect(req?.path).toBe("/memory/agent/remember");
-      expect(req?.json()).toMatchObject({ content: "Important fact", tags: { topic: "finance" } });
-    } finally {
-      await longtermPlane.stop();
-    }
+    const req = fake.received[0];
+    expect(req?.method).toBe("POST");
+    expect(req?.path).toBe("/memory/agent/remember");
+    expect(req?.json()).toEqual({ content: "Important fact", tags: { topic: "finance" } });
   });
 
-  it("searchAgent POST /memory/agent/search returns results", async () => {
-    const longtermPlane = await startPlane();
-    try {
-      const stub = longtermPlane.memory;
-      // normalisePath maps /memory/agent/search → /memory/{id}/search
-      stub["routes"].set("POST /memory/{id}/search", () => ({
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ results: [{ content: "fact", score: 0.85 }] }),
-      }));
+  it("searchAgent POST /memory/agent/search returns the launcher's results", async () => {
+    const results = await longterm().searchAgent("finance facts", 3, 0.5);
 
-      const config = {
-        ...longtermPlane.config,
-        longtermWired: true,
-        memoryBaseUrl: longtermPlane.memory.baseUrl,
-      } as typeof longtermPlane.config;
-
-      const client = new MemoryClient(config);
-      const results = await client.searchAgent("finance facts", 3, 0.5);
-
-      expect(results).toEqual([{ content: "fact", score: 0.85 }]);
-      const req = stub.requests[0];
-      expect(req?.json()).toMatchObject({ query: "finance facts", topK: 3, threshold: 0.5 });
-    } finally {
-      await longtermPlane.stop();
-    }
+    const golden = fake.golden("POST /memory/agent/search").response.body as { results: unknown[] };
+    expect(results).toEqual(golden.results);
+    expect(fake.received[0]?.json()).toEqual({ query: "finance facts", topK: 3, threshold: 0.5 });
   });
 
-  it("remember relays X-Ctxmesh-Run-Capability when currentCapability returns a value", async () => {
-    // Inject a mock capability value to verify the relay plumbing is present.
-    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-token-xyz");
-
-    const longtermPlane = await startPlane();
-    try {
-      const stub = longtermPlane.memory;
-      stub["routes"].set("POST /memory/{id}/remember", () => ({ status: 202 }));
-
-      const config = {
-        ...longtermPlane.config,
-        longtermWired: true,
-        memoryBaseUrl: longtermPlane.memory.baseUrl,
-      } as typeof longtermPlane.config;
-
-      const client = new MemoryClient(config);
-      await client.remember("fact to relay");
-
-      const req = stub.requests[0];
-      expect(req?.headers["x-ctxmesh-run-capability"]).toBe("cap-token-xyz");
-    } finally {
-      await longtermPlane.stop();
-    }
+  it("remember relays X-Ctxmesh-Run-Capability when a capability is bound", async () => {
+    await withCapability("cap-token-xyz", () => longterm().remember("fact to relay"));
+    expect(fake.received[0]?.headers[CAP]).toBe("cap-token-xyz");
   });
 
-  it("searchAgent relays X-Ctxmesh-Run-Capability when injected", async () => {
-    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-search-token");
-
-    const longtermPlane = await startPlane();
-    try {
-      const stub = longtermPlane.memory;
-      stub["routes"].set("POST /memory/{id}/search", () => ({
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ results: [] }),
-      }));
-
-      const config = {
-        ...longtermPlane.config,
-        longtermWired: true,
-        memoryBaseUrl: longtermPlane.memory.baseUrl,
-      } as typeof longtermPlane.config;
-
-      const client = new MemoryClient(config);
-      await client.searchAgent("anything");
-
-      const req = stub.requests[0];
-      expect(req?.headers["x-ctxmesh-run-capability"]).toBe("cap-search-token");
-    } finally {
-      await longtermPlane.stop();
-    }
+  it("searchAgent relays X-Ctxmesh-Run-Capability when a capability is bound", async () => {
+    await withCapability("cap-search-token", () => longterm().searchAgent("anything"));
+    expect(fake.received[0]?.headers[CAP]).toBe("cap-search-token");
   });
 
-  it("does NOT relay capability header when currentCapability returns undefined", async () => {
-    // Default stub returns undefined — no header should appear.
-    const longtermPlane = await startPlane();
-    try {
-      const stub = longtermPlane.memory;
-      stub["routes"].set("POST /memory/{id}/remember", () => ({ status: 202 }));
+  it("does NOT relay a capability header when none is bound", async () => {
+    await longterm().remember("no cap test");
+    expect(fake.received[0]?.headers[CAP]).toBeUndefined();
+  });
 
-      const config = {
-        ...longtermPlane.config,
-        longtermWired: true,
-        memoryBaseUrl: longtermPlane.memory.baseUrl,
-      } as typeof longtermPlane.config;
-
-      const client = new MemoryClient(config);
-      await client.remember("no cap test");
-
-      const req = stub.requests[0];
-      expect(req?.headers["x-ctxmesh-run-capability"]).toBeUndefined();
-    } finally {
-      await longtermPlane.stop();
-    }
+  it("surfaces a refused remember as EndpointError 400", async () => {
+    fake.useGolden("POST /memory/agent/remember", "requires-content");
+    const err = await longterm().remember("x").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EndpointError);
+    expect((err as EndpointError).status).toBe(400);
   });
 });
 
 // ── EndpointError on non-2xx ──────────────────────────────────────────────────
 
 describe("MemoryClient error handling", () => {
-  it("throws EndpointError when the stub returns a non-200 on get", async () => {
-    // Patch the route to return 500.
-    plane.memory["routes"].set("GET /memory/{id}", () => ({ status: 500, body: "oops" }));
-    const client = new MemoryClient(plane.config);
-    const err = await client.get("conv-err").catch((e: unknown) => e);
+  it("throws EndpointError when the memory backend fails", async () => {
+    fake.respond("GET /memory/{conversationId}", 502, { error: "memory backend: connection refused" });
+    const err = await new MemoryClient(config()).get("conv-err").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EndpointError);
-    expect((err as EndpointError).status).toBe(500);
+    expect((err as EndpointError).status).toBe(502);
   });
 });

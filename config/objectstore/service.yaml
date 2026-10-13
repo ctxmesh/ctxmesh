@@ -1,7 +1,8 @@
-# ClusterIP Service for the MinIO Object Store. A registry member's launcher
+# ClusterIP Service for the bundled object store (SeaweedFS). A registry member's launcher
 # reaches it at ctxmesh-objectstore.ctxmesh.svc:9000 (the S3 API
 # port) — the OBJECT_STORE_ADDR the AgentDeployment controller injects. The 9001
-# console port is exposed for dev convenience only; the launcher never uses it.
+# port is a leftover of the old MinIO console: SeaweedFS listens on nothing there and
+# the launcher never uses it.
 apiVersion: v1
 kind: Service
 metadata:

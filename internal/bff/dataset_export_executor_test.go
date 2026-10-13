@@ -418,10 +418,13 @@ func postExport(t *testing.T, s *Server, dsName string, body ExportRequest) (int
 
 // newExportEndpointServer builds a Server with a caller-client factory + the full export pipeline wired
 // (dev/in-process mode: runWorkerDispatch defaults false, so the created run executes in-process).
+// The caller may write datasets anywhere and read the team-a/chatbot agent (datasets_authz_test.go covers
+// the refusals).
 func newExportEndpointServer(t *testing.T, lf LangfuseAdapter) (*Server, dataset.Store) {
 	t.Helper()
 	sc := testScheme(t)
-	fc := fake.NewClientBuilder().WithScheme(sc).Build()
+	fc := fake.NewClientBuilder().WithScheme(sc).WithObjects(readyAgent("chatbot", "team-a", "")).
+		WithInterceptorFuncs(ssrInterceptor("exporter@example.com", nil)).Build()
 	ds := dataset.NewMemStore()
 	s := NewServer(Options{
 		CallerClients: newFakeFactory(fc),
@@ -432,6 +435,7 @@ func newExportEndpointServer(t *testing.T, lf LangfuseAdapter) (*Server, dataset
 		DatasetStore:  ds,
 		Adapters:      Adapters{Langfuse: lf},
 	})
+	s.authorizer = &recordingAuthorizer{}
 	// One run path since M143.1: an export only progresses when the pool executes it.
 	startTestRunWorkers(t, s)
 	return s, ds

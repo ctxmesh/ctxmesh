@@ -30,14 +30,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 func delegateScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
-	require.NoError(t, agentsv1alpha1.AddToScheme(s))
 	require.NoError(t, agentsv1beta1.AddToScheme(s))
 	return s
 }
@@ -66,14 +64,14 @@ func teamWithRoster(budget *agentsv1beta1.SpawnBudget) *agentsv1beta1.AgentTeam 
 }
 
 func TestDelegateEnv_FromBudget(t *testing.T) {
-	env := delegateEnv(teamWithRoster(&agentsv1beta1.SpawnBudget{MaxFanOut: 2, MaxSpawnDepth: 5, MaxTotalSpawns: 11}))
+	env := delegateEnv(teamWithRoster(&agentsv1beta1.SpawnBudget{MaxFanOut: 2, MaxSpawnDepth: 5, MaxTotalSpawns: 11}), defaultPlatform)
 	m := envToMap(env)
 
 	assert.Equal(t, "true", m["DELEGATE_ENABLED"])
 	assert.Equal(t, "2", m["SPAWN_MAX_FANOUT"])
 	assert.Equal(t, "5", m["SPAWN_MAX_DEPTH"])
 	assert.Equal(t, "11", m["SPAWN_MAX_TOTAL"])
-	assert.Equal(t, bffInternalURL, m["BFF_INTERNAL_URL"])
+	assert.Equal(t, defaultPlatform.bffInternalURL(), m["BFF_INTERNAL_URL"])
 
 	var roster []map[string]string
 	require.NoError(t, json.Unmarshal([]byte(m["DELEGATE_ROSTER"]), &roster))
@@ -84,7 +82,7 @@ func TestDelegateEnv_FromBudget(t *testing.T) {
 }
 
 func TestDelegateEnv_Defaults(t *testing.T) {
-	m := envToMap(delegateEnv(teamWithRoster(nil))) // budget omitted → CRD defaults
+	m := envToMap(delegateEnv(teamWithRoster(nil), defaultPlatform)) // budget omitted → CRD defaults
 	assert.Equal(t, "4", m["SPAWN_MAX_FANOUT"])
 	assert.Equal(t, "3", m["SPAWN_MAX_DEPTH"])
 	assert.Equal(t, "20", m["SPAWN_MAX_TOTAL"])
@@ -96,20 +94,20 @@ func TestResolveSupervisedTeam(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(delegateScheme(t)).WithObjects(team).Build()
 
 	// The supervisor resolves its team.
-	planner := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "ns1"}}
+	planner := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "ns1"}}
 	got, err := resolveSupervisedTeam(ctx, c, planner)
 	require.NoError(t, err)
 	require.NotNil(t, got, "the supervisor agent resolves the team it supervises")
 	assert.Equal(t, "research", got.Name)
 
 	// A roster MEMBER (not the supervisor) supervises nothing → nil (it doesn't get delegate_to).
-	worker := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "web-researcher", Namespace: "ns1"}}
+	worker := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "web-researcher", Namespace: "ns1"}}
 	got2, err := resolveSupervisedTeam(ctx, c, worker)
 	require.NoError(t, err)
 	assert.Nil(t, got2, "a roster member is not a supervisor")
 
 	// A plain agent in another namespace → nil.
-	other := &agentsv1alpha1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "other"}}
+	other := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "planner", Namespace: "other"}}
 	got3, err := resolveSupervisedTeam(ctx, c, other)
 	require.NoError(t, err)
 	assert.Nil(t, got3, "team resolution is namespace-scoped")

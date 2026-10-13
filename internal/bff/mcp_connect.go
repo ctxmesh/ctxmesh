@@ -50,7 +50,7 @@ import (
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // MCPConnectRequest is the POST /api/mcp/connect body. It names the origin server to
@@ -216,7 +216,7 @@ func (s *Server) materializePublishedMCP(r *http.Request, caller client.Client, 
 		tools:           tools,
 		// status approved → self-serve (immediately bindable + egress opened for the
 		// consumer's own namespace), matching a fresh self-serve register.
-		status:           agentsv1alpha1.ApprovalApproved,
+		status:           agentsv1beta1.ApprovalApproved,
 		authType:         authType,
 		visibility:       visibilityPrivate,
 		credentialSource: credentialSource,
@@ -269,7 +269,7 @@ func (s *Server) materializePublishedMCP(r *http.Request, caller client.Client, 
 //
 // It uses the same namespaceTenantStore membership resolution as handleCatalog, with the
 // same fail-closed degradation (own-ns + public only) on a nil store or a store error.
-func (s *Server) mcpConnectDiscoverable(r *http.Request, origin *agentsv1alpha1.ToolRegistry, originNS, callerNS string) bool {
+func (s *Server) mcpConnectDiscoverable(r *http.Request, origin *agentsv1beta1.ToolRegistry, originNS, callerNS string) bool {
 	// Own namespace: always discoverable (materializing your own server is trivially allowed).
 	if originNS == callerNS {
 		return true
@@ -313,7 +313,7 @@ func (s *Server) namespaceInCallerTenant(r *http.Request, callerNS, targetNS str
 // discoveredToolsFromRegistry projects an origin ToolRegistry's tool entries onto the
 // []discoveredTool shape createMCPObjects consumes, carrying each tool's name,
 // description, and inputSchema (verbatim). NON-secret — a tool catalog only.
-func discoveredToolsFromRegistry(tr *agentsv1alpha1.ToolRegistry) []discoveredTool {
+func discoveredToolsFromRegistry(tr *agentsv1beta1.ToolRegistry) []discoveredTool {
 	out := make([]discoveredTool, 0, len(tr.Spec.Tools))
 	for i := range tr.Spec.Tools {
 		t := tr.Spec.Tools[i]

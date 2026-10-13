@@ -27,7 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
 
 // managedByModelPicker marks a ModelRoute auto-created by the create-agent model
@@ -62,8 +62,9 @@ func routeNameForModel(connection, model string) string {
 //     duplicated, so N agents on the same connection+model share ONE route.
 //   - Resolves the provider TYPE + SecretBinding from the connection's connect route, so
 //     the ensured route serves the right provider and reuses the connection's binding —
-//     NO new Secret/binding, only a route. Falls back to treating the connection name AS
-//     the provider type (the default/back-compat connection, or a mock/apiBase route).
+//     NO new Secret/binding, only a route. A connection with no such route is a 400
+//     naming it, before anything is written: a route built from a guessed provider and a
+//     binding that does not exist can never answer.
 //   - Caller-scoped (ADR 0011): the gets + create run as the caller, so RBAC is enforced.
 //   - Labelled managedByModelPicker so it is NOT mistaken for a connected provider.
 func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runtime.Scheme, namespace, connection, model string) (string, *createError) {
@@ -78,11 +79,14 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 	}
 
 	// Resolve the connection's provider TYPE + SecretBinding from its connect route
-	// (ADR 0026). Fallback (NotFound): the connection name IS the provider type — the
-	// default connection, or a route predating named connections.
+	// (ADR 0026). The default connection is named after its provider type, so a client
+	// that sends only `provider` resolves the same way.
 	providerType := connection
 	bindingRef := providerRouteName(connection)
-	var connRoute agentsv1alpha1.ModelRoute
+	// A custom (OpenAI-compatible) connection's endpoint. Without it the route sent the request, and
+	// the connection's key, to the provider type's default host: api.openai.com for "openai".
+	apiBase := ""
+	var connRoute agentsv1beta1.ModelRoute
 	switch gerr := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: providerRouteName(connection)}, &connRoute); {
 	case gerr == nil:
 		if len(connRoute.Spec.Providers) > 0 {
@@ -91,10 +95,12 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 				if p.SecretBindingRef != "" {
 					bindingRef = p.SecretBindingRef
 				}
+				apiBase = p.APIBase
 			}
 		}
 	case apierrors.IsNotFound(gerr):
-		// fall through with connection-as-type
+		return "", &createError{status: 400, msg: fmt.Sprintf(
+			"connection %q does not exist in namespace %q: connect the provider first", connection, ns)}
 	case apierrors.IsForbidden(gerr):
 		return "", &createError{status: 403, msg: fmt.Sprintf("forbidden: not allowed to read connection %q", connection)}
 	default:
@@ -104,10 +110,19 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 	name := routeNameForModel(connection, model)
 
 	// Reuse if the route already exists (idempotent — the common repeat case).
-	var existing agentsv1alpha1.ModelRoute
+	var existing agentsv1beta1.ModelRoute
 	err := caller.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &existing)
 	switch {
 	case err == nil:
+		// A picker-managed route made before routes carried the connection's endpoint points at the
+		// provider type's default host. Repair it rather than reuse it.
+		if existing.Labels[labelManagedBy] == managedByModelPicker && len(existing.Spec.Providers) > 0 &&
+			existing.Spec.Providers[0].APIBase != apiBase {
+			existing.Spec.Providers[0].APIBase = apiBase
+			if uerr := caller.Update(ctx, &existing); uerr != nil {
+				return "", classifyCreateError(uerr, modelRouteKind, name)
+			}
+		}
 		return name, nil
 	case apierrors.IsNotFound(err):
 		// fall through to create
@@ -117,7 +132,7 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 		return "", &createError{status: 502, msg: fmt.Sprintf("failed to check ModelRoute %q: %v", name, err)}
 	}
 
-	route := &agentsv1alpha1.ModelRoute{
+	route := &agentsv1beta1.ModelRoute{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: ns,
@@ -126,14 +141,15 @@ func ensureRouteForModel(ctx context.Context, caller client.Client, scheme *runt
 				labelProvider:  providerType,
 			},
 		},
-		Spec: agentsv1alpha1.ModelRouteSpec{
-			Providers: []agentsv1alpha1.ProviderRef{{
+		Spec: agentsv1beta1.ModelRouteSpec{
+			Providers: []agentsv1beta1.ProviderRef{{
 				Provider:         providerType,
 				Model:            model,
 				Priority:         1,
 				SecretBindingRef: bindingRef,
+				APIBase:          apiBase,
 			}},
-			RateLimit: &agentsv1alpha1.RateLimit{TenantRPM: defaultTenantRPM},
+			RateLimit: &agentsv1beta1.RateLimit{TenantRPM: defaultTenantRPM},
 		},
 	}
 	if gerr := ensureGVK(route, scheme); gerr != nil {

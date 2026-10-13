@@ -64,17 +64,31 @@ func TestRotateFlowAsksAboutTheSecretNotTheBinding(t *testing.T) {
 
 	all := caps(map[string][]string{
 		resSecrets:        {verbUpdate},
+		resSecretBindings: {verbGet, verbUpdate},
+		resModelRoutes:    {verbGet, verbUpdate},
+	})
+	assert.True(t, evaluateFlows(all)["rotateProviderKey"])
+
+	// A custom resource is updated with its live resourceVersion, which takes a metadata read.
+	noRead := caps(map[string][]string{
+		resSecrets:        {verbUpdate},
 		resSecretBindings: {verbUpdate},
 		resModelRoutes:    {verbUpdate},
 	})
-	assert.True(t, evaluateFlows(all)["rotateProviderKey"])
+	assert.False(t, evaluateFlows(noRead)["rotateProviderKey"],
+		"updating the SecretBinding and ModelRoute reads their resourceVersion first")
+	secretRead := caps(map[string][]string{
+		resSecrets:        {verbUpdate},
+		resSecretBindings: {verbGet, verbUpdate},
+		resModelRoutes:    {verbGet, verbUpdate},
+	})
+	assert.True(t, evaluateFlows(secretRead)["rotateProviderKey"], "the Secret itself is never read (ADR 0136)")
 }
 
 // TestUnprobedCellIsNotAllowed inverts the UI's optimistic default on purpose. `can()` returns
 // true for a cell nobody probed, which is right for hiding chrome and wrong for a write: an
 // unprobed cell means "we did not ask", and offering an unverified flow is how a partial write
-// happens. The drift is not hypothetical — goldenResources omits workflows and alertpolicies
-// while nav gated on them, so those gates never gated anything.
+// happens.
 func TestUnprobedCellIsNotAllowed(t *testing.T) {
 	t.Parallel()
 
@@ -93,14 +107,10 @@ func TestUnprobedCellIsNotAllowed(t *testing.T) {
 func TestEveryFlowNeedIsProbed(t *testing.T) {
 	t.Parallel()
 
-	// What the agents-group cross-product covers.
-	agentsResources := map[string]bool{}
-	for _, r := range goldenResources {
-		agentsResources[r] = true
-	}
-	agentsVerbs := map[string]bool{}
-	for _, v := range goldenVerbs {
-		agentsVerbs[v] = true
+	// Every agents-group cell the probe asks about.
+	agentsCells := map[probeCell]bool{}
+	for _, c := range agentsGroupProbes() {
+		agentsCells[c] = true
 	}
 	// What the derived core-group Secret probes cover.
 	coreSecretVerbs := map[string]bool{}
@@ -120,11 +130,9 @@ func TestEveryFlowNeedIsProbed(t *testing.T) {
 					require.Truef(t, coreSecretVerbs[v],
 						"flow %q needs core secrets %q but the probe never asks for it", f.name, v)
 				case n.group == agentsAPIGroup:
-					require.Truef(t, agentsResources[n.resource],
-						"flow %q needs %q, which goldenResources does not probe — the cell would read as denied forever",
-						f.name, n.resource)
-					require.Truef(t, agentsVerbs[v],
-						"flow %q needs %q on %q, which goldenVerbs does not probe", f.name, v, n.resource)
+					require.Truef(t, agentsCells[probeCell{n.resource, v}],
+						"flow %q needs %q on %q, which the probe never asks — the cell would read as denied forever",
+						f.name, v, n.resource)
 				default:
 					t.Fatalf("flow %q names group %q, which no probe covers", f.name, n.group)
 				}

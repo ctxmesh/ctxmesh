@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Database, Filter, Tag } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 
@@ -34,12 +34,13 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import {
   api,
-  ApiError,
   type DatasetSummary,
   type DatasetCase,
   type DatasetCasesResponse,
   type AppendLabelRequest,
 } from "@/lib/api";
+import { useLoad } from "@/lib/use-load";
+import { useNamespace } from "@/lib/namespace";
 
 // DatasetsPage — the labeling dataset list + detail surface (m69.3, ADR 0062 Fork 5;
 // the list re-housed on the editorial system in M151 as archetype A1).
@@ -92,6 +93,17 @@ function truncate(s: string, max: number): string {
   return `${s.slice(0, max)}…`;
 }
 
+// NoWorkspaceNote is what both pages say when the caller has no workspace: datasets live in a
+// namespace, and there is none to read them from.
+function NoWorkspaceNote() {
+  return (
+    <QuietNote title="Choose a workspace to see its datasets.">
+      Datasets belong to a workspace, and none is selected. Pick or enter one in the workspace
+      switcher.
+    </QuietNote>
+  );
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // List page
 // ──────────────────────────────────────────────────────────────────────────────
@@ -101,6 +113,8 @@ type ListLoadState =
   | { kind: "ready"; items: DatasetSummary[] }
   // The store is not configured (501). NOT an error — §7.1's "not configured".
   | { kind: "unavailable" }
+  // The caller has no workspace to read datasets in, so nothing is asked.
+  | { kind: "no-workspace" }
   | { kind: "error"; message: string; forbidden: boolean };
 
 interface NextStep {
@@ -127,44 +141,30 @@ type DSView = (typeof DS_VIEWS)[number];
 
 export function DatasetsPage() {
   const navigate = useNavigate();
+  const { workingNamespace } = useNamespace();
   const [query, setQuery] = useState("");
   const [view, setView] = useState<DSView>("all");
-  const [loadState, setLoadState] = useState<ListLoadState>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
-
-  const load = useCallback(() => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
-    api
-      .listDatasets(controller.signal)
-      .then((res) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", items: res.items });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // 501 is CALM (§7.1): the store is not wired, nothing failed. It renders a
-        // QuietNote, never the error state. Unreachable while api.listDatasets
-        // absorbs the 501 into an empty list — kept because it is the correct
-        // handling and the absorbing is the thing that should change.
-        if (err instanceof ApiError && err.isNotImplemented) {
-          setLoadState({ kind: "unavailable" });
-          return;
-        }
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "request failed",
-          forbidden: err instanceof ApiError && err.isForbidden,
-        });
-      });
-  }, []);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  // With no workspace there is nothing to ask: the answer is null, read as no-workspace.
+  const fetchDatasets = useCallback(
+    (signal: AbortSignal) =>
+      workingNamespace
+        ? api.listDatasets(workingNamespace, signal).then((res) => res.items)
+        : Promise.resolve(null),
+    [workingNamespace],
+  );
+  const { state, reload: load } = useLoad(fetchDatasets);
+  const loadState = useMemo((): ListLoadState => {
+    if (state.kind === "loading") return state;
+    if (state.kind === "ready") {
+      return state.data === null ? { kind: "no-workspace" } : { kind: "ready", items: state.data };
+    }
+    // 501 is CALM (§7.1): the store is not wired, nothing failed. It renders a
+    // QuietNote, never the error state. Unreachable while api.listDatasets
+    // absorbs the 501 into an empty list — kept because it is the correct
+    // handling and the absorbing is the thing that should change.
+    if (state.status === 501) return { kind: "unavailable" };
+    return { kind: "error", message: state.message, forbidden: state.forbidden };
+  }, [state]);
 
   const all = useMemo(
     () => (loadState.kind === "ready" ? loadState.items : []),
@@ -228,7 +228,7 @@ export function DatasetsPage() {
           message: loadState.message,
           forbidden: loadState.forbidden,
           resource: "datasets",
-          onRetry: loadState.forbidden ? undefined : load,
+          onRetry: loadState.forbidden ? undefined : () => load(),
         }
       : null;
 
@@ -332,7 +332,11 @@ export function DatasetsPage() {
         lede="Human-labeled eval datasets for the improvement loop. Add a trace as a case with the “Add to dataset” action on any trace, then label the cases here."
       />
 
-      {loadState.kind === "unavailable" ? (
+      {loadState.kind === "no-workspace" ? (
+        <div data-testid="datasets-quiet-note">
+          <NoWorkspaceNote />
+        </div>
+      ) : loadState.kind === "unavailable" ? (
         // The backend cannot answer — and that is calm, not a failure (§7.1).
         <div data-testid="datasets-quiet-note">
           <QuietNote title="Datasets aren’t configured on this install.">
@@ -423,7 +427,9 @@ export function DatasetsPage() {
 
 type DetailLoadState =
   | { kind: "loading" }
-  | { kind: "ready"; data: DatasetCasesResponse }
+  // namespace is where the cases were read, so a label is written to the same dataset.
+  | { kind: "ready"; data: DatasetCasesResponse; namespace: string }
+  | { kind: "no-workspace" }
   | { kind: "error"; message: string };
 
 type LabelFormState =
@@ -450,12 +456,13 @@ function verdictVariant(value: string): "ok" | "crit" | "warn" {
 }
 
 interface LabelFormProps {
+  namespace: string;
   datasetName: string;
   caseId: string;
   onSaved: () => void;
 }
 
-function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
+function LabelForm({ namespace, datasetName, caseId, onSaved }: LabelFormProps) {
   const [value, setValue] = useState("pass");
   const [correction, setCorrection] = useState("");
   const [note, setNote] = useState("");
@@ -470,7 +477,7 @@ function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
         ...(correction.trim() ? { correction: correction.trim() } : {}),
         ...(note.trim() ? { note: note.trim() } : {}),
       };
-      await api.appendLabel(datasetName, caseId, req);
+      await api.appendLabel(namespace, datasetName, caseId, req);
       setState({ kind: "success" });
       // Reset form after success and trigger list reload.
       setValue("pass");
@@ -551,6 +558,7 @@ function LabelForm({ datasetName, caseId, onSaved }: LabelFormProps) {
 }
 
 interface CaseCardProps {
+  namespace: string;
   datasetName: string;
   c: DatasetCase;
   onLabelSaved: () => void;
@@ -558,7 +566,7 @@ interface CaseCardProps {
 
 /** One case: what was asked, what was expected, how it was judged (or that it
  *  has not been), and the form that judges it. */
-function CaseCard({ datasetName, c, onLabelSaved }: CaseCardProps) {
+function CaseCard({ namespace, datasetName, c, onLabelSaved }: CaseCardProps) {
   const label = c.latestLabel;
   const tags = Object.entries(c.tags ?? {});
 
@@ -660,6 +668,7 @@ function CaseCard({ datasetName, c, onLabelSaved }: CaseCardProps) {
         )}
 
         <LabelForm
+          namespace={namespace}
           datasetName={datasetName}
           caseId={c.id}
           onSaved={onLabelSaved}
@@ -674,36 +683,25 @@ export function DatasetDetailPage() {
   // link rather than a button that calls navigate() — and it renders in every
   // state, including the ones the old back button did not cover.
   const { name = "" } = useParams<{ name: string }>();
-  const [loadState, setLoadState] = useState<DetailLoadState>({ kind: "loading" });
-  const abortRef = useRef<AbortController | null>(null);
-
-  const load = useCallback(() => {
-    if (!name) return;
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoadState({ kind: "loading" });
-    api
-      .listDatasetCases(name, controller.signal)
-      .then((data) => {
-        if (controller.signal.aborted) return;
-        setLoadState({ kind: "ready", data });
-      })
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        // Note: api.listDatasetCases absorbs 501 (unconfigured) and returns empty cases.
-        // Only real errors (5xx, 4xx) land here.
-        setLoadState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "failed to load dataset",
-        });
-      });
-  }, [name]);
-
-  useEffect(() => {
-    load();
-    return () => abortRef.current?.abort();
-  }, [load]);
+  const { workingNamespace } = useNamespace();
+  // The namespace the cases were read in rides with them, so a label is written to the
+  // same dataset. Note: api.listDatasetCases absorbs 501 (unconfigured) into empty cases.
+  const fetchCases = useCallback(
+    (signal: AbortSignal) =>
+      workingNamespace
+        ? api
+            .listDatasetCases(workingNamespace, name, signal)
+            .then((data) => ({ data, namespace: workingNamespace }))
+        : Promise.resolve(null),
+    [name, workingNamespace],
+  );
+  const { state, reload } = useLoad(fetchCases);
+  const load = useCallback(() => reload(), [reload]);
+  const loadState = useMemo((): DetailLoadState => {
+    if (state.kind === "loading") return state;
+    if (state.kind === "error") return { kind: "error", message: state.message };
+    return state.data === null ? { kind: "no-workspace" } : { kind: "ready", ...state.data };
+  }, [state]);
 
   const crumbs = [{ label: "Datasets", to: "/datasets" }, { label: name }];
   const lede =
@@ -729,6 +727,15 @@ export function DatasetDetailPage() {
             </CardContent>
           </Card>
         </div>
+      </div>
+    );
+  }
+
+  if (loadState.kind === "no-workspace") {
+    return (
+      <div className="min-w-0 space-y-6" data-testid="dataset-detail-no-workspace">
+        <PageHeader breadcrumb={crumbs} title={name} titleMono />
+        <NoWorkspaceNote />
       </div>
     );
   }
@@ -815,6 +822,7 @@ export function DatasetDetailPage() {
               {cases.map((c) => (
                 <CaseCard
                   key={c.id}
+                  namespace={loadState.namespace}
                   datasetName={name}
                   c={c}
                   onLabelSaved={load}

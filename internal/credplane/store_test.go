@@ -18,10 +18,14 @@ package credplane_test
 
 import (
 	"context"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+
+	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 )
 
@@ -44,7 +48,7 @@ func (wr *writerResolver) StoreGrant(_ context.Context, ns, boundary, server, us
 func TestDelegationStore(t *testing.T) {
 	t.Parallel()
 	wr := &writerResolver{}
-	client := newDelegation(t, wr)
+	client := newBFFDelegation(t, wr)
 
 	exp := time.Now().Add(time.Hour).Truncate(time.Second)
 	g := credresolve.Grant{
@@ -68,10 +72,34 @@ func TestDelegationStore(t *testing.T) {
 // with a stable "unsupported" code — never a silent partial write.
 func TestDelegationStore_UnsupportedBackend(t *testing.T) {
 	t.Parallel()
-	client := newDelegation(t, &mockResolver{}) // mockResolver is not a GrantWriter
+	client := newBFFDelegation(t, &mockResolver{}) // mockResolver is not a GrantWriter
 
 	err := client.StoreGrant(context.Background(), "ns", "", "srv", "uh", credresolve.Grant{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("StoreGrant on a read-only backend = %v, want an 'unsupported' error (fail closed)", err)
+	}
+}
+
+// newBFFDelegation is newDelegation calling as the BFF, the one caller that may store a grant.
+func newBFFDelegation(t *testing.T, resolver credresolve.CredentialResolver) *credplane.Client {
+	t.Helper()
+	f := credplane.NewAuthFixture()
+	ts := httptest.NewServer(credplane.NewServer(resolver, f.Auth, logr.Discard()).Handler())
+	t.Cleanup(ts.Close)
+	return callerClient(t, ts.URL, ts.Client().Transport, f.BFFToken())
+}
+
+// TestDelegationStore_AgentRefused: an agent's sidecar cannot write a grant, even with a valid token.
+func TestDelegationStore_AgentRefused(t *testing.T) {
+	t.Parallel()
+	wr := &writerResolver{}
+	client, _ := newDelegation(t, wr)
+
+	err := client.StoreGrant(context.Background(), testNS, "", "srv", "uh", credresolve.Grant{})
+	if err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("StoreGrant from an agent's sidecar = %v, want a 403", err)
+	}
+	if wr.storeCalls != 0 {
+		t.Fatalf("the refused store reached the backend %d times", wr.storeCalls)
 	}
 }

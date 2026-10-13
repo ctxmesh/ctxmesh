@@ -33,7 +33,7 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/promptversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
@@ -62,9 +62,20 @@ type createError struct {
 	status int
 	// msg is the client-safe message.
 	msg string
+	// cause is the underlying failure behind a server fault: logged, never sent to the client.
+	cause error
 }
 
 func (e *createError) Error() string { return e.msg }
+
+// logged is what a handler logs for this error: the client message and, when there is one,
+// the cause the client is not shown.
+func (e *createError) logged() error {
+	if e.cause == nil {
+		return e
+	}
+	return fmt.Errorf("%s: %w", e.msg, e.cause)
+}
 
 // createdObject is the flat identity DTO returned for one created CRD object.
 type createdObject struct {
@@ -162,18 +173,11 @@ func createAgentFromYAML(
 		return created, &createError{status: 500, msg: fmt.Sprintf("decoding expanded manifests: %v", err)}
 	}
 
-	// Point each generated MCPToolBinding at the ToolRegistry its tool ACTUALLY lives
-	// in (m25 S18): expand hardcodes a single default registry ("default-tools"), but
-	// BYO-MCP tools live in per-server registries (e.g. "scalekit-mcp-server"), so the
-	// default reference is RegistryNotFound and the binding never goes Ready. Best-
-	// effort: a tool not found in any registry keeps expand's default.
-	idx := toolRegistryIndex(ctx, regStore, ns)
-	rewriteBindingRegistries(objs, idx)
-	// Bind-time owner guard (ADR 0029 edge case): a personal MCP server may be bound to an
-	// agent ONLY by its owner — so a non-owner never gets a mid-run consent CTA for a server
-	// they cannot even see. Refused before any object is created.
-	if gErr := checkBindingOwnership(objs, idx, callerOwner); gErr != nil {
-		return created, gErr
+	// Point each generated MCPToolBinding at the server its tool actually lives on, and
+	// refuse a tool no server the caller may use provides — before any object is created.
+	allowUnresolved := len(opts) > 0 && opts[0].allowUnresolvedTools
+	if bErr := bindAgentTools(ctx, regStore, objs, ns, callerOwner, allowUnresolved); bErr != nil {
+		return created, bErr
 	}
 
 	// Stamp the source-spec annotation on the primary AgentDeployment only, before
@@ -222,7 +226,7 @@ func createAgentFromYAML(
 			// agent; anything else — the primary AgentDeployment, or a binding targeting a
 			// DIFFERENT agent — is a real conflict and still fails.
 			if apierrors.IsAlreadyExists(cErr) && agentName != "" {
-				if _, isBinding := d.obj.(*agentsv1alpha1.MCPToolBinding); isBinding {
+				if _, isBinding := d.obj.(*agentsv1beta1.MCPToolBinding); isBinding {
 					ref, rErr := bindingAgentRef(d.obj.GetName())
 					if rErr != nil {
 						return created, rErr
@@ -256,9 +260,9 @@ func createAgentFromYAML(
 // serving the CREATE-time prompt (a wrong prompt, silently), so a bad-ref edit is rejected atomically
 // BEFORE the SSA apply — nothing changes, no stale annotation.
 func stampResolvedPrompt(ctx context.Context, promptStore promptversion.Store, objs []decodedObject, ns string) *createError {
-	var agent *agentsv1alpha1.AgentDeployment
+	var agent *agentsv1beta1.AgentDeployment
 	for _, d := range objs {
-		if o, ok := d.obj.(*agentsv1alpha1.AgentDeployment); ok {
+		if o, ok := d.obj.(*agentsv1beta1.AgentDeployment); ok {
 			agent = o
 		}
 	}
@@ -386,7 +390,7 @@ func createPromptVersionInStore(ctx context.Context, promptStore promptversion.S
 // MCPToolBinding of the SAME agent for idempotent create (m26.6).
 func agentDeploymentName(objs []decodedObject) string {
 	for _, d := range objs {
-		if ad, ok := d.obj.(*agentsv1alpha1.AgentDeployment); ok {
+		if ad, ok := d.obj.(*agentsv1beta1.AgentDeployment); ok {
 			return ad.Name
 		}
 	}
@@ -408,16 +412,89 @@ type toolLoc struct {
 	owner string
 }
 
+// errNoToolRegistryStore: the BFF has no control-plane store, so no MCP server can be
+// registered in it or resolved from it (ToolRegistry is Postgres-only, ADR 0044).
+var errNoToolRegistryStore = errors.New("no tool registry store")
+
+// bindAgentTools points each generated MCPToolBinding at the registry its tool lives in,
+// among the servers the caller may use, and enforces the bind-time owner guard.
+//
+// Expand points every managed tool at its default registry ("default-tools"), which
+// nothing provisions: a tool left there is RegistryNotFound and the agent runs without
+// it, silently. So a tool no usable server provides is refused with 400 naming it, and a
+// store that cannot be read refuses rather than guessing. allowUnresolved keeps the old
+// best-effort behaviour for the fork, whose ref-closure pass runs after the create and
+// either materializes the tool's server or flags the agent as needing rebinding.
+func bindAgentTools(ctx context.Context, regStore toolregistry.Store, objs []decodedObject, ns, callerOwner string, allowUnresolved bool) *createError {
+	if !slices.ContainsFunc(objs, isToolBinding) {
+		return nil
+	}
+	idx, err := toolRegistryIndex(ctx, regStore, ns, callerOwner)
+	switch {
+	case err == nil:
+	case allowUnresolved:
+		return nil
+	case errors.Is(err, errNoToolRegistryStore):
+		return &createError{status: 501, msg: msgToolRegistryStoreRequired}
+	default:
+		return &createError{status: 500, msg: fmt.Sprintf("failed to read the MCP servers in namespace %q", ns), cause: err}
+	}
+	if !allowUnresolved {
+		for _, d := range objs {
+			b, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
+			if !ok {
+				continue
+			}
+			if _, found := idx[b.Spec.ToolName]; !found {
+				return &createError{status: 400, msg: fmt.Sprintf(
+					"tool %q is not provided by any MCP server you can use in namespace %q — add the MCP server that provides it first",
+					b.Spec.ToolName, ns)}
+			}
+		}
+	}
+	rewriteBindingRegistries(objs, idx)
+	// Bind-time owner guard (ADR 0029 edge case): a personal MCP server may be bound to an
+	// agent ONLY by its owner — so a non-owner never gets a mid-run consent CTA for a server
+	// they cannot even see.
+	return checkBindingOwnership(objs, idx, callerOwner)
+}
+
+func isToolBinding(d decodedObject) bool {
+	_, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
+	return ok
+}
+
 // toolRegistryIndex lists the namespace's ToolRegistries from the Postgres store
 // (ToolRegistry is retired as a CRD, ADR 0044) and maps each tool NAME to its
 // registry + pinned URL/image, so a generated MCPToolBinding can reference the
-// registry the tool actually lives in AND the pin it must use. Registries are
-// sorted by name so a tool present in more than one resolves deterministically
-// (first wins). A nil store or a list error → nil map (the caller keeps expand's
-// default rather than failing the create).
-func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string) map[string]toolLoc {
+// registry the tool actually lives in AND the pin it must use. Only registries the
+// caller (callerOwner, their userGrantHash) may use are indexed: another user's
+// private server is skipped, so it can neither be bound nor shadow a server the
+// caller can use. Registries are sorted by name so a tool present in more than one
+// resolves deterministically (first wins). A nil store is errNoToolRegistryStore; a
+// list error is returned as is.
+func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns, callerOwner string) (map[string]toolLoc, error) {
+	regs, err := usableToolRegistries(ctx, store, ns, callerOwner)
+	if err != nil {
+		return nil, err
+	}
+	idx := make(map[string]toolLoc)
+	for i := range regs {
+		for _, t := range regs[i].Tools {
+			if _, seen := idx[t.Name]; !seen {
+				idx[t.Name] = toolLocIn(&regs[i], t)
+			}
+		}
+	}
+	return idx, nil
+}
+
+// usableToolRegistries lists the namespace's ToolRegistries the caller (callerOwner, their
+// userGrantHash) may use, sorted by name. A nil store is errNoToolRegistryStore; a list error
+// is returned wrapped.
+func usableToolRegistries(ctx context.Context, store toolregistry.Store, ns, callerOwner string) ([]toolregistry.ToolRegistry, error) {
 	if store == nil {
-		return nil
+		return nil, errNoToolRegistryStore
 	}
 	var regs []toolregistry.ToolRegistry
 	token := ""
@@ -426,7 +503,7 @@ func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string)
 			Namespace: ns, PageSize: controlplane.MaxPageSize, PageToken: token,
 		})
 		if err != nil {
-			return nil
+			return nil, fmt.Errorf("listing tool registries: %w", err)
 		}
 		regs = append(regs, page.Items...)
 		if page.NextPage == "" {
@@ -434,21 +511,24 @@ func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string)
 		}
 		token = page.NextPage
 	}
-	slices.SortFunc(regs, func(a, b toolregistry.ToolRegistry) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	idx := make(map[string]toolLoc)
+	usable := regs[:0]
 	for i := range regs {
-		for _, t := range regs[i].Tools {
-			if _, seen := idx[t.Name]; !seen {
-				idx[t.Name] = toolLoc{
-					registry: regs[i].Name, url: t.URL, image: t.Image,
-					scope: regs[i].Labels[labelMCPScope], owner: regs[i].Labels[labelMCPOwner],
-				}
-			}
+		if mcpScopeVisibleTo(storeToolRegistryToCRD(&regs[i]), callerOwner) {
+			usable = append(usable, regs[i])
 		}
 	}
-	return idx
+	slices.SortFunc(usable, func(a, b toolregistry.ToolRegistry) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return usable, nil
+}
+
+// toolLocIn is where tool t of registry reg lives.
+func toolLocIn(reg *toolregistry.ToolRegistry, t toolregistry.ToolEntry) toolLoc {
+	return toolLoc{
+		registry: reg.Name, url: t.URL, image: t.Image,
+		scope: reg.Labels[labelMCPScope], owner: reg.Labels[labelMCPOwner],
+	}
 }
 
 // checkBindingOwnership enforces the bind-time owner guard (ADR 0029 edge case): a binding
@@ -458,7 +538,7 @@ func toolRegistryIndex(ctx context.Context, store toolregistry.Store, ns string)
 // fail-closed). Public / org / grandfathered (no scope) servers are unrestricted.
 func checkBindingOwnership(objs []decodedObject, idx map[string]toolLoc, callerOwner string) *createError {
 	for _, d := range objs {
-		binding, ok := d.obj.(*agentsv1alpha1.MCPToolBinding)
+		binding, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
 		if !ok {
 			continue
 		}
@@ -479,14 +559,14 @@ func checkBindingOwnership(objs []decodedObject, idx map[string]toolLoc, callerO
 // rewriteBindingRegistries points each generated MCPToolBinding at the registry its
 // tool actually lives in AND the URL/image that registry pins (m25 S18), overriding
 // expand's hardcoded default + placeholder server so the binding can go Ready. A tool
-// absent from every registry keeps expand's defaults (an honest "no such tool" rather
-// than a systemic mis-reference).
+// absent from the index keeps expand's defaults; only the fork gets that far with one
+// (bindAgentTools refuses it otherwise).
 func rewriteBindingRegistries(objs []decodedObject, idx map[string]toolLoc) {
 	if len(idx) == 0 {
 		return
 	}
 	for _, d := range objs {
-		binding, ok := d.obj.(*agentsv1alpha1.MCPToolBinding)
+		binding, ok := d.obj.(*agentsv1beta1.MCPToolBinding)
 		if !ok {
 			continue
 		}

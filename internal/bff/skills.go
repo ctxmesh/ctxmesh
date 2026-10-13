@@ -18,9 +18,11 @@ package bff
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/ctxmesh/ctxmesh/internal/controlplane"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 )
@@ -36,6 +38,10 @@ const resourceSkills = "skills"
 // contract the prompt store and the KB upload endpoint use.
 const msgSkillStoreRequired = "skills require the control-plane database; this install has none"
 
+// maxSkillRequestBytes bounds a skill or skill-version request body. Every field in one is bounded
+// far below this (ValidateSkill, ValidateVersion); the cap keeps an oversized body from being decoded.
+const maxSkillRequestBytes = 16 << 10
+
 // handleListSkills serves GET /api/skills?namespace=<ns>.
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 	caller, ok := s.callerClient(w, r)
@@ -47,11 +53,15 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ns := strings.TrimSpace(r.URL.Query().Get("namespace"))
-	if err := s.authorizeStore(r.Context(), caller, authz.VerbList, resourceSkills, ns, ""); err != nil {
-		s.writeAuthzError(w, err, "list skills")
+	opts := controlplane.ListOptions{Namespace: ns}
+	if !s.authorizeStoreList(w, r, caller, resourceSkills, &opts, "list skills") {
 		return
 	}
-	items, err := s.skillStore.ListSkills(r.Context(), ns)
+	namespaces := opts.Namespaces // nil: the caller may list skills cluster-wide
+	if ns != "" {
+		namespaces = []string{ns}
+	}
+	items, err := s.skillStore.ListSkills(r.Context(), namespaces)
 	if err != nil {
 		s.log.Error(err, "list skills failed")
 		writeError(w, http.StatusInternalServerError, "failed to list skills")
@@ -125,8 +135,7 @@ func (s *Server) handleUpsertSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpsertSkillRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeSkillRequest(w, r, &req) {
 		return
 	}
 	ns := strings.TrimSpace(req.Namespace)
@@ -163,8 +172,7 @@ func (s *Server) handleAddSkillVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
 	var req AddSkillVersionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeSkillRequest(w, r, &req) {
 		return
 	}
 	// A version is a WRITE to the skill, so it authorizes on update rather than create: the
@@ -220,4 +228,20 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// decodeSkillRequest decodes a bounded JSON body into v, answering 413 for one over
+// maxSkillRequestBytes and 400 for one that is not JSON. It reports whether v was decoded.
+func decodeSkillRequest(w http.ResponseWriter, r *http.Request, v any) bool {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSkillRequestBytes)).Decode(v)
+	if err == nil {
+		return true
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body is over the 16 KiB a skill request may hold")
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "invalid JSON body")
+	return false
 }

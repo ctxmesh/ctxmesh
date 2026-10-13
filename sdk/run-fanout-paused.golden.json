@@ -1,0 +1,46 @@
+[
+  {
+    "agent": "researcher",
+    "createdAt": "2026-10-12T09:00:00Z",
+    "id": "sub-8c82f73270ddc69ca8e21f4566cfef00",
+    "input": {
+      "input": "researcher task"
+    },
+    "namespace": "prod",
+    "parentRunId": "run-fanout",
+    "requiresAction": {
+      "kind": "consent_required",
+      "message": "connect your account to continue",
+      "servers": [
+        "search-mcp"
+      ]
+    },
+    "rootRunId": "run-fanout",
+    "spawnDepth": 1,
+    "status": "requires_action",
+    "traceId": "trace-supervisor",
+    "updatedAt": "2026-10-12T09:00:01Z"
+  },
+  {
+    "agent": "mailer",
+    "createdAt": "2026-10-12T09:00:00Z",
+    "id": "sub-536cc662486fcdd28c502ec2eb981ce3",
+    "input": {
+      "input": "mailer task"
+    },
+    "namespace": "prod",
+    "parentRunId": "run-fanout",
+    "requiresAction": {
+      "kind": "consent_required",
+      "message": "connect your account to continue",
+      "servers": [
+        "mail-mcp"
+      ]
+    },
+    "rootRunId": "run-fanout",
+    "spawnDepth": 1,
+    "status": "requires_action",
+    "traceId": "trace-supervisor",
+    "updatedAt": "2026-10-12T09:00:01Z"
+  }
+]

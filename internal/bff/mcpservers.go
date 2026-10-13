@@ -35,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	agentsv1alpha1 "github.com/ctxmesh/ctxmesh/api/v1alpha1"
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/authz"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
 )
@@ -148,7 +148,8 @@ const networkPolicyMCPSuffix = "-mcp-egress"
 const networkPolicyKind = "NetworkPolicy"
 
 // handleRegisterMCPServer serves POST /api/mcpservers (ADR 0016). It:
-//  1. reads + validates the request body;
+//  1. reads + validates the request body, then authorizes the caller (no outbound
+//     request is made for a caller who may not register);
 //  2. PROBES the MCP server (initialize + tools/list) → the tools with their
 //     inputSchema. A bad URL / non-MCP endpoint → an honest 4xx, never a 500;
 //  3. if apiKey given → creates a Secret + SecretBinding (the key server-side
@@ -183,6 +184,22 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	}
 	name := mcpServerName(req.Name)
 
+	// Authorize BEFORE any outbound request. The probe below and the OAuth discovery in
+	// beginMCPOAuthRegistration both contact the URL in the body; doing that for a caller
+	// who may not register a server made the BFF an SSRF and a reachability oracle for any
+	// bearer string. The check is the store write's own (toolregistries create).
+	if s.toolRegistryStore == nil {
+		writeError(w, http.StatusNotImplemented, msgToolRegistryStoreRequired)
+		return
+	}
+	if cErr := s.authzRefusal(
+		s.authorizeStore(r.Context(), caller, authz.VerbCreate, resourceToolRegistries, ns, ""),
+		"register an MCP server",
+	); cErr != nil {
+		writeError(w, cErr.status, cErr.msg)
+		return
+	}
+
 	// OAuth 2.1 tier (m17.2, ADR 0016): when auth.type == "oauth", registration does
 	// NOT probe/create now — the server's tools are behind a token the user must
 	// consent to. Instead the BFF starts an Auth-Code + PKCE flow SERVER-SIDE and
@@ -190,7 +207,25 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	// consent → GET /api/mcp/oauth/callback completes the registration (token
 	// exchange + Secret + probe). No token/verifier is ever in this branch's output.
 	if req.Auth != nil && strings.EqualFold(strings.TrimSpace(req.Auth.Type), oauthAuthType) {
-		s.beginMCPOAuthRegistration(w, r, req, name, ns)
+		s.beginMCPOAuthRegistration(w, r, caller, req, name, ns)
+		return
+	}
+
+	// A keyed server is private to its registrant (ADR 0067 §2), so the registrant's identity
+	// is its owner, resolved before anything is contacted: a private server stored without an
+	// owner is visible to nobody, the registrant included. An open server is team-visible;
+	// its owner is stamped when the identity resolves and is not required.
+	keyed := strings.TrimSpace(req.APIKey) != ""
+	owner := ""
+	if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
+		owner = userGrantHash(username)
+	} else if keyed {
+		if status, msg, isRBAC := classifyReadError(uErr); isRBAC {
+			writeError(w, status, msg)
+			return
+		}
+		s.log.Error(uErr, "resolve caller identity for MCP registration failed")
+		writeError(w, http.StatusInternalServerError, "failed to resolve caller identity: a server with a key belongs to whoever registers it")
 		return
 	}
 
@@ -217,34 +252,11 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 	//   no-auth server  → visibility=team, credentialSource=none, scope=public (legacy inverse)
 	//   keyed/OAuth server → visibility=private, credentialSource=byo-oauth, scope=personal (legacy inverse)
 	// Both axes are validated via validateMCPCells before the create.
-	var (
-		scope            string
-		visibility       string
-		credentialSource string
-		owner            string
-	)
-	if strings.TrimSpace(req.APIKey) == "" {
-		// No-auth / open server: team-visible, no credential.
-		scope = scopePublic
-		visibility = visibilityTeam
-		credentialSource = credSourceNone
-		// Stamp owner when the identity is resolvable (harmless; enables "my servers" UX).
-		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
-			owner = userGrantHash(username)
-		}
-	} else {
-		// Keyed server: private to the registrant.
-		scope = scopePersonal
-		visibility = visibilityPrivate
-		credentialSource = credSourceByoOAuth
-		if username, uErr := callerUsername(r.Context(), caller); uErr == nil {
-			owner = userGrantHash(username)
-		} else {
-			// If the identity can't be resolved (never in prod — the same caller client
-			// would then also fail the object create below), register without an owner label
-			// rather than failing the whole flow.
-			s.log.Error(uErr, "mcp register: could not resolve owner identity; server registered without an owner label")
-		}
+	// No-auth / open server: team-visible, no credential. Keyed server: private to the
+	// registrant (owner resolved above).
+	scope, visibility, credentialSource := scopePublic, visibilityTeam, credSourceNone
+	if keyed {
+		scope, visibility, credentialSource = scopePersonal, visibilityPrivate, credSourceByoOAuth
 	}
 	created, cErr := s.createMCPObjects(r.Context(), caller, mcpCreateSpec{
 		name:             name,
@@ -287,9 +299,9 @@ func (s *Server) handleRegisterMCPServer(w http.ResponseWriter, r *http.Request)
 // the state), else ApprovalApproved (self-serve default — immediately bindable).
 func (s *Server) mcpApprovalStatus() string {
 	if s.mcpRequireApproval {
-		return agentsv1alpha1.ApprovalPending
+		return agentsv1beta1.ApprovalPending
 	}
-	return agentsv1alpha1.ApprovalApproved
+	return agentsv1beta1.ApprovalApproved
 }
 
 // parseRegisterMCPRequest decodes + validates the register body. It returns a
@@ -446,13 +458,13 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 	// Build the ToolRegistry entries, storing each tool's inputSchema verbatim so
 	// m14.6b can plumb it to the loop. Names are DNS-1123-sanitized by the CRD's
 	// own MaxLength; here we only trim.
-	entries := make([]agentsv1alpha1.ToolEntry, 0, len(spec.tools))
+	entries := make([]agentsv1beta1.ToolEntry, 0, len(spec.tools))
 	for _, t := range spec.tools {
-		entry := agentsv1alpha1.ToolEntry{
+		entry := agentsv1beta1.ToolEntry{
 			Name:           truncateToolName(t.Name),
 			URL:            spec.url,
 			Description:    t.Description,
-			Source:         agentsv1alpha1.SourceUserAdded,
+			Source:         agentsv1beta1.SourceUserAdded,
 			ApprovalStatus: spec.status,
 		}
 		if len(t.InputSchema) > 0 {
@@ -464,14 +476,14 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 
 	// registry is the server catalog — a plain projection shape (ToolRegistry is
 	// retired to Postgres, ADR 0044); it is written to the store, not the K8s API.
-	registry := &agentsv1alpha1.ToolRegistry{
+	registry := &agentsv1beta1.ToolRegistry{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        spec.name,
 			Namespace:   spec.namespace,
 			Labels:      labels,
 			Annotations: annotations,
 		},
-		Spec: agentsv1alpha1.ToolRegistrySpec{Tools: entries},
+		Spec: agentsv1beta1.ToolRegistrySpec{Tools: entries},
 	}
 
 	// The bundle is created in dependency order: the credential Secret +
@@ -506,16 +518,16 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 			Type: corev1.SecretTypeOpaque,
 			Data: secretData,
 		}
-		binding := &agentsv1alpha1.SecretBinding{
+		binding := &agentsv1beta1.SecretBinding{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        spec.name,
 				Namespace:   spec.namespace,
 				Labels:      labels,
 				Annotations: annotations,
 			},
-			Spec: agentsv1alpha1.SecretBindingSpec{
+			Spec: agentsv1beta1.SecretBindingSpec{
 				Backend:   secretBackendKubernetes,
-				SecretRef: agentsv1alpha1.SecretKeyRef{Name: spec.name, Key: bindingKey},
+				SecretRef: agentsv1beta1.SecretKeyRef{Name: spec.name, Key: bindingKey},
 			},
 		}
 		beforeTR = append(beforeTR, kindObj{secretKind, secret}, kindObj{secretBindingKind, binding})
@@ -528,7 +540,7 @@ func (s *Server) createMCPObjects(ctx context.Context, caller client.Client, spe
 	// step opens it when an operator approves (that is the seam; the queue itself is
 	// M17). Opening egress for a pending server would be a hole before any approval,
 	// so we gate strictly on the status.
-	if spec.status == agentsv1alpha1.ApprovalApproved {
+	if spec.status == agentsv1beta1.ApprovalApproved {
 		np, npErr := mcpEgressNetworkPolicy(spec.name, spec.namespace, spec.url, labels)
 		if npErr != nil {
 			return nil, npErr
@@ -756,7 +768,7 @@ func toolCatalogEntriesFromDiscovered(registry, namespace string, tools []discov
 			Namespace:      namespace,
 			Description:    t.Description,
 			InputSchema:    schema,
-			Source:         agentsv1alpha1.SourceUserAdded,
+			Source:         agentsv1beta1.SourceUserAdded,
 			ApprovalStatus: status,
 		})
 	}
@@ -819,7 +831,7 @@ func (s *Server) handleListMCPServers(w http.ResponseWriter, r *http.Request) {
 //
 // The mapping is a one-way translation; the returned values are never written
 // back to the store here (callers that write must stamp all three labels).
-func mcpVisibility(tr *agentsv1alpha1.ToolRegistry) (visibility, credentialSource string) {
+func mcpVisibility(tr *agentsv1beta1.ToolRegistry) (visibility, credentialSource string) {
 	if v := tr.Labels[labelMCPVisibility]; v != "" {
 		// New labels present — read them directly.
 		cs := tr.Labels[labelMCPCredentialSource]
@@ -869,7 +881,7 @@ func validateMCPCells(visibility, credentialSource string) *createError {
 // visibility axis (dual-read via mcpVisibility): only a private server is owner-gated;
 // team/org/public are visible to all callers. A server with NO labels is grandfathered
 // as team (visible to all) — behavior-preserving for pre-m25/pre-m73 servers (R7).
-func mcpScopeVisibleTo(tr *agentsv1alpha1.ToolRegistry, callerOwner string) bool {
+func mcpScopeVisibleTo(tr *agentsv1beta1.ToolRegistry, callerOwner string) bool {
 	vis, _ := mcpVisibility(tr)
 	if vis == visibilityPrivate {
 		return callerOwner != "" && tr.Labels[labelMCPOwner] == callerOwner
@@ -881,10 +893,10 @@ func mcpScopeVisibleTo(tr *agentsv1alpha1.ToolRegistry, callerOwner string) bool
 // flat MCPServerSummary. It carries only NON-secret material: the server/registry
 // name, the URL, the tool count, the trust status, and the Secret NAME (a
 // reference). No key is ever touched here.
-func mcpServerSummaryFromRegistry(tr *agentsv1alpha1.ToolRegistry) MCPServerSummary {
+func mcpServerSummaryFromRegistry(tr *agentsv1beta1.ToolRegistry) MCPServerSummary {
 	status := tr.Annotations[annMCPStatus]
 	if status == "" {
-		status = agentsv1alpha1.ApprovalApproved
+		status = agentsv1beta1.ApprovalApproved
 	}
 	// Scope for display: the label value, grandfathering an absent label to "org"
 	// (ADR 0029 — a pre-scope server is visible org-wide). Visibility only; a resolve
@@ -965,17 +977,17 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 // pre-M14 operator registries render correctly). No secret material is present —
 // the registry itself carries none; the key lives in a Secret this read never
 // opens.
-func toolCatalogEntriesFromRegistry(tr *agentsv1alpha1.ToolRegistry) []ToolCatalogEntry {
+func toolCatalogEntriesFromRegistry(tr *agentsv1beta1.ToolRegistry) []ToolCatalogEntry {
 	out := make([]ToolCatalogEntry, 0, len(tr.Spec.Tools))
 	for i := range tr.Spec.Tools {
 		e := &tr.Spec.Tools[i]
 		source := e.Source
 		if source == "" {
-			source = agentsv1alpha1.SourceCurated
+			source = agentsv1beta1.SourceCurated
 		}
 		status := e.ApprovalStatus
 		if status == "" {
-			status = agentsv1alpha1.ApprovalApproved
+			status = agentsv1beta1.ApprovalApproved
 		}
 		var schema json.RawMessage
 		if e.InputSchema != nil && len(e.InputSchema.Raw) > 0 {
