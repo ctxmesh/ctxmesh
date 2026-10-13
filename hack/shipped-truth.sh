@@ -39,7 +39,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The number of rows the table holds. Raise it with the rows; lowering it is a visible edit to a claim.
-FLOOR=165
+FLOOR=173
 
 SITE="${CTXMESH_SITE:-../ctxmesh.github.io}"
 SITE_OK=0
@@ -277,7 +277,7 @@ row m161 test internal/controller/skill_revision_test.go TestAnAliasMoveRollsARe
 row m161 test internal/controller/skill_revision_test.go TestSkillOrderIsPartOfTheIdentity "skill order is part of the revision identity"
 row m161 test internal/controller/skill_gate_test.go TestEditingSkillRefsReachesTheDeployGate "a skill edit reaches the eval deploy gate"
 row m161 test internal/controller/skill_gate_test.go TestAnAliasMoveDoesNotChangeTheSpecHash "an alias move is not a spec change"
-row m161 test internal/controller/skill_inject_test.go TestOnlyRefsReachThePod "only refs reach the pod, never bodies"
+row m161 test internal/controller/skill_inject_test.go TestOnlyRefsReachThePod "only refs and descriptions ride in env; a body is a mounted file"
 row m161 test internal/controller/skill_inject_test.go TestDescriptionsRideInEnv "descriptions ride in env, so listing skills is free"
 row m161 test internal/controller/skill_inject_test.go TestSkillDirIsSetOnlyWhenBodiesAreMounted "the skill dir is set only when bodies are mounted"
 row m161 test internal/bff/skills_test.go TestABranchRefIs422 "the BFF refuses a branch ref with 422"
@@ -293,6 +293,17 @@ row m161 exists sdk/python/src/ctxmesh/skills.py - "the Python SDK has a skills 
 row m161 exists sdk/typescript/src/skills.ts - "the TypeScript SDK has a skills surface"
 row m161 has internal/controlplane/skill/validate.go MaxBodyBytes "a skill body is size-capped (v1 ships no unbounded payload)"
 row m161 has-re site:src/content/docs/guides/skills.md "not executables|instructions and data" "the public skills guide states that a skill carries no executables"
+
+# load() returns an attached skill's body: verified against its digest, capped and never truncated,
+# and only for skills attached to the agent.
+row m184.39c test internal/controller/skill_bodies_integration_test.go TestReconcile_SkillBodyIsMountedAndFollowsTheVersion "an attached skill's body is mounted at SKILL_DIR and follows its version"
+row m184.39c test internal/controller/skill_bodies_integration_test.go TestReconcile_SkillDigestMismatchMountsNothing "bytes that do not hash to the pinned digest are never mounted"
+row m184.39c test internal/controller/skill_bodies_test.go TestSkillBodiesAreCapped "skill bodies are capped, and one that does not fit is left out whole"
+row m184.39c test internal/controller/skill_bodies_test.go TestOnlyAttachedBodiesAreMounted "only attached skills' bodies are mounted"
+row m184.39c test internal/controller/skill_bodies_test.go TestAForeignObjectKeyIsNeverRead "an upload key outside its namespace is never read"
+row m184.39c test cmd/launcher/skills_test.go TestLoadReturnsTheMountedBodyOfAnAttachedSkill "load() returns the mounted body, and an unattached skill is 403"
+row m184.39c has cmd/main.go "SkillGit: prompt.NewHTTPResolver" "the controller fetches git-sourced skill bodies for real, not from a fixture"
+row m184.39c lacks internal/controller/agentdeployment_controller.go "injectSkills(containers, resolvedSkills, skillDescriptions, false)" "the controller does not hardcode skill bodies as unmounted"
 
 # Containment: the agent container is hardened, the launcher plane is pod-local, egress control is
 # unconditional.
