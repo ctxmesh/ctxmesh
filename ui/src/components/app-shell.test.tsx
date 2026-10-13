@@ -492,6 +492,16 @@ describe("AppShell — the overlay drawer (<1024)", () => {
     expect(within(drawer).getByRole("button", { name: "Sign out" })).toBeInTheDocument();
   });
 
+  it("closes itself when the current page's nav item is tapped", async () => {
+    installFetch(ALLOW_ALL);
+    renderShell("/agents");
+    await screen.findByText("agents surface");
+    fireEvent.click(screen.getByRole("button", { name: "Open the navigation" }));
+    const drawer = await screen.findByTestId("nav-drawer");
+    fireEvent.click(within(drawer).getByRole("link", { name: /Agents/ }));
+    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).toBeNull());
+  });
+
   it("closes itself when a nav item routes away", async () => {
     installFetch(ALLOW_ALL);
     renderShell();

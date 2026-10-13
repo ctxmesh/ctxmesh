@@ -893,9 +893,14 @@ function NavDrawer({
             <X aria-hidden="true" />
           </Button>
         </div>
+        {/* Any link tapped in the drawer dismisses it, the current page's included: closing only on a
+            route change left it open over a page that did not change. */}
         <nav
           aria-label="Sections (menu)"
           className="min-h-0 flex-1 overflow-y-auto px-2 py-3"
+          onClick={(e) => {
+            if ((e.target as HTMLElement).closest("a")) onClose();
+          }}
         >
           <NavSections expanded counts={counts} firstRun={firstRun} />
         </nav>

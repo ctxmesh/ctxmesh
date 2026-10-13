@@ -121,6 +121,10 @@ Kubernetes client. The sidecar refuses to start without `TOKEN_SERVICE_URL`, and
 refuses to deploy a tool-bound agent on an install without one, naming the setting, rather than
 deploy a pod whose sidecar crash-loops. The controller no longer reads `MCP_CREDENTIAL_NAMESPACE`.
 
+**Fixed: the navigation drawer stayed open when you tapped the page you were on.** Below 1024 px the
+drawer closed only when the route changed, so tapping the current page's entry left it covering the
+page. Any link tapped in the drawer now closes it.
+
 **Fixed: a namespace enforcing the restricted Pod Security Standard refused every tool-bound agent.**
 The egress sidecar had no securityContext, and a pod is judged by its worst container. It now runs
 non-root with no privilege escalation, every capability dropped, the RuntimeDefault seccomp profile
