@@ -18,7 +18,11 @@ class FakePlane
   attr_reader :port, :seen, :requests
 
   # {param} matches exactly ONE segment: /memory/{id} must NOT match /memory/agent/remember.
-  Route = Struct.new(:method, :path) do
+  # tier is the SDK tier that owes the route (ADR 0139); nil means every SDK.
+  Route = Struct.new(:method, :path, :tier) do
+    # Tool discovery is authoring tier: the managed loop reads it, and a plane client has no tools client.
+    def owed_by_plane_client? = tier.nil? || tier == "plane-client"
+
     def matches?(m, p)
       return false unless method == "ANY" || method == m
 
@@ -38,7 +42,7 @@ class FakePlane
         rs = JSON.parse(f.read).fetch("routes")
         raise "the fixture is empty; this test would assert nothing" if rs.empty?
 
-        return rs.map { |r| Route.new(r["method"], r["path"]) }
+        return rs.map { |r| Route.new(r["method"], r["path"], r["tier"]) }
       end
       dir = dir.parent
     end
@@ -121,7 +125,7 @@ class RoutesTest < Minitest::Test
     @client.delegate("sub", step: "step-1", call_id: "call-1", capability: CAP, input: { "x" => 1 })
     @client.handoff("other", capability: CAP, message: "over to you")
 
-    @fake.routes.each do |r|
+    @fake.routes.select(&:owed_by_plane_client?).each do |r|
       assert_includes @fake.seen, "#{r.method} #{r.path}",
                       "launcher serves #{r.method} #{r.path} and no SDK call reached it; " \
                       "requests=#{@fake.requests.inspect}"

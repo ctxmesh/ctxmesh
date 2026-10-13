@@ -36,6 +36,7 @@ class RoutesTest {
       c.runs.handoff("other", CAP, "over to you", true);
 
       for (FakePlane.Route r : fake.routes()) {
+        if (!fake.owedByPlaneClient(r)) continue;
         assertTrue(fake.covered(r),
             "launcher serves " + r.method() + " " + r.path()
                 + " and no SDK call reached it; requests=" + fake.requests());

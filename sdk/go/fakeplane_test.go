@@ -24,7 +24,13 @@ type route struct {
 	Listener    string `json:"listener"`
 	PortEnv     string `json:"portEnv"`
 	DefaultPort int    `json:"defaultPort"`
+	// Tier is the SDK tier that owes the route (ADR 0139); empty means every SDK.
+	Tier string `json:"tier"`
 }
+
+// owedByPlaneClient reports whether a plane-client SDK, like this one, must reach the route. Tool
+// discovery is authoring tier: the managed loop reads it, and a plane client has no tools client.
+func (r route) owedByPlaneClient() bool { return r.Tier == "" || r.Tier == "plane-client" }
 
 func loadRoutes() ([]route, error) {
 	// Walk up to the repo root: the fixture is shared by all six SDKs, so it lives beside them.

@@ -43,19 +43,21 @@ final class FakePlane implements AutoCloseable {
 
   private final HttpServer server;
   private final List<Route> routes;
+  /** Routes only an authoring-tier SDK owes (ADR 0139), as "METHOD /path". */
+  private final Set<String> authoringOnly = new HashSet<>();
   private final Set<String> seen = Collections.synchronizedSet(new HashSet<>());
   private final List<String> requests = Collections.synchronizedList(new ArrayList<>());
   volatile int status = 200;
 
   FakePlane() throws IOException {
-    this.routes = loadRoutes();
+    this.routes = loadRoutes(authoringOnly);
     this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
     server.createContext("/", this::handle);
     server.start();
   }
 
   /** The fixture is shared by all six SDKs, so it lives beside them; walk up to find it. */
-  static List<Route> loadRoutes() throws IOException {
+  static List<Route> loadRoutes(Set<String> authoringOnly) throws IOException {
     Path dir = Path.of("").toAbsolutePath();
     for (int i = 0; i < 6 && dir != null; i++, dir = dir.getParent()) {
       Path f = dir.resolve("launcher-routes.json");
@@ -65,6 +67,9 @@ final class FakePlane implements AutoCloseable {
         for (Object r : TestJson.arr(TestJson.obj(o).get("routes"))) {
           var m = TestJson.obj(r);
           out.add(new Route(String.valueOf(m.get("method")), String.valueOf(m.get("path"))));
+          if ("authoring".equals(m.get("tier"))) {
+            authoringOnly.add(m.get("method") + " " + m.get("path"));
+          }
         }
         if (out.isEmpty()) throw new IOException("launcher-routes.json is empty");
         return out;
@@ -110,6 +115,8 @@ final class FakePlane implements AutoCloseable {
   int port() { return server.getAddress().getPort(); }
   List<Route> routes() { return routes; }
   boolean covered(Route r) { return seen.contains(r.method() + " " + r.path()); }
+  /** Whether a plane-client SDK, like this one, must reach the route. */
+  boolean owedByPlaneClient(Route r) { return !authoringOnly.contains(r.method() + " " + r.path()); }
   List<String> requests() { return List.copyOf(requests); }
 
   @Override public void close() { server.stop(0); }

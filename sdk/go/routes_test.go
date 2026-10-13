@@ -83,7 +83,7 @@ func TestEveryLauncherRouteIsExercised(t *testing.T) {
 	}
 
 	for _, r := range routes {
-		if !fake.covered(r.Path, r.Method) {
+		if r.owedByPlaneClient() && !fake.covered(r.Path, r.Method) {
 			t.Errorf("launcher serves %s %s and no SDK call reached it (requests: %v)",
 				r.Method, r.Path, fake.requests())
 		}

@@ -22,6 +22,18 @@
       "defaultPort": 2994
     },
     {
+      "method": "GET",
+      "path": "/events",
+      "listener": "discovery",
+      "portEnv": null,
+      "defaultPort": 2999,
+      "tier": "authoring",
+      "sdkWaivers": {
+        "python": "No SDK subscribes to tool changes yet: the managed loop reads /tools when it starts a turn.",
+        "typescript": "No SDK subscribes to tool changes yet: the managed loop reads /tools when it starts a turn."
+      }
+    },
+    {
       "method": "ANY",
       "path": "/feedback",
       "listener": "feedback",
@@ -97,6 +109,14 @@
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
       "defaultPort": 2998
+    },
+    {
+      "method": "GET",
+      "path": "/tools",
+      "listener": "discovery",
+      "portEnv": null,
+      "defaultPort": 2999,
+      "tier": "authoring"
     }
   ]
 }

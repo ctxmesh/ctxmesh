@@ -15,6 +15,8 @@ const CAP: &str = "cap-token";
 struct Route {
     method: String,
     path: String,
+    /// The SDK tier that owes the route (ADR 0139); empty means every SDK.
+    tier: String,
 }
 
 impl Route {
@@ -47,6 +49,7 @@ fn load_routes() -> Vec<Route> {
                 .map(|r| Route {
                     method: r["method"].as_str().unwrap_or_default().to_string(),
                     path: r["path"].as_str().unwrap_or_default().to_string(),
+                    tier: r["tier"].as_str().unwrap_or_default().to_string(),
                 })
                 .collect();
             assert!(
@@ -173,7 +176,12 @@ fn every_launcher_route_is_exercised() {
 
     let seen = p.seen.lock().unwrap().clone();
     let reqs = p.reqs.lock().unwrap().clone();
-    for r in &routes {
+    // A plane-client SDK owes every route but the authoring tier's (ADR 0139): tool discovery is
+    // read by the managed loop, and a plane client has no tools client.
+    for r in routes
+        .iter()
+        .filter(|r| r.tier.is_empty() || r.tier == "plane-client")
+    {
         assert!(
             seen.contains(&format!("{} {}", r.method, r.path)),
             "launcher serves {} {} and no SDK call reached it; requests={reqs:?}",
