@@ -81,3 +81,22 @@ func (s *memStore) List(_ context.Context, namespace, registryID string) ([]Agen
 	slices.SortFunc(out, func(a, b AgentCapability) int { return strings.Compare(a.Agent, b.Agent) })
 	return out, nil
 }
+
+func (s *memStore) ListMembers(_ context.Context) ([]AgentCapability, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]AgentCapability, 0, len(s.data))
+	for _, a := range s.data {
+		if a.RegistryID != "" {
+			a.Tags = slices.Clone(a.Tags)
+			out = append(out, a)
+		}
+	}
+	slices.SortFunc(out, func(a, b AgentCapability) int {
+		if c := strings.Compare(a.Namespace, b.Namespace); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Agent, b.Agent)
+	})
+	return out, nil
+}

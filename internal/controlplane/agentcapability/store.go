@@ -70,4 +70,8 @@ type Store interface {
 	// registryID returns no candidates — discovery is scoped to a registry, and an agent outside one has no
 	// discoverable peers (fail-closed).
 	List(ctx context.Context, namespace, registryID string) ([]AgentCapability, error)
+	// ListMembers returns every agent that belongs to a registry, in every namespace, described or not,
+	// ordered by namespace and name: the agents that can be sent an async AMP hop, each of which the
+	// JetStream dispatcher keeps a queue for.
+	ListMembers(ctx context.Context) ([]AgentCapability, error)
 }

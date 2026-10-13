@@ -163,3 +163,30 @@ func TestStore_MembershipOnlyRowScopesButIsNotACandidate(t *testing.T) {
 		assert.Equal(t, "worker", got[0].Agent)
 	})
 }
+
+// ListMembers is every agent in a registry, across namespaces and whether or not it advertises anything:
+// the agents a hop can be sent to, each of which the async dispatcher keeps a queue for. An agent in no
+// registry is not one.
+func TestStore_ListMembersSpansNamespacesAndSkipsNonMembers(t *testing.T) {
+	eachStore(t, func(t *testing.T, s agentcapability.Store) {
+		ctx := context.Background()
+		for _, a := range []agentcapability.AgentCapability{
+			{Namespace: "ns2", Agent: "writer", RegistryID: "team-b", Endpoint: "http://writer-eventing.ns2.svc.cluster.local"},
+			{Namespace: "ns1", Agent: "worker", RegistryID: "team-a", Description: "Extracts tables."},
+			{Namespace: "ns1", Agent: "batch", RegistryID: "team-a"}, // a job: a member with no address
+			{Namespace: "ns1", Agent: "loner", Description: "Belongs to no registry."},
+		} {
+			require.NoError(t, s.Set(ctx, a))
+		}
+
+		got, err := s.ListMembers(ctx)
+		require.NoError(t, err)
+		names := make([]string, 0, len(got))
+		for _, a := range got {
+			names = append(names, a.Namespace+"/"+a.Agent)
+		}
+		assert.Equal(t, []string{"ns1/batch", "ns1/worker", "ns2/writer"}, names,
+			"every member, ordered by namespace and name; the agent in no registry is left out")
+		assert.Equal(t, "http://writer-eventing.ns2.svc.cluster.local", got[2].Endpoint, "rows round-trip")
+	})
+}

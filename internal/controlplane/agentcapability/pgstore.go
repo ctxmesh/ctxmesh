@@ -112,6 +112,34 @@ func (s *pgStore) List(ctx context.Context, namespace, registryID string) ([]Age
 	return out, nil
 }
 
+func (s *pgStore) ListMembers(ctx context.Context) ([]AgentCapability, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, agent, registry_id, role, endpoint, description, tags, ready FROM agent_capabilities
+		 WHERE registry_id <> '' ORDER BY namespace, agent`)
+	if err != nil {
+		return nil, fmt.Errorf("agentcapability: list registry members: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []AgentCapability
+	for rows.Next() {
+		var a AgentCapability
+		var tags []byte
+		if err := rows.Scan(&a.Namespace, &a.Agent, &a.RegistryID, &a.Role, &a.Endpoint, &a.Description,
+			&tags, &a.Ready); err != nil {
+			return nil, fmt.Errorf("agentcapability: scanning registry members: %w", err)
+		}
+		if a.Tags, err = unmarshalTags(tags); err != nil {
+			return nil, fmt.Errorf("agentcapability: decoding tags for %s/%s: %w", a.Namespace, a.Agent, err)
+		}
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agentcapability: list registry members: %w", err)
+	}
+	return out, nil
+}
+
 // marshalTags encodes tags as a jsonb array, normalising nil to "[]" (the column is NOT NULL).
 func marshalTags(tags []string) ([]byte, error) {
 	if len(tags) == 0 {
