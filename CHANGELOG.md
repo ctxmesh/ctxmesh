@@ -138,16 +138,21 @@ so the API server refuses such a spec without both. `scaling.concurrency` is new
 no existing object is affected.
 
 **Changed: the controller caches its own objects, not the cluster's.** It held every ConfigMap,
-Service, ServiceAccount, ResourceQuota, Deployment, Job, CronJob, NetworkPolicy, Knative Service,
-Trigger, Broker and ScaledObject in the cluster, every Knative Revision, and the full metadata of every
-Secret, so its memory grew with everything else running beside it. It now labels what it creates
-`agents.ctxmesh.ai/managed-by=ctxmesh-controller` and caches those kinds only where they carry the
-label, plus the install namespace's ConfigMaps and Deployments and Knative's `config-features`.
-Revisions are read when needed. The Secret watch keeps only each Secret's name, namespace, labels and
-resourceVersion; a Secret applied with `kubectl` had carried its data into the controller's memory in
-its `last-applied-configuration` annotation. Objects an earlier controller created get the label the
-first time it reads them after the upgrade, and a label removed from one the controller owns is put
-back the next time it reads it.
+Service, ResourceQuota, Deployment, Job, CronJob, NetworkPolicy, Knative Service, Trigger, Broker and
+ScaledObject in the cluster, every Knative Revision, and the full metadata of every Secret, so its memory
+grew with everything else running beside it. It now labels what it creates of those kinds
+`agents.ctxmesh.ai/managed-by=ctxmesh-controller` and caches them only where they carry the label, plus
+the install namespace's ConfigMaps and Deployments and Knative's `config-features`. Revisions are read
+when needed. ServiceAccounts stay cached in full. The Secret watch keeps only each Secret's name,
+namespace, labels and resourceVersion; a Secret applied with `kubectl` had carried its data into the
+controller's memory in its `last-applied-configuration` annotation. Objects an earlier controller created
+get the label the first time it reads them after the upgrade.
+
+The label is reserved: do not remove it or set it yourself. Without it the controller stops seeing changes
+to its own object until it next reads it and puts the label back; on an object of yours it makes the
+controller cache it. Knative copies a Knative Service's labels onto the Configuration and Route it derives
+from it, and the Route's onto the Kubernetes Services it creates, so those carry the label too. See
+[Upgrading](docs/upgrading.md).
 
 **Changed: before its first agent, a workspace's sidebar shows Home, Agents and Providers.** With no
 agent the other pages have nothing to show: no runs, no cost, nothing waiting for approval, nothing

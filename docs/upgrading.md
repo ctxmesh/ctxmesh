@@ -79,6 +79,31 @@ Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
 
+## The controller labels what it creates, and caches only that
+
+**What changed.** The controller labels every ConfigMap, Service, ResourceQuota, Deployment, Job, CronJob,
+NetworkPolicy, Knative Service, Trigger, Broker and ScaledObject it creates
+`agents.ctxmesh.ai/managed-by=ctxmesh-controller`, and its cache holds those kinds only where they carry
+the label. The install namespace's ConfigMaps and Deployments and `knative-serving/config-features` stay
+cached in full. The controller's memory no longer grows with the rest of the cluster.
+
+**During the upgrade** the controller adds the label to each object an earlier version created, the first
+time it reads it. That is one update per object and at most one extra reconcile of whatever owns it; the
+label is on the object's metadata, not its pod template, so no agent rolls a revision.
+
+**The label is reserved.** Do not remove it, and do not set it on objects of your own:
+
+- Removed from an object the controller owns, the controller misses that object's changes until it next
+  reads it, when it puts the label back.
+- Set on an object of yours, it only makes the controller cache that object.
+
+**Knative copies the label.** A Knative Service's labels go onto the Configuration and Route that Knative
+derives from it, and the Route's onto the Kubernetes Services it creates, so those carry the label too.
+The controller does not manage them; the label on them is not a sign it does.
+
+**Rolling back** to a release without the label is safe: that controller caches everything and ignores
+the label.
+
 ## The token service authenticates every caller (agents on an older base image lose memory and knowledge)
 
 **What changed.** The token service now refuses any request without a projected ServiceAccount token
