@@ -100,7 +100,7 @@ func TestASkillCreatedInTheConsoleResolvesForAnAgent(t *testing.T) {
 	rec := post("/api/skills", `{"namespace":"`+ns+`","name":"summarise","description":"Summarise a long document"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	rec = post("/api/skills/"+ns+"/summarise/versions",
-		`{"digest":"`+digest+`","source":"upload","objectKey":"skills/summarise.md","sizeBytes":42}`)
+		`{"digest":"`+digest+`","source":"upload","objectKey":"skills/`+ns+`/summarise.md","sizeBytes":42}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	rec = post("/api/skills", `{"namespace":"elsewhere","name":"summarise"}`)
 	require.Equal(t, http.StatusForbidden, rec.Code, "bound to %s, refused another namespace: %s", ns, rec.Body.String())

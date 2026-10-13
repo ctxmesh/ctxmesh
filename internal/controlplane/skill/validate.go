@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -89,6 +90,11 @@ func ValidateVersion(v SkillVersion) error {
 		if v.ObjectKey == "" {
 			return fmt.Errorf("uploaded skill version has no object key — the bytes live in the object store, not here")
 		}
+		if !OwnsObjectKey(v.Namespace, v.ObjectKey) {
+			return fmt.Errorf("uploaded skill version object key %q must be under %q: the controller reads "+
+				"uploaded bodies with the platform's store credential, so a key outside the namespace's "+
+				"prefix would read another namespace's objects", v.ObjectKey, ObjectKeyPrefix(v.Namespace))
+		}
 		if v.Repo != "" || v.Ref != "" || v.Path != "" {
 			return fmt.Errorf("uploaded skill version must not also carry a git pin")
 		}
@@ -99,6 +105,21 @@ func ValidateVersion(v SkillVersion) error {
 		return fmt.Errorf("skill version is %d bytes, over the %d-byte cap", v.SizeBytes, MaxBodyBytes)
 	}
 	return nil
+}
+
+// ObjectKeyPrefix is the object-store prefix a namespace's uploaded skill bodies live under. The
+// store is shared by every namespace and the controller reads it with one credential, so this prefix
+// is the only thing keeping one namespace's skill from naming another namespace's object.
+func ObjectKeyPrefix(namespace string) string {
+	return "skills/" + namespace + "/"
+}
+
+// OwnsObjectKey reports whether key names an object under the namespace's prefix. The key must be in
+// clean form: "skills/a/../b/x" has the prefix as text but names an object of namespace b.
+func OwnsObjectKey(namespace, key string) bool {
+	prefix := ObjectKeyPrefix(namespace)
+	return namespace != "" && strings.HasPrefix(key, prefix) && len(key) > len(prefix) &&
+		path.Clean(key) == key
 }
 
 // isImmutableRef reports whether a git ref pins content that cannot move.

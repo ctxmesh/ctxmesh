@@ -45,12 +45,12 @@ func TestAVersionNamesExactlyOneSource(t *testing.T) {
 	t.Parallel()
 
 	mixed := gitVersion()
-	mixed.ObjectKey = "uploads/abc"
+	mixed.ObjectKey = "skills/team-a/abc"
 	assert.Error(t, ValidateVersion(mixed), "a version must not carry both a git pin and an upload")
 
 	upload := SkillVersion{
 		Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte("b")),
-		Source: SourceUpload, ObjectKey: "uploads/abc",
+		Source: SourceUpload, ObjectKey: "skills/team-a/abc",
 	}
 	require.NoError(t, ValidateVersion(upload))
 
@@ -60,6 +60,36 @@ func TestAVersionNamesExactlyOneSource(t *testing.T) {
 	incomplete := gitVersion()
 	incomplete.Path = ""
 	assert.Error(t, ValidateVersion(incomplete))
+}
+
+// TestAnUploadKeyStaysInItsNamespace. The controller reads uploaded bodies with the platform's
+// store credential, and the store is shared by every namespace, so a key is accepted only under
+// its own namespace's prefix — otherwise a skill version could name another namespace's object
+// and have the controller mount it into this namespace's agent.
+func TestAnUploadKeyStaysInItsNamespace(t *testing.T) {
+	t.Parallel()
+
+	v := SkillVersion{
+		Namespace: "team-a", Skill: "summarise", Digest: Digest([]byte("b")),
+		Source: SourceUpload, ObjectKey: "skills/team-a/summarise/SKILL.md",
+	}
+	require.NoError(t, ValidateVersion(v))
+
+	for _, foreign := range []string{
+		"skills/team-b/summarise/SKILL.md",
+		"knowledge/team-b/kb/doc.pdf",
+		"skills/team-a/../team-b/SKILL.md",
+		"skills/team-a/./SKILL.md",
+		"skills/team-a//SKILL.md",
+		"skills/team-a/",
+		"skills/team-ab/SKILL.md",
+		"/skills/team-a/SKILL.md",
+	} {
+		v.ObjectKey = foreign
+		err := ValidateVersion(v)
+		require.Errorf(t, err, "key %q must be refused for namespace team-a", foreign)
+		assert.Contains(t, err.Error(), "skills/team-a/")
+	}
 }
 
 // TestDigestIsContentIdentity. Same bytes ⇒ same version, whichever source produced them. That

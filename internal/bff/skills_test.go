@@ -97,6 +97,25 @@ func TestABranchRefIs422(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "not an immutable pin")
 }
 
+// TestAnObjectKeyOutsideTheNamespaceIs422. A caller allowed to add skill versions in team-a must
+// not be able to name team-b's objects: the controller reads the key with the platform's credential.
+func TestAnObjectKeyOutsideTheNamespaceIs422(t *testing.T) {
+	t.Parallel()
+
+	store := skill.NewMemStore()
+	require.NoError(t, store.UpsertSkill(context.Background(),
+		skill.Skill{Namespace: "team-a", Name: "summarise"}))
+	s := newSkillServer(t, store, true)
+
+	rec := do(t, s, http.MethodPost, "/api/skills/team-a/summarise/versions",
+		`{"digest":"sha256:abc","source":"upload","objectKey":"knowledge/team-b/kb/doc.pdf"}`)
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	assert.Contains(t, rec.Body.String(), "skills/team-a/")
+	got, err := store.ListVersions(context.Background(), "team-a", "summarise")
+	require.NoError(t, err)
+	assert.Empty(t, got, "a refused key must persist nothing")
+}
+
 // TestVersionAddIsIdempotent. Same bytes are the same version, so a retry must succeed rather
 // than 409 — and must not fork one skill's history into two entries for one thing.
 func TestVersionAddIsIdempotent(t *testing.T) {
@@ -107,7 +126,7 @@ func TestVersionAddIsIdempotent(t *testing.T) {
 	require.NoError(t, store.UpsertSkill(ctx, skill.Skill{Namespace: "team-a", Name: "summarise"}))
 	s := newSkillServer(t, store, true)
 
-	body := `{"digest":"sha256:abc","source":"upload","objectKey":"uploads/abc"}`
+	body := `{"digest":"sha256:abc","source":"upload","objectKey":"skills/team-a/abc"}`
 	for i := range 2 {
 		rec := do(t, s, http.MethodPost, "/api/skills/team-a/summarise/versions", body)
 		require.Equalf(t, http.StatusOK, rec.Code, "attempt %d", i+1)
@@ -129,7 +148,7 @@ func TestSkillDetailCarriesItsHistory(t *testing.T) {
 	}))
 	require.NoError(t, store.AddVersion(ctx, skill.SkillVersion{
 		Namespace: "team-a", Skill: "summarise", Digest: skill.Digest([]byte("v1")),
-		Source: skill.SourceUpload, ObjectKey: "uploads/v1",
+		Source: skill.SourceUpload, ObjectKey: "skills/team-a/v1",
 	}))
 	s := newSkillServer(t, store, true)
 
