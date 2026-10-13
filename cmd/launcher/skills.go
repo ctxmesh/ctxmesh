@@ -17,7 +17,11 @@ limitations under the License.
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -120,10 +124,11 @@ func (s *skillServer) handleLoad(w http.ResponseWriter, r *http.Request) {
 	// The name must be one of THIS agent's attached skills. This is the same un-forgeable
 	// roster gate the knowledge and delegate endpoints use: what the agent may reach is
 	// decided by what the controller injected, never by what the agent asks for.
+	var entry skillEntry
 	var known bool
 	for _, e := range s.entries {
 		if e.Name == name {
-			known = true
+			entry, known = e, true
 			break
 		}
 	}
@@ -139,9 +144,34 @@ func (s *skillServer) handleLoad(w http.ResponseWriter, r *http.Request) {
 	// already makes one impossible, but a path built from request input should not depend on
 	// a check somewhere else staying correct.
 	body, err := os.ReadFile(filepath.Join(s.dir, filepath.Base(name)))
+	if errors.Is(err, fs.ErrNotExist) {
+		// Attached, but the controller did not mount this body: it did not fit, could not be
+		// fetched, or failed its digest check. The capability is absent for this skill, not lost.
+		writeJSONError(w, http.StatusNotImplemented,
+			"the body of skill "+name+" is not mounted on this agent; the AgentDeployment's SkillBodies condition says why")
+		return
+	}
 	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "skill "+name+" has no mounted body")
+		writeJSONError(w, http.StatusInternalServerError, "reading the mounted body of skill "+name+" failed")
+		return
+	}
+	// The body is served only if it is the content the agent was pinned to. The controller checks
+	// it before mounting; checking again here keeps a file changed after that from reaching the model.
+	if !bodyMatchesDigest(body, entry.Digest) {
+		writeJSONError(w, http.StatusInternalServerError,
+			"the mounted body of skill "+name+" does not match its pinned digest "+entry.Digest+"; it is not served")
 		return
 	}
 	writeJSON(w, map[string]any{"body": string(body)})
+}
+
+// bodyMatchesDigest reports whether body hashes to digest, a "sha256:<hex>" pin. Any other form
+// cannot be checked, so it does not match.
+func bodyMatchesDigest(body []byte, digest string) bool {
+	want, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok {
+		return false
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]) == want
 }
