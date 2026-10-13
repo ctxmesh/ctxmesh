@@ -39,7 +39,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The number of rows the table holds. Raise it with the rows; lowering it is a visible edit to a claim.
-FLOOR=173
+FLOOR=179
 
 SITE="${CTXMESH_SITE:-../ctxmesh.github.io}"
 SITE_OK=0
@@ -302,7 +302,13 @@ row m184.39c test internal/controller/skill_bodies_test.go TestSkillBodiesAreCap
 row m184.39c test internal/controller/skill_bodies_test.go TestOnlyAttachedBodiesAreMounted "only attached skills' bodies are mounted"
 row m184.39c test internal/controller/skill_bodies_test.go TestAForeignObjectKeyIsNeverRead "an upload key outside its namespace is never read"
 row m184.39c test cmd/launcher/skills_test.go TestLoadReturnsTheMountedBodyOfAnAttachedSkill "load() returns the mounted body, and an unattached skill is 403"
-row m184.39c has cmd/main.go "SkillGit: prompt.NewHTTPResolver" "the controller fetches git-sourced skill bodies for real, not from a fixture"
+row m184.39c has cmd/main.go "SkillGit: controller.NewSkillGitFetcher()" "the controller fetches git-sourced skill bodies for real, not from a fixture"
+row m184.39c test internal/prompt/http_resolver_test.go TestHTTPResolverWithOptions "the skill fetcher sends no token, so a skill version cannot borrow one"
+row m184.39c test internal/controller/skill_bodies_test.go TestAMissingFileAndAMismatchReadTheSame "a missing file and a mismatched one read the same"
+row m184.39c test internal/controller/skill_bodies_test.go TestAnUnreachableHostIsTriedOncePerWindow "an unreachable host is tried once per backoff window, controller-wide"
+row m184.39c test internal/controller/skill_bodies_test.go TestTheConditionStaysUnderTheCap "the SkillBodies message stays under the condition cap"
+row m184.39c test internal/controlplane/skill/validate_test.go TestAVersionsPointersAreBoundedAndClean "a skill version's pointers are bounded and clean"
+row m184.39c test internal/controller/skill_bodies_test.go TestAJobsConfigMapIsKeptUntilItFinishes "a ConfigMap an unfinished Job mounts is not pruned"
 row m184.39c lacks internal/controller/agentdeployment_controller.go "injectSkills(containers, resolvedSkills, skillDescriptions, false)" "the controller does not hardcode skill bodies as unmounted"
 
 # Containment: the agent container is hardened, the launcher plane is pod-local, egress control is
