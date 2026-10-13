@@ -1100,6 +1100,10 @@ spec:
           value: {{ .Values.bff.asyncBackend | default "" | quote }}
         - name: NATS_URL
           value: {{ .Values.bff.natsURL | default "" | quote }}
+        - name: NATS_ACCOUNT
+          value: {{ .Values.bff.natsAccount | default "" | quote }}
+        - name: NATS_CREDENTIALS_FILE
+          value: {{ .Values.bff.natsCredentialsFile | default "" | quote }}
         envFrom:
         - secretRef:
             name: ctxmesh-postgres-dsn

@@ -632,10 +632,10 @@ spec:
   - from:
     - namespaceSelector:
         matchLabels:
-          kubernetes.io/metadata.name: keda
+          kubernetes.io/metadata.name: {{ .Values.devDataPlane.nats.kedaOperator.namespace }}
       podSelector:
         matchLabels:
-          app: keda-operator
+          {{- toYaml .Values.devDataPlane.nats.kedaOperator.podLabels | nindent 10 }}
     ports:
     - port: 8222
       protocol: TCP

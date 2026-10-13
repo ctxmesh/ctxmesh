@@ -214,6 +214,10 @@ spec:
               value: ""
             - name: NATS_CREDENTIALS_FILE
               value: ""
+            # How many async hops to one agent the dispatcher delivers at once, and the most its
+            # durable has outstanding. Empty ⇒ 8.
+            - name: ASYNC_DELIVERY_CONCURRENCY
+              value: ""
             # MCP_OBO_REQUIRED (M124/Gate A, ADR 0095 §2) — the fail-CLOSED switch for per-user OBO.
             # "false" (default) keeps a no-OBO install unaffected. The Helm chart templates it from
             # controllerManager.oboEgress.enabled: when the operator enables OBO egress, the BFF/worker

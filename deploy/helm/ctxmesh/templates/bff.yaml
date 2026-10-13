@@ -188,6 +188,8 @@ spec:
           value: {{ .Values.bff.natsURL | default "" | quote }}
         - name: NATS_CREDENTIALS_FILE
           value: {{ .Values.bff.natsCredentialsFile | default "" | quote }}
+        - name: ASYNC_DELIVERY_CONCURRENCY
+          value: {{ .Values.bff.asyncDeliveryConcurrency | default "" | quote }}
         - name: MCP_OBO_REQUIRED
           value: {{ .Values.controllerManager.oboEgress.enabled | quote }}
         - name: MCP_CAPABILITY_AUDIENCE

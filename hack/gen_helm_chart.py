@@ -233,6 +233,22 @@ TOKEN_SERVICE_NP_NAMESPACE_HELM = (
     "          - {{ .Values.namespace }}\n"
 )
 
+# The bundled NATS admits KEDA's operator to its monitoring port, where the nats-jetstream scaler reads an
+# agent's queue. config/nats names KEDA's default namespace and operator label; the chart takes both from
+# devDataPlane.nats.kedaOperator, whose defaults render the kustomize literal.
+NATS_KEDA_NP_KUSTOMIZE = (
+    "          kubernetes.io/metadata.name: keda\n"
+    "      podSelector:\n"
+    "        matchLabels:\n"
+    "          app: keda-operator\n"
+)
+NATS_KEDA_NP_HELM = (
+    "          kubernetes.io/metadata.name: {{ .Values.devDataPlane.nats.kedaOperator.namespace }}\n"
+    "      podSelector:\n"
+    "        matchLabels:\n"
+    "          {{- toYaml .Values.devDataPlane.nats.kedaOperator.podLabels | nindent 10 }}\n"
+)
+
 OPTIONAL_MODEL_ENV = [
     ("INGEST_OCR_URL", "bff.ingestOcrURL"),
     ("KNOWLEDGE_RERANK_URL", "bff.knowledgeRerankURL"),
@@ -246,6 +262,8 @@ OPTIONAL_MODEL_ENV = [
     ("ASYNC_BACKEND", "bff.asyncBackend"),
     ("NATS_URL", "bff.natsURL"),
     ("NATS_CREDENTIALS_FILE", "bff.natsCredentialsFile"),
+    ("NATS_ACCOUNT", "bff.natsAccount"),
+    ("ASYNC_DELIVERY_CONCURRENCY", "bff.asyncDeliveryConcurrency"),
 ]
 
 COST_ROLLUP_ENABLED_ENV_KUSTOMIZE = (
@@ -787,6 +805,10 @@ def substitute(doc: str) -> str:
     doc = doc.replace(GRANT_HMAC_SECRET_KUSTOMIZE, GRANT_HMAC_SECRET_HELM)
     if kind_of(doc) == "NetworkPolicy" and "control-plane: token-service" in doc:
         doc = doc.replace(TOKEN_SERVICE_NP_NAMESPACE_KUSTOMIZE, TOKEN_SERVICE_NP_NAMESPACE_HELM)
+    if kind_of(doc) == "NetworkPolicy" and "control-plane: nats" in doc:
+        if NATS_KEDA_NP_KUSTOMIZE not in doc:
+            sys.exit("gen_helm_chart: the NATS NetworkPolicy no longer names KEDA's operator as config/nats did")
+        doc = doc.replace(NATS_KEDA_NP_KUSTOMIZE, NATS_KEDA_NP_HELM)
     for env_name, val_path in OPTIONAL_MODEL_ENV:
         doc = doc.replace(
             f'        - name: {env_name}\n          value: ""',

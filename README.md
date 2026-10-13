@@ -32,7 +32,10 @@ are needed only for the features that use them:
 - **Knative Eventing**, only for agents with `executionModel: eventing`;
 - **KEDA**, only for scaling with an `AgentScalingPolicy`. Its queue-depth trigger also needs the
   NATS JetStream async backend (`bff.asyncBackend: jetstream` and `bff.natsURL`), whose per-agent
-  queues are what it scales on.
+  queues are what it scales on, and the KEDA operator must reach the NATS monitoring port, 8222.
+  The bundled NATS admits it from namespace `keda` with label `app=keda-operator`; set
+  `devDataPlane.nats.kedaOperator` if KEDA runs elsewhere, and `bff.natsAccount` if NATS uses
+  accounts.
 
 ctxmesh does not bundle any of them.
 

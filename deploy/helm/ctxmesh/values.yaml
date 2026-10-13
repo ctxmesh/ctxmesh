@@ -389,6 +389,15 @@ devDataPlane:
     #   bff.natsURL: nats://ctxmesh-nats.<namespace>.svc:4222
     # Without a broker the async publish edge is not registered and `?mode=async` is refused.
     enabled: false
+    # KEDA's operator reads an agent's queue from the NATS monitoring port, 8222, for a
+    # queue-depth AgentScalingPolicy. This broker's NetworkPolicy admits it to that port, and
+    # only that port, by the namespace KEDA runs in and its operator pods' labels; set them to
+    # match your KEDA install (Helm merges maps, so set a default label to null to drop it). A
+    # NATS you run yourself must admit the same pods to its 8222.
+    kedaOperator:
+      namespace: keda
+      podLabels:
+        app: keda-operator
     resources:
       limits:
         memory: 512Mi
@@ -653,6 +662,13 @@ bff:
   asyncBackend: ""
   natsURL: ""
   natsCredentialsFile: ""
+  # The NATS account the stream lives in, which KEDA's scaler reads it under. Empty ⇒ $G,
+  # the account of a server with no accounts configured, such as the bundled one. Set it
+  # whenever natsCredentialsFile is set: a queue-depth AgentScalingPolicy refuses to guess.
+  natsAccount: ""
+  # How many async hops to one agent the dispatcher delivers at once. Empty ⇒ 8. Raise it
+  # when a queue-depth policy lets an agent scale past what 8 concurrent hops keep busy.
+  asyncDeliveryConcurrency: ""
 
   image:
     # The BFF (console backend) image. Empty tag → Chart.appVersion ("latest"), matching

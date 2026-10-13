@@ -224,6 +224,13 @@ spec:
             value: ""
           - name: NATS_URL
             value: ""
+          # The NATS account the stream lives in, for KEDA's scaler: empty ⇒ $G, the
+          # account of a server with none configured. With a credentials file the
+          # stream is in a named account, and a queue-depth policy refuses to guess it.
+          - name: NATS_ACCOUNT
+            value: ""
+          - name: NATS_CREDENTIALS_FILE
+            value: ""
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
         # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a
