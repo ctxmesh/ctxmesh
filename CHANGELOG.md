@@ -631,8 +631,31 @@ still needs one. `/api/capabilities` now reports `tenants` (`list`, `create`), p
 skills store, so `/api/skills` answered 501 and an agent with `skillRefs` was never deployed: the
 controller failed every reconcile with "this install has no skill store". Both now use the
 control-plane database. A skill created with `POST /api/skills` resolves for an agent in the same
-namespace, pinned to its digest; the console has no skills page yet. Skill bodies are still not
-mounted, so `load()` answers 501.
+namespace, pinned to its digest; the console has no skills page yet.
+
+**Fixed: a skill's `load()` answered 501 on every agent.** The controller never mounted skill
+bodies, so `client.skills.load(name)`, as the skills guide shows it, failed for every attached
+skill. The controller now fetches each attached skill's pinned version, from git (a github.com
+repository, with the same fetch the prompt diff uses; a private one needs `PROMPT_GIT_TOKEN` in the
+controller's environment, which the chart does not set) or, for an uploaded version, from the
+bundled object store. It checks that the bytes
+hash to the version's digest and mounts the verified bodies read-only at `SKILL_DIR`, one file per
+skill, from an immutable ConfigMap named `<agent>-skills-<hash>`. `load()` now returns the body, and a
+skill not attached to the agent is still refused with 403. Bytes that do not match the digest are
+never mounted, and the launcher checks a body against its digest again before serving it.
+
+The bodies of one agent share a **900 KiB cap**, because they share one ConfigMap and a ConfigMap
+holds at most 1 MiB. Skills are packed in `spec.skillRefs` order; one that does not fit is left out
+whole, never truncated, and a later smaller one still mounts. A new `SkillBodies` condition names
+each attached skill whose body is not mounted and why (`DigestMismatch`, `TooLarge`, `FetchFailed`,
+`SourceRefused`, `SourceUnavailable`), and `load()` answers 501 for those. A failed fetch is retried
+on a backoff from 10 seconds to 10 minutes and never holds up the rest of the agent. Mounting the
+bodies rolls every agent that has skills once.
+
+An uploaded version's `objectKey` must now be under `skills/<namespace>/`. The controller reads it
+with the platform's credential, so a key anywhere else would read another namespace's objects.
+`POST /api/skills/{ns}/{name}/versions` refuses such a key with 422, and the controller refuses a
+version stored with one before this release.
 
 **Fixed: creating an agent on a connection that does not exist made an agent that could never
 answer.** A model-first create (`POST /api/agents` with `model.connection`) naming a connection the
