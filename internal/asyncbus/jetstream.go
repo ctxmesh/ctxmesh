@@ -18,6 +18,7 @@ package asyncbus
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -51,10 +52,14 @@ const (
 	// hop that triggered it, and the caller has its own deadline to honour.
 	publishTimeout = 10 * time.Second
 
-	// ackWait is how long JetStream waits for an ack before redelivering. It has to exceed a realistic
-	// handler duration (the handler POSTs to an agent, which may be cold-starting) or the broker will
-	// redeliver work that is still in flight and turn at-least-once into a stampede.
-	ackWait = 2 * time.Minute
+	// AckWait is how long JetStream waits for an ack, or a progress report, before redelivering a
+	// message. While a handler runs, Subscribe reports progress every quarter of it, so a message is
+	// redelivered only once its handler has stopped: returned without acking, or died with the process.
+	// It is also above the BFF dispatcher's 105s bound on a delivery, so even a lost progress report
+	// cannot redeliver a hop still being delivered. The consumer sets no BackOff, because JetStream takes
+	// a BackOff's first step as the ack wait of every first delivery, which redelivered any hop taking
+	// longer than that step (5s) while it was still running.
+	AckWait = 2 * time.Minute
 	// defaultMaxAge bounds an undelivered message's life. A day is long enough to cover a dispatcher
 	// outage, a node roll or a night, and short enough that a permanently-dead consumer cannot grow the
 	// store forever. An operator with a different tolerance sets JetStreamOptions.MaxAge.
@@ -64,7 +69,28 @@ const (
 	// message is terminated rather than retried, the same posture the run-worker's poison cap takes. It is
 	// len(redeliveryBackoff)+1 — the first attempt plus one per backoff step.
 	maxDeliver = 5
+
+	// DefaultMaxInFlight is how many messages one durable hands to its handler at once when
+	// JetStreamOptions.MaxInFlight is unset. Delivery is concurrent so that an agent with several replicas
+	// gets work for all of them: the handler waits for the agent's run, so one at a time would leave every
+	// replica but one idle.
+	DefaultMaxInFlight = 8
+
+	// maxSubjectBytes bounds a subject this bus publishes on. A subject is sent on the NATS protocol's
+	// control line, which the server caps (4096 bytes by default) and answers past the cap with an error
+	// that closes the client's connection for good. Platform subjects are five DNS-label tokens, far below
+	// this.
+	maxSubjectBytes = 512
 )
+
+// ackWait is AckWait, as the consumer is configured with it; a test shortens it to watch progress reports
+// keep a slow handler's message from being redelivered.
+var ackWait = AckWait
+
+// ErrConnectionClosed reports a NATS connection that is closed for good: the client gave up on it, or
+// the server ended it. Nothing published or consumed through the bus works again, so the process holding
+// it has to be restarted.
+var ErrConnectionClosed = errors.New("asyncbus: the NATS connection is closed")
 
 // redeliveryBackoff is the delay before each REDELIVERY of a nacked message.
 //
@@ -98,10 +124,13 @@ func Subject(registryID string) string {
 
 // JetStreamBus is both Publisher and Subscriber over one NATS connection.
 type JetStreamBus struct {
-	nc     *nats.Conn
-	js     jetstream.JetStream
-	maxAge time.Duration
-	closed sync.Once
+	nc          *nats.Conn
+	js          jetstream.JetStream
+	maxAge      time.Duration
+	maxInFlight int
+	// connClosed is closed when the connection is closed for good, by Close or by the server.
+	connClosed chan struct{}
+	closed     sync.Once
 }
 
 // JetStreamOptions configures the backend.
@@ -118,6 +147,9 @@ type JetStreamOptions struct {
 	// Replicas is the stream replica count. 1 for a single-node dev broker; 3 for a real cluster. The
 	// default (0 ⇒ 1) is honest about a single-node install rather than pretending to be replicated.
 	Replicas int
+	// MaxInFlight is how many messages one Subscribe hands to its handler at once, and the most
+	// unacknowledged messages the broker gives its durable. Zero ⇒ DefaultMaxInFlight.
+	MaxInFlight int
 }
 
 // NewJetStream connects, ensures the stream exists, and returns the bus. It is safe to call from every
@@ -127,11 +159,15 @@ func NewJetStream(ctx context.Context, opts JetStreamOptions) (*JetStreamBus, er
 	if strings.TrimSpace(opts.URL) == "" {
 		return nil, fmt.Errorf("asyncbus: a NATS URL is required")
 	}
+	connClosed := make(chan struct{})
 	connOpts := []nats.Option{
 		nats.Name("ctxmesh-asyncbus"),
 		// Reconnect indefinitely: a broker restart must not permanently detach a control-plane consumer.
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
+		// Some server errors close a connection with no reconnect at all. Err and Subscribe report it, so
+		// the process can be restarted instead of staying connected to nothing.
+		nats.ClosedHandler(func(*nats.Conn) { close(connClosed) }),
 	}
 	if f := strings.TrimSpace(opts.CredentialsFile); f != "" {
 		connOpts = append(connOpts, nats.UserCredentials(f))
@@ -179,7 +215,11 @@ func NewJetStream(ctx context.Context, opts JetStreamOptions) (*JetStreamBus, er
 		nc.Close()
 		return nil, fmt.Errorf("asyncbus: ensuring stream %q: %w", streamName, err)
 	}
-	return &JetStreamBus{nc: nc, js: js, maxAge: maxAge}, nil
+	maxInFlight := opts.MaxInFlight
+	if maxInFlight <= 0 {
+		maxInFlight = DefaultMaxInFlight
+	}
+	return &JetStreamBus{nc: nc, js: js, maxAge: maxAge, maxInFlight: maxInFlight, connClosed: connClosed}, nil
 }
 
 // Publish durably enqueues the message: it returns only after JetStream has ACKED it, which it does after
@@ -187,6 +227,9 @@ func NewJetStream(ctx context.Context, opts JetStreamOptions) (*JetStreamBus, er
 func (b *JetStreamBus) Publish(ctx context.Context, msg Message) error {
 	if msg.Subject == "" {
 		return fmt.Errorf("asyncbus: a subject is required to publish")
+	}
+	if len(msg.Subject) > maxSubjectBytes {
+		return fmt.Errorf("asyncbus: a %d-byte subject is over the %d-byte limit", len(msg.Subject), maxSubjectBytes)
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishTimeout)
 	defer cancel()
@@ -205,19 +248,25 @@ func (b *JetStreamBus) Publish(ctx context.Context, msg Message) error {
 	return nil
 }
 
-// Subscribe consumes subject under a durable consumer and blocks until ctx is done.
+// Subscribe consumes subject under a durable consumer and blocks until ctx is done, or until the
+// connection is closed for good, which it reports as ErrConnectionClosed.
 //
 // The consumer is created with CreateOrUpdateConsumer, so a restart REJOINS the existing durable rather
 // than starting a fresh one — that is what makes an un-acked or a while-you-were-away message arrive
 // after the consumer comes back, which is the property the whole seam exists for. Subscribing an existing
 // durable with a different subject moves its filter.
+//
+// Up to MaxInFlight messages are handled at once, each acked or nacked on its own, and the broker is held
+// to the same bound (MaxAckPending), so it never hands the durable more unacknowledged messages than
+// there are handlers to run them. A handler must return within AckWait, or the broker redelivers its
+// message while it is still running.
 func (b *JetStreamBus) Subscribe(ctx context.Context, subject, durable string, handler Handler) error {
 	if strings.TrimSpace(subject) == "" || strings.TrimSpace(durable) == "" {
 		return fmt.Errorf("asyncbus: subscribe needs both a subject and a durable name")
 	}
 	stream, err := b.js.Stream(ctx, streamName)
 	if err != nil {
-		return fmt.Errorf("asyncbus: opening stream %q: %w", streamName, err)
+		return fmt.Errorf("asyncbus: opening stream %q: %w", streamName, b.closedOr(err))
 	}
 	cons, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable:       durable,
@@ -226,12 +275,9 @@ func (b *JetStreamBus) Subscribe(ctx context.Context, subject, durable string, h
 		AckPolicy:  jetstream.AckExplicitPolicy,
 		AckWait:    ackWait,
 		MaxDeliver: maxDeliver,
-		// BackOff governs redelivery after an ACK TIMEOUT (a handler that died mid-flight); explicit naks
-		// carry their own delay below. Both follow the same schedule so a failure behaves the same way
-		// whether the handler said "no" or simply never came back.
-		BackOff: redeliveryBackoff,
 		// Deliver everything the durable has not yet acked, oldest first.
 		DeliverPolicy: jetstream.DeliverAllPolicy,
+		MaxAckPending: b.maxInFlight,
 		// A durable nothing has pulled from for twice the stream's retention is deleted by the broker, so
 		// the durable of an agent that is gone does not outlive it forever. Twice is what keeps a re-created
 		// durable exact: every message still stored was published after the old one went quiet, so
@@ -239,40 +285,29 @@ func (b *JetStreamBus) Subscribe(ctx context.Context, subject, durable string, h
 		InactiveThreshold: 2 * b.maxAge,
 	})
 	if err != nil {
-		return fmt.Errorf("asyncbus: creating durable consumer %q: %w", durable, err)
+		if !serverAtLeast(b.nc.ConnectedServerVersion(), 2, 10) {
+			return fmt.Errorf("asyncbus: creating durable consumer %q: %w (NATS 2.10 or newer is required "+
+				"to move a durable's filter; this server is %s)", durable, err, b.nc.ConnectedServerVersion())
+		}
+		return fmt.Errorf("asyncbus: creating durable consumer %q: %w", durable, b.closedOr(err))
 	}
 
+	workers := newWorkerPool(b.maxInFlight)
 	consumeCtx, err := cons.Consume(func(m jetstream.Msg) {
-		// A panicking handler must NOT ack — leaving the message un-acked lets AckWait redeliver it,
-		// which is the correct outcome for a bug we cannot reason about here.
-		defer func() { _ = recover() }()
-
-		headers := make(map[string]string, len(m.Headers()))
-		for k := range m.Headers() {
-			headers[k] = m.Headers().Get(k)
-		}
-		out := Message{
-			ID:      m.Headers().Get(jetstream.MsgIDHeader),
-			Subject: m.Subject(),
-			Data:    m.Data(),
-			Headers: headers,
-		}
-		if err := handler(ctx, out); err != nil {
-			// Redeliver AFTER a backoff, never immediately — see redeliveryBackoff. MaxDeliver bounds the
-			// loop; past it JetStream stops redelivering rather than retrying forever.
-			delay := redeliveryBackoff[0]
-			if meta, mErr := m.Metadata(); mErr == nil {
-				delay = nakDelay(meta.NumDelivered)
-			}
-			_ = m.NakWithDelay(delay)
-			return
-		}
-		_ = m.Ack()
+		// MaxAckPending keeps the broker from delivering more than there are workers, so this rarely
+		// waits: a worker frees as its message is acked.
+		workers.run(func() { handleMessage(ctx, m, handler) })
 	})
 	if err != nil {
-		return fmt.Errorf("asyncbus: consuming %q: %w", subject, err)
+		return fmt.Errorf("asyncbus: consuming %q: %w", subject, b.closedOr(err))
 	}
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case <-b.connClosed:
+		// Nothing can be received or acked on a closed connection, so there is nothing to wait for.
+		consumeCtx.Stop()
+		return b.Err()
+	}
 
 	// Stop() is ASYNCHRONOUS: it signals the consume loop and returns immediately, so
 	// returning here would break this method's contract. A caller that treats the
@@ -281,14 +316,123 @@ func (b *JetStreamBus) Subscribe(ctx context.Context, subject, durable string, h
 	// split the stream between them, and messages meant for the new one are consumed
 	// and acked by the old one, silently.
 	//
-	// Closed() is the client's own "fully stopped/drained, processing complete" signal.
-	// Bounded, because a wedged handler must not hold shutdown open forever.
+	// Closed() is the client's own "fully stopped/drained, processing complete" signal; the handlers it
+	// started are waited for after it, and see ctx done, so they end promptly. Bounded, because a wedged
+	// handler must not hold shutdown open forever.
 	consumeCtx.Stop()
+	deadline := time.NewTimer(consumerStopTimeout)
+	defer deadline.Stop()
 	select {
 	case <-consumeCtx.Closed():
-	case <-time.After(consumerStopTimeout):
+	case <-deadline.C:
+		return nil
+	}
+	handled := make(chan struct{})
+	go func() { workers.wait(); close(handled) }()
+	select {
+	case <-handled:
+	case <-deadline.C:
 	}
 	return nil
+}
+
+// workerPool runs at most a fixed number of functions at once.
+type workerPool struct {
+	slots chan struct{}
+	wg    sync.WaitGroup
+}
+
+func newWorkerPool(n int) *workerPool {
+	return &workerPool{slots: make(chan struct{}, n)}
+}
+
+// run waits for a free worker, then runs fn on it.
+func (p *workerPool) run(fn func()) {
+	p.slots <- struct{}{}
+	p.wg.Go(func() {
+		defer func() { <-p.slots }()
+		fn()
+	})
+}
+
+// wait blocks until every function started by run has returned.
+func (p *workerPool) wait() { p.wg.Wait() }
+
+// handleMessage runs the handler for one message and acks or naks it, reporting progress while the
+// handler runs so the broker does not redeliver the message to another worker meanwhile.
+func handleMessage(ctx context.Context, m jetstream.Msg, handler Handler) {
+	// A panicking handler must NOT ack — leaving the message un-acked lets AckWait redeliver it,
+	// which is the correct outcome for a bug we cannot reason about here.
+	defer func() { _ = recover() }()
+
+	working := make(chan struct{})
+	defer close(working)
+	go func() {
+		tick := time.NewTicker(ackWait / 4)
+		defer tick.Stop()
+		for {
+			select {
+			case <-working:
+				return
+			case <-tick.C:
+				_ = m.InProgress()
+			}
+		}
+	}()
+
+	headers := make(map[string]string, len(m.Headers()))
+	for k := range m.Headers() {
+		headers[k] = m.Headers().Get(k)
+	}
+	out := Message{
+		ID:      m.Headers().Get(jetstream.MsgIDHeader),
+		Subject: m.Subject(),
+		Data:    m.Data(),
+		Headers: headers,
+	}
+	if err := handler(ctx, out); err != nil {
+		// Redeliver AFTER a backoff, never immediately — see redeliveryBackoff. MaxDeliver bounds the
+		// loop; past it JetStream stops redelivering rather than retrying forever.
+		delay := redeliveryBackoff[0]
+		if meta, mErr := m.Metadata(); mErr == nil {
+			delay = nakDelay(meta.NumDelivered)
+		}
+		_ = m.NakWithDelay(delay)
+		return
+	}
+	_ = m.Ack()
+}
+
+// Err is nil while the connection is usable, and wraps ErrConnectionClosed, with the server's reason when
+// there is one, once it is closed for good.
+func (b *JetStreamBus) Err() error {
+	select {
+	case <-b.connClosed:
+	default:
+		return nil
+	}
+	if last := b.nc.LastError(); last != nil {
+		return fmt.Errorf("%w: %w", ErrConnectionClosed, last)
+	}
+	return ErrConnectionClosed
+}
+
+// closedOr is Err when the connection is closed for good, which explains err better, else err.
+func (b *JetStreamBus) closedOr(err error) error {
+	if cErr := b.Err(); cErr != nil {
+		return cErr
+	}
+	return err
+}
+
+// serverAtLeast reports whether a NATS server version "major.minor.patch" is at least major.minor. A
+// version it cannot read counts as new enough, so only a known-old server earns the upgrade hint.
+func serverAtLeast(version string, major, minor int) bool {
+	var gotMajor, gotMinor int
+	if _, err := fmt.Sscanf(strings.TrimPrefix(version, "v"), "%d.%d", &gotMajor, &gotMinor); err != nil {
+		return true
+	}
+	return gotMajor > major || (gotMajor == major && gotMinor >= minor)
 }
 
 // consumerStopTimeout bounds how long Subscribe waits for the consume loop to finish

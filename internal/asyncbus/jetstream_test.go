@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -410,8 +412,18 @@ func TestJetStream_TheRegistryDurableDrainsOnlyRegistryOnlySubjects(t *testing.T
 	bus := newBus(t, url)
 	const durable = "dispatcher-legacy"
 
-	// The durable as an earlier dispatcher created it, filtered on everything.
-	ensureDurable(t, bus, url, "ctxmesh.a2a.>", durable)
+	// The durable as an earlier dispatcher created it: filtered on everything, with a BackOff.
+	nc, err := nats.Connect(url)
+	require.NoError(t, err)
+	defer nc.Close()
+	js, err := jetstream.New(nc)
+	require.NoError(t, err)
+	_, err = js.CreateOrUpdateConsumer(context.Background(), "CTXMESH_A2A", jetstream.ConsumerConfig{
+		Durable: durable, FilterSubject: "ctxmesh.a2a.>", AckPolicy: jetstream.AckExplicitPolicy,
+		AckWait: 5 * time.Second, MaxDeliver: 5, DeliverPolicy: jetstream.DeliverAllPolicy,
+		BackOff: []time.Duration{5 * time.Second, 15 * time.Second, 60 * time.Second, 300 * time.Second},
+	})
+	require.NoError(t, err)
 	require.NoError(t, bus.Publish(context.Background(), hop("old-1", asyncbus.Subject("reg-a"), `{}`)))
 	require.NoError(t, bus.Publish(context.Background(), hop("new-1", jsname.AgentSubject("reg-a", "team-ns", "worker"), `{}`)))
 
@@ -423,6 +435,8 @@ func TestJetStream_TheRegistryDurableDrainsOnlyRegistryOnlySubjects(t *testing.T
 	info, err := consumerInfo(t, url, durable)
 	require.NoError(t, err)
 	assert.Equal(t, jsname.RegistrySubjects, info.Config.FilterSubject, "the durable's filter moved")
+	assert.Empty(t, info.Config.BackOff, "its BackOff is gone, so its ack wait is the full AckWait")
+	assert.Equal(t, asyncbus.AckWait, info.Config.AckWait)
 	require.Eventually(t, func() bool { return lag(t, url, durable) == 0 }, 10*time.Second, 50*time.Millisecond,
 		"the agent-addressed hop is not waiting for the registry durable")
 
@@ -447,4 +461,102 @@ func TestSubscribe_DurableExpiresAfterTwiceTheRetention(t *testing.T) {
 		assert.Equal(t, want, info.Config.InactiveThreshold)
 		require.NoError(t, bus.Close())
 	}
+}
+
+// A hop whose handler takes longer than the old first backoff step is delivered once. With a BackOff the
+// broker took 5s as the ack wait of every first delivery and redelivered a slower hop while it was still
+// being worked on; an agent's run usually takes longer than that.
+func TestSubscribe_ASlowHandlerIsDeliveredOnce(t *testing.T) {
+	bus := newBus(t, startEmbeddedJetStream(t))
+	subject := jsname.AgentSubject("reg-a", "team-ns", "slow")
+	require.NoError(t, bus.Publish(context.Background(), hop("slow-1", subject, `{}`)))
+
+	var calls atomic.Int32
+	finished := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- bus.Subscribe(ctx, jsname.AgentFilter("team-ns", "slow"), jsname.AgentDurable("team-ns", "slow"),
+			func(context.Context, asyncbus.Message) error {
+				if calls.Add(1) == 1 {
+					time.Sleep(8 * time.Second)
+					close(finished)
+				}
+				return nil
+			})
+	}()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the slow hop was never handled")
+	}
+	time.Sleep(2 * time.Second) // a redelivery queued during the slow run would arrive now
+	cancel()
+	require.NoError(t, <-done)
+	assert.Equal(t, int32(1), calls.Load(), "a hop still being handled is not delivered again")
+}
+
+// One durable hands up to MaxInFlight hops to its handler at once, and never more: the broker is held to
+// the same bound, so no hop waits unhandled while its ack wait runs.
+func TestSubscribe_HandlesUpToMaxInFlightAtOnce(t *testing.T) {
+	url := startEmbeddedJetStream(t)
+	const limit = 3
+	bus, err := asyncbus.NewJetStream(context.Background(), asyncbus.JetStreamOptions{URL: url, MaxInFlight: limit})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bus.Close() })
+	subject, durable := jsname.AgentSubject("reg-a", "team-ns", "busy"), jsname.AgentDurable("team-ns", "busy")
+	for i := range 7 {
+		require.NoError(t, bus.Publish(context.Background(), hop(fmt.Sprintf("busy-%d", i), subject, `{}`)))
+	}
+
+	var running, most, handled atomic.Int32
+	release := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- bus.Subscribe(ctx, jsname.AgentFilter("team-ns", "busy"), durable,
+			func(context.Context, asyncbus.Message) error {
+				now := running.Add(1)
+				for seen := most.Load(); now > seen && !most.CompareAndSwap(seen, now); seen = most.Load() {
+				}
+				<-release
+				running.Add(-1)
+				handled.Add(1)
+				return nil
+			})
+	}()
+
+	require.Eventually(t, func() bool { return running.Load() == limit }, 10*time.Second, 10*time.Millisecond,
+		"hops to one agent are handled concurrently")
+	time.Sleep(300 * time.Millisecond)
+	assert.Equal(t, int32(limit), running.Load(), "and no more than the limit at once")
+	info, err := consumerInfo(t, url, durable)
+	require.NoError(t, err)
+	assert.Equal(t, limit, info.Config.MaxAckPending)
+	assert.LessOrEqual(t, info.NumAckPending, limit, "the broker has no more outstanding than there are handlers")
+
+	close(release)
+	require.Eventually(t, func() bool { return handled.Load() == 7 }, 10*time.Second, 10*time.Millisecond)
+	cancel()
+	require.NoError(t, <-done)
+	assert.Equal(t, int32(limit), most.Load())
+}
+
+// A subject too long for the NATS protocol's control line is refused before it is sent. Sent, it would make
+// the server close the connection for good, and every publish and consumer after it would fail until the
+// process restarted.
+func TestJetStream_AnOversizedSubjectIsRefusedAndTheConnectionSurvives(t *testing.T) {
+	bus := newBus(t, startEmbeddedJetStream(t))
+
+	long := jsname.AgentSubject("reg-a", "team-ns", strings.Repeat("a", 4100))
+	require.Error(t, bus.Publish(context.Background(), hop("too-long", long, `{}`)))
+
+	subject := jsname.AgentSubject("reg-a", "team-ns", "worker")
+	require.NoError(t, bus.Publish(context.Background(), hop("after", subject, `{}`)),
+		"the connection is still usable")
+	require.NoError(t, bus.Err())
+	c := newCollector(1)
+	require.True(t, consume(t, bus, jsname.AgentFilter("team-ns", "worker"), jsname.AgentDurable("team-ns", "worker"), c,
+		20*time.Second))
+	assert.Equal(t, "after", c.messages()[0].ID)
 }
