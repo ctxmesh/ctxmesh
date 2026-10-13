@@ -222,13 +222,21 @@ type AgentDeploymentSpec struct {
 	Image string `json:"image"`
 
 	// executionModel determines how the agent runtime is hosted:
-	//   - serving (default): a Knative Service (request-driven), unchanged from M1.
-	//   - eventing: a Knative Service PLUS a Knative Eventing Trigger subscribing it
-	//     to the agent's registry broker (the agent must be a registry member).
+	//   - serving (default): a Knative Service. Knative starts and scales it on
+	//     the requests it receives.
+	//   - eventing: a Deployment named after the agent and a Service named
+	//     <agent>-eventing in front of it, so the agent receives its async AMP hops
+	//     at a fixed address. The agent must be a member of an AgentRegistry. With
+	//     Knative Eventing installed, a Trigger also subscribes the Service to the
+	//     registry's broker for events of type <agent>; without Knative Eventing the
+	//     agent is not Ready. On an install whose async backend is NATS JetStream
+	//     (bff.asyncBackend: jetstream), the platform delivers the agent's hops to
+	//     the Service from a queue of its own, and a queue-depth AgentScalingPolicy
+	//     scales the Deployment on how many are waiting there. Without that scaler
+	//     the Deployment runs a fixed count, scaling.min or 1, kept within the
+	//     bounds of any queue-depth AgentScalingPolicy that targets the agent.
 	//   - job: a one-shot Kubernetes Job (restartPolicy Never), or a CronJob when a
 	//     schedule AgentScalingPolicy targets the agent.
-	// The reconciler branches on this value; serving stays the default so every
-	// M1-M6 agent is unaffected.
 	// +optional
 	// +kubebuilder:default=serving
 	// +kubebuilder:validation:Enum=serving;eventing;job

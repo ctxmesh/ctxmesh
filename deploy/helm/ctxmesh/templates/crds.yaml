@@ -359,13 +359,21 @@ spec:
                 default: serving
                 description: |-
                   executionModel determines how the agent runtime is hosted:
-                    - serving (default): a Knative Service (request-driven), unchanged from M1.
-                    - eventing: a Knative Service PLUS a Knative Eventing Trigger subscribing it
-                      to the agent's registry broker (the agent must be a registry member).
+                    - serving (default): a Knative Service. Knative starts and scales it on
+                      the requests it receives.
+                    - eventing: a Deployment named after the agent and a Service named
+                      <agent>-eventing in front of it, so the agent receives its async AMP hops
+                      at a fixed address. The agent must be a member of an AgentRegistry. With
+                      Knative Eventing installed, a Trigger also subscribes the Service to the
+                      registry's broker for events of type <agent>; without Knative Eventing the
+                      agent is not Ready. On an install whose async backend is NATS JetStream
+                      (bff.asyncBackend: jetstream), the platform delivers the agent's hops to
+                      the Service from a queue of its own, and a queue-depth AgentScalingPolicy
+                      scales the Deployment on how many are waiting there. Without that scaler
+                      the Deployment runs a fixed count, scaling.min or 1, kept within the
+                      bounds of any queue-depth AgentScalingPolicy that targets the agent.
                     - job: a one-shot Kubernetes Job (restartPolicy Never), or a CronJob when a
                       schedule AgentScalingPolicy targets the agent.
-                  The reconciler branches on this value; serving stays the default so every
-                  M1-M6 agent is unaffected.
                 enum:
                 - serving
                 - eventing
@@ -1803,8 +1811,9 @@ spec:
         description: |-
           AgentScalingPolicy defines an elastic scaling rule for an AgentDeployment
           (specs/eventing-scaling.md, PRD §18). The controller generates the
-          appropriate backend resource (Knative autoscaling annotations, KEDA
-          ScaledObject, or a CronJob) based on spec.trigger.
+          appropriate backend resource (Knative autoscaling annotations, a KEDA
+          ScaledObject, or a CronJob) based on spec.trigger, and reports in its Ready
+          condition when the install or the agent cannot support that trigger.
         properties:
           apiVersion:
             description: |-
@@ -1873,27 +1882,25 @@ spec:
               min:
                 default: 0
                 description: |-
-                  min is the minimum replica count. 0 enables scale-to-zero (KEDA idles the
-                  consumer when the queue is empty). Defaults to 0.
+                  min is the minimum replica count. 0 enables scale-to-zero: with a queue-depth
+                  trigger, KEDA stops the agent while nothing waits for it and starts it when a
+                  hop arrives. Defaults to 0.
                 format: int32
                 minimum: 0
                 type: integer
               queueRef:
                 description: |-
-                  queueRef identifies the Knative Eventing Broker to use as the queue-depth
-                  scaler source. When omitted the controller defaults to the registry broker
-                  in the same namespace (resolved from the agent's AgentRegistry membership).
-                  Only meaningful when trigger is "queue-depth".
+                  queueRef is not used. A queue-depth policy scales on the agent's own
+                  JetStream consumer, which the platform names after the agent, so there is no
+                  queue to choose. It is accepted so existing manifests stay valid.
                 properties:
                   name:
-                    description: name is the name of the Broker resource.
+                    description: name is the name of the queue. Not used.
                     maxLength: 253
                     minLength: 1
                     type: string
                   namespace:
-                    description: |-
-                      namespace is the namespace of the Broker. Defaults to the policy's own
-                      namespace when omitted.
+                    description: namespace is the namespace of the queue. Not used.
                     maxLength: 63
                     type: string
                 required:
@@ -1912,8 +1919,16 @@ spec:
                   trigger selects the scaling backend that the controller generates.
                   - request-rate: Knative autoscaling annotations (concurrency/rps) on the ksvc.
                   - custom-metric: Knative custom autoscaling class/metric annotations on the ksvc.
-                  - queue-depth: KEDA ScaledObject targeting the agent deployment; scaler reads
-                    the AgentRegistry broker depth (PRD §18).
+                  - queue-depth: a KEDA ScaledObject that scales an eventing agent's Deployment
+                    on the number of async AMP hops waiting for it, about one replica for every
+                    10 waiting. The hops wait in the agent's own consumer on the NATS JetStream
+                    async backend, so this needs bff.asyncBackend: jetstream and KEDA. On an
+                    install without that backend, including one whose async hops ride Knative
+                    Eventing, there is no queue to read: no ScaledObject is created, the Ready
+                    condition is False with reason QueueDepthNeedsJetStream, and the agent runs
+                    a fixed replica count kept between min (at least 1) and max. An agent that
+                    is not an eventing agent gets reason QueueDepthNeedsEventing and no
+                    ScaledObject.
                   - schedule: a CronJob for executionModel=job agents; schedule field required.
                 enum:
                 - request-rate
@@ -1936,9 +1951,9 @@ spec:
             properties:
               backend:
                 description: |-
-                  backend records which backend the controller selected based on the trigger.
-                  Examples: "knative-annotations", "keda-scaledobject", "cronjob".
-                  Set after the first successful reconcile.
+                  backend records which backend the controller selected based on the trigger:
+                  "knative-autoscaling", "keda-scaledobject" or "cronjob". Empty while no
+                  backend is in effect, as when a queue-depth policy has no queue to read.
                 maxLength: 128
                 type: string
               conditions:
@@ -1946,7 +1961,9 @@ spec:
                   conditions reflect the policy's reconciliation state.
                   Ready=True means the target AgentDeployment exists and the chosen backend
                   resource has been created or updated successfully.
-                  Known failure reasons: AgentNotFound, InvalidTrigger, BackendError.
+                  Known failure reasons: AgentNotFound, InvalidTrigger, BackendError,
+                  QueueDepthNeedsJetStream (the install has no queue to read) and
+                  QueueDepthNeedsEventing (the agent is not an eventing agent).
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.

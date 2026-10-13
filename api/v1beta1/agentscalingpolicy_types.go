@@ -21,17 +21,16 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 )
 
-// QueueRef identifies the Knative Eventing Broker (or compatible queue source)
-// that the scaling controller reads queue depth from. When omitted the
-// controller defaults to the AgentRegistry broker in the same namespace.
+// QueueRef names a queue for a queue-depth policy. It is not used: the queue a
+// queue-depth policy scales on is the agent's own JetStream consumer, which the
+// platform names after the agent.
 type QueueRef struct {
-	// name is the name of the Broker resource.
+	// name is the name of the queue. Not used.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// namespace is the namespace of the Broker. Defaults to the policy's own
-	// namespace when omitted.
+	// namespace is the namespace of the queue. Not used.
 	// +kubebuilder:validation:MaxLength=63
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
@@ -68,14 +67,23 @@ type AgentScalingPolicySpec struct {
 	// trigger selects the scaling backend that the controller generates.
 	// - request-rate: Knative autoscaling annotations (concurrency/rps) on the ksvc.
 	// - custom-metric: Knative custom autoscaling class/metric annotations on the ksvc.
-	// - queue-depth: KEDA ScaledObject targeting the agent deployment; scaler reads
-	//   the AgentRegistry broker depth (PRD §18).
+	// - queue-depth: a KEDA ScaledObject that scales an eventing agent's Deployment
+	//   on the number of async AMP hops waiting for it, about one replica for every
+	//   10 waiting. The hops wait in the agent's own consumer on the NATS JetStream
+	//   async backend, so this needs bff.asyncBackend: jetstream and KEDA. On an
+	//   install without that backend, including one whose async hops ride Knative
+	//   Eventing, there is no queue to read: no ScaledObject is created, the Ready
+	//   condition is False with reason QueueDepthNeedsJetStream, and the agent runs
+	//   a fixed replica count kept between min (at least 1) and max. An agent that
+	//   is not an eventing agent gets reason QueueDepthNeedsEventing and no
+	//   ScaledObject.
 	// - schedule: a CronJob for executionModel=job agents; schedule field required.
 	// +kubebuilder:validation:Enum=request-rate;custom-metric;queue-depth;schedule
 	Trigger string `json:"trigger"`
 
-	// min is the minimum replica count. 0 enables scale-to-zero (KEDA idles the
-	// consumer when the queue is empty). Defaults to 0.
+	// min is the minimum replica count. 0 enables scale-to-zero: with a queue-depth
+	// trigger, KEDA stops the agent while nothing waits for it and starts it when a
+	// hop arrives. Defaults to 0.
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
 	// +optional
@@ -102,10 +110,9 @@ type AgentScalingPolicySpec struct {
 	// +optional
 	Schedule string `json:"schedule,omitempty"`
 
-	// queueRef identifies the Knative Eventing Broker to use as the queue-depth
-	// scaler source. When omitted the controller defaults to the registry broker
-	// in the same namespace (resolved from the agent's AgentRegistry membership).
-	// Only meaningful when trigger is "queue-depth".
+	// queueRef is not used. A queue-depth policy scales on the agent's own
+	// JetStream consumer, which the platform names after the agent, so there is no
+	// queue to choose. It is accepted so existing manifests stay valid.
 	// +optional
 	QueueRef *QueueRef `json:"queueRef,omitempty"`
 
@@ -117,9 +124,9 @@ type AgentScalingPolicySpec struct {
 
 // AgentScalingPolicyStatus defines the observed state of an AgentScalingPolicy.
 type AgentScalingPolicyStatus struct {
-	// backend records which backend the controller selected based on the trigger.
-	// Examples: "knative-annotations", "keda-scaledobject", "cronjob".
-	// Set after the first successful reconcile.
+	// backend records which backend the controller selected based on the trigger:
+	// "knative-autoscaling", "keda-scaledobject" or "cronjob". Empty while no
+	// backend is in effect, as when a queue-depth policy has no queue to read.
 	// +kubebuilder:validation:MaxLength=128
 	// +optional
 	Backend string `json:"backend,omitempty"`
@@ -132,7 +139,9 @@ type AgentScalingPolicyStatus struct {
 	// conditions reflect the policy's reconciliation state.
 	// Ready=True means the target AgentDeployment exists and the chosen backend
 	// resource has been created or updated successfully.
-	// Known failure reasons: AgentNotFound, InvalidTrigger, BackendError.
+	// Known failure reasons: AgentNotFound, InvalidTrigger, BackendError,
+	// QueueDepthNeedsJetStream (the install has no queue to read) and
+	// QueueDepthNeedsEventing (the agent is not an eventing agent).
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -150,8 +159,9 @@ type AgentScalingPolicyStatus struct {
 
 // AgentScalingPolicy defines an elastic scaling rule for an AgentDeployment
 // (specs/eventing-scaling.md, PRD §18). The controller generates the
-// appropriate backend resource (Knative autoscaling annotations, KEDA
-// ScaledObject, or a CronJob) based on spec.trigger.
+// appropriate backend resource (Knative autoscaling annotations, a KEDA
+// ScaledObject, or a CronJob) based on spec.trigger, and reports in its Ready
+// condition when the install or the agent cannot support that trigger.
 type AgentScalingPolicy struct {
 	metav1.TypeMeta `json:",inline"`
 
