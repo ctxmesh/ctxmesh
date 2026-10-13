@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -120,6 +121,33 @@ func TestCacheScopeFiltersEveryScopedKindOnTheManagedLabel(t *testing.T) {
 	for _, gk := range []string{"Namespace", "Revision.serving.knative.dev", "ValidatingWebhookConfiguration.admissionregistration.k8s.io"} {
 		assert.NotContains(t, got, gk)
 	}
+	assert.NotContains(t, got, "ServiceAccount",
+		"every agent reconcile reads its namespace's unlabelled default ServiceAccount: scoping it makes each read an API call")
+}
+
+// failingMapper answers like mapper except for one kind, whose lookup fails the way an unreachable
+// discovery endpoint does.
+type failingMapper struct {
+	meta.RESTMapper
+	fail schema.GroupKind
+}
+
+func (m failingMapper) RESTMapping(gk schema.GroupKind, versions ...string) (*meta.RESTMapping, error) {
+	if gk == m.fail {
+		return nil, errors.New("the server is currently unable to handle the request")
+	}
+	return m.RESTMapper.RESTMapping(gk, versions...)
+}
+
+func TestCacheScopeRefusesToGuessWhenDiscoveryFails(t *testing.T) {
+	// "Not served" is a NoMatch answer. Any other failure is not an answer, and skipping the kind on it
+	// would leave a kind the controller watches cached cluster-wide with nothing to say so.
+	s := cacheScopeTestScheme(t)
+	job := schema.GroupKind{Group: batchv1.GroupName, Kind: "Job"}
+	_, err := CacheScope{}.byObject(s, failingMapper{RESTMapper: restMapperServing(t, s), fail: job})
+	require.Error(t, err, "a discovery failure must stop the manager, not unscope the kind")
+	assert.Contains(t, err.Error(), "Job")
+	assert.False(t, meta.IsNoMatchError(err))
 }
 
 func TestCacheScopeSkipsKindsTheClusterDoesNotServe(t *testing.T) {
@@ -207,14 +235,25 @@ func TestScopedClientGetFindsWhatTheCacheCannotSee(t *testing.T) {
 		ObjectMeta:       metav1.ObjectMeta{Name: "default", Namespace: "team"},
 		ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}},
 	}
-	tenantQuota := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{
-		Name: tenantQuotaName, Namespace: "team", Labels: map[string]string{agentsv1beta1.TenantLabel: "acme"},
+	tenantLabels := map[string]string{agentsv1beta1.TenantLabel: "acme"}
+	tenantQuota := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: tenantQuotaName, Namespace: "team", Labels: tenantLabels}}
+	tenantPolicy := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{
+		Name: tenantNetworkPolicyName, Namespace: "team", Labels: tenantLabels,
+	}}
+	otherQuota := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: "team-quota", Namespace: "team", Labels: tenantLabels}}
+	tenantLabelledCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "team-settings", Namespace: "team", Labels: tenantLabels}}
+	notController := agentOwnerRef()
+	notController.Controller = ptr.To(false)
+	referencing := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: "referencing", Namespace: "team", OwnerReferences: []metav1.OwnerReference{notController},
 	}}
 	gatewayCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
 		Name: "ctxmesh-gateway-config", Namespace: scopeTestPlatformNS, OwnerReferences: []metav1.OwnerReference{agentOwnerRef()},
 	}}
 	agent := &agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "not-cached-yet", Namespace: "team"}}
-	f := newScopedFixture(t, []client.Object{labelled}, []client.Object{user, preLabel, defaultSA, tenantQuota, gatewayCM, agent})
+	f := newScopedFixture(t, []client.Object{labelled, defaultSA}, []client.Object{
+		user, preLabel, tenantQuota, tenantPolicy, otherQuota, tenantLabelledCM, referencing, gatewayCM, agent,
+	})
 
 	var cm corev1.ConfigMap
 	require.NoError(t, f.c.Get(ctx, client.ObjectKeyFromObject(labelled), &cm), "a labelled object is a cache hit")
@@ -226,19 +265,26 @@ func TestScopedClientGetFindsWhatTheCacheCannotSee(t *testing.T) {
 
 	var sa corev1.ServiceAccount
 	require.NoError(t, f.c.Get(ctx, client.ObjectKeyFromObject(defaultSA), &sa),
-		"the namespace default ServiceAccount is read for its pull secrets; a NotFound would silently drop them")
+		"the namespace default ServiceAccount is read for its pull secrets, from the cache")
 	assert.Equal(t, defaultSA.ImagePullSecrets, sa.ImagePullSecrets)
-	assert.NotContains(t, sa.Labels, ManagedByLabel)
 
 	require.NoError(t, f.c.Get(ctx, client.ObjectKeyFromObject(preLabel), &cm), "an object written before the label existed must be found")
 	assert.Equal(t, ManagedByValue, cm.Labels[ManagedByLabel], "and labelled, so its changes reach the controller's watches")
 	require.NoError(t, f.live.Get(ctx, client.ObjectKeyFromObject(preLabel), &cm))
 	assert.Equal(t, ManagedByValue, cm.Labels[ManagedByLabel], "the label is persisted, not only set on the returned copy")
 
-	var rq corev1.ResourceQuota
-	require.NoError(t, f.c.Get(ctx, client.ObjectKeyFromObject(tenantQuota), &rq))
-	require.NoError(t, f.live.Get(ctx, client.ObjectKeyFromObject(tenantQuota), &rq))
-	assert.Equal(t, ManagedByValue, rq.Labels[ManagedByLabel], "a Tenant's per-namespace quota is the controller's, though it has no owner")
+	labelledInLive := func(obj client.Object) bool {
+		t.Helper()
+		got := obj.DeepCopyObject().(client.Object)
+		require.NoError(t, f.c.Get(ctx, client.ObjectKeyFromObject(obj), got), "%T %s must be found", obj, obj.GetName())
+		require.NoError(t, f.live.Get(ctx, client.ObjectKeyFromObject(obj), got))
+		return got.GetLabels()[ManagedByLabel] == ManagedByValue
+	}
+	assert.True(t, labelledInLive(tenantQuota), "a Tenant's quota is the controller's, though it has no owner")
+	assert.True(t, labelledInLive(tenantPolicy), "so is a Tenant's NetworkPolicy")
+	assert.False(t, labelledInLive(otherQuota), "a quota the Tenant controller does not write is not its own")
+	assert.False(t, labelledInLive(tenantLabelledCM), "nor is anything else that carries the tenant label")
+	assert.False(t, labelledInLive(referencing), "an owner reference that is not the controller reference does not make it ours")
 
 	require.NoError(t, f.c.Get(ctx, client.ObjectKeyFromObject(gatewayCM), &cm))
 	require.NoError(t, f.live.Get(ctx, client.ObjectKeyFromObject(gatewayCM), &cm))
@@ -284,7 +330,6 @@ func TestScopedClientStampsWhatTheControllerWrites(t *testing.T) {
 	writes := []client.Object{
 		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm", Namespace: "team"}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "svc", Namespace: "team"}},
-		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "sa", Namespace: "team"}},
 		&corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: "rq", Namespace: "team"}},
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "dep", Namespace: "team"}},
 		&batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "job", Namespace: "team"}},
@@ -325,6 +370,7 @@ func TestScopedClientStampsWhatTheControllerWrites(t *testing.T) {
 
 	for _, obj := range []client.Object{
 		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "team"}},
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "sa", Namespace: "team"}},
 		&agentsv1beta1.AgentDeployment{ObjectMeta: metav1.ObjectMeta{Name: "ad", Namespace: "team"}},
 	} {
 		require.NoError(t, f.c.Create(ctx, obj))

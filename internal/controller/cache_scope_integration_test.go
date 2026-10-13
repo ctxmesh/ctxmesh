@@ -118,7 +118,6 @@ func scopedKindSamples(ns, name string) []client.Object {
 	return []client.Object{
 		&corev1.ConfigMap{ObjectMeta: meta},
 		&corev1.Service{ObjectMeta: meta, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}},
-		&corev1.ServiceAccount{ObjectMeta: meta},
 		&corev1.ResourceQuota{ObjectMeta: meta, Spec: corev1.ResourceQuotaSpec{
 			Hard: corev1.ResourceList{corev1.ResourcePods: resource.MustParse("1")},
 		}},
@@ -208,18 +207,18 @@ func TestCacheScopeReadsFindObjectsTheControllerDidNotLabel(t *testing.T) {
 		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, obj) })
 	}
 
-	t.Run("the namespace default ServiceAccount, read for its pull secrets", func(t *testing.T) {
+	t.Run("the namespace default ServiceAccount, read every reconcile for its pull secrets", func(t *testing.T) {
 		sa := &corev1.ServiceAccount{
 			ObjectMeta:       metav1.ObjectMeta{Name: defaultServiceAccountName, Namespace: ns},
 			ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}},
 		}
 		create(t, sa)
-		notInCache(t, sa)
+		require.Eventually(t, func() bool {
+			return env.cache.Get(testCtx, client.ObjectKeyFromObject(sa), &corev1.ServiceAccount{}) == nil
+		}, 10*time.Second, 50*time.Millisecond, "it stays cached, or every agent reconcile costs an API call")
 		var got corev1.ServiceAccount
 		require.NoError(t, env.client.Get(testCtx, client.ObjectKeyFromObject(sa), &got))
 		assert.Equal(t, sa.ImagePullSecrets, got.ImagePullSecrets)
-		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(sa), &got))
-		assert.NotContains(t, got.Labels, ManagedByLabel, "the controller must not label a ServiceAccount it does not own")
 	})
 
 	t.Run("a user's ConfigMap", func(t *testing.T) {
@@ -251,6 +250,33 @@ func TestCacheScopeReadsFindObjectsTheControllerDidNotLabel(t *testing.T) {
 		require.Eventually(t, func() bool {
 			return env.cache.Get(testCtx, client.ObjectKeyFromObject(cm), &corev1.ConfigMap{}) == nil
 		}, 10*time.Second, 50*time.Millisecond, "and from then on its changes reach the cache")
+	})
+
+	t.Run("an owned object whose label was removed", func(t *testing.T) {
+		agent := &agentsv1beta1.AgentDeployment{
+			ObjectMeta: metav1.ObjectMeta{Name: "relabel", Namespace: ns},
+			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "example.test/agent:1", Port: 8080},
+		}
+		create(t, agent)
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "relabel-routes", Namespace: ns}}
+		require.NoError(t, ctrl.SetControllerReference(agent, cm, k8sClient.Scheme()))
+		require.NoError(t, env.client.Create(testCtx, cm))
+		t.Cleanup(func() { _ = k8sClient.Delete(testCtx, cm) })
+		inCache := func() bool { return env.cache.Get(testCtx, client.ObjectKeyFromObject(cm), &corev1.ConfigMap{}) == nil }
+		require.Eventually(t, inCache, 10*time.Second, 50*time.Millisecond)
+
+		var stripped corev1.ConfigMap
+		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(cm), &stripped))
+		delete(stripped.Labels, ManagedByLabel)
+		require.NoError(t, k8sClient.Update(testCtx, &stripped))
+		require.Eventually(t, func() bool { return !inCache() }, 10*time.Second, 50*time.Millisecond,
+			"without the label the object leaves the cache, and its changes stop reaching the controller")
+
+		var got corev1.ConfigMap
+		require.NoError(t, env.client.Get(testCtx, client.ObjectKeyFromObject(cm), &got), "the next read still finds it")
+		require.NoError(t, k8sClient.Get(testCtx, client.ObjectKeyFromObject(cm), &got))
+		assert.Equal(t, ManagedByValue, got.Labels[ManagedByLabel], "and puts the label back")
+		require.Eventually(t, inCache, 10*time.Second, 50*time.Millisecond, "so it is cached again")
 	})
 
 	t.Run("a Tenant's quota, which has no owner in its namespace", func(t *testing.T) {

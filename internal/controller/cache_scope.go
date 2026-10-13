@@ -44,11 +44,14 @@ const (
 // labelScopedKinds are the kinds the controller creates and then watches or reads back. A kind missing
 // here is cached cluster-wide. Every read of these kinds goes through scopedClient, which keeps it exact;
 // a read straight from mgr.GetCache() sees only the labelled objects.
+//
+// ServiceAccount stays out: every agent reconcile reads its namespace's default ServiceAccount, which
+// carries no label, so scoping it would turn each of those reads into an API call. ServiceAccounts are
+// small and bounded by the number of namespaces.
 func labelScopedKinds() []client.Object {
 	return []client.Object{
 		&corev1.ConfigMap{},
 		&corev1.Service{},
-		&corev1.ServiceAccount{},
 		&corev1.ResourceQuota{},
 		&appsv1.Deployment{},
 		&batchv1.Job{},
@@ -120,7 +123,8 @@ func (s CacheScope) labelFiltered(kind client.Object, namespace string) bool {
 
 // NewCache builds the manager cache with the label-scoped kinds filtered to the managed-by label. A kind
 // the cluster does not serve (Knative Eventing and KEDA are optional) gets no entry, because cache.New
-// resolves every entry against the API and refuses to start on one it cannot find.
+// resolves every entry against the API and refuses to start on one it cannot find. A discovery failure
+// is returned: guessing "not served" would leave a kind the controller watches cached cluster-wide.
 func (s CacheScope) NewCache(cfg *rest.Config, opts cache.Options) (cache.Cache, error) {
 	byObject, err := s.byObject(opts.Scheme, opts.Mapper)
 	if err != nil {
@@ -170,7 +174,10 @@ func (s CacheScope) byObject(scheme *runtime.Scheme, mapper meta.RESTMapper) (ma
 			continue
 		}
 		if _, err := mapper.RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
-			log.Info("not scoping a kind the cluster does not serve; it is not watched either", "kind", gvk.String(), "reason", err.Error())
+			if !meta.IsNoMatchError(err) {
+				return nil, fmt.Errorf("cache scope: cannot tell whether the cluster serves %s: %w", gvk, err)
+			}
+			log.Info("not scoping a kind the cluster does not serve; it is not watched either", "kind", gvk.String())
 			continue
 		}
 		unfiltered := s.unfilteredNamespaces(obj)
@@ -286,9 +293,8 @@ func (c *scopedClient) Get(ctx context.Context, key client.ObjectKey, obj client
 	return c.adopt(ctx, obj)
 }
 
-// adopt labels an object the controller owns but its cache cannot see. Ownership is a reference to one of
-// the controller's kinds, or the tenant label on the per-namespace objects a Tenant stamps (a namespaced
-// object cannot be owned from another namespace). Anything else it read but did not create is left as is.
+// adopt labels an object the controller owns but its cache cannot see. Anything else it read but did not
+// create is left as is.
 func (c *scopedClient) adopt(ctx context.Context, obj client.Object) error {
 	if !c.filtered(obj) || obj.GetLabels()[ManagedByLabel] == ManagedByValue || !ownedByController(obj) {
 		return nil
@@ -304,14 +310,26 @@ func (c *scopedClient) adopt(ctx context.Context, obj client.Object) error {
 	return nil
 }
 
+// ownedByController reports whether obj is one the controller manages: one whose controller reference is
+// one of the controller's kinds, or the quota and NetworkPolicy a Tenant stamps into each member namespace,
+// which carry the tenant label and no owner reference.
 func ownedByController(obj client.Object) bool {
 	for _, ref := range obj.GetOwnerReferences() {
-		if gv, err := schema.ParseGroupVersion(ref.APIVersion); err == nil && gv.Group == agentsv1beta1.GroupVersion.Group {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err == nil && gv.Group == agentsv1beta1.GroupVersion.Group && ref.Controller != nil && *ref.Controller {
 			return true
 		}
 	}
-	_, tenant := obj.GetLabels()[agentsv1beta1.TenantLabel]
-	return tenant
+	if obj.GetLabels()[agentsv1beta1.TenantLabel] == "" {
+		return false
+	}
+	switch obj.(type) {
+	case *corev1.ResourceQuota:
+		return obj.GetName() == tenantQuotaName
+	case *networkingv1.NetworkPolicy:
+		return obj.GetName() == tenantNetworkPolicyName
+	}
+	return false
 }
 
 func (c *scopedClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
