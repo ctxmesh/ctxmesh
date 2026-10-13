@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
 
@@ -118,14 +119,18 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "the CloudEvent needs an id (ce-id) — it is the idempotency key")
 		return
 	}
-	if strings.TrimSpace(r.Header.Get(ceTypeHeader)) == "" {
+	receiver := strings.TrimSpace(r.Header.Get(ceTypeHeader))
+	if receiver == "" {
 		writeError(w, http.StatusBadRequest, "the CloudEvent needs a type (ce-type) — it names the receiver")
 		return
 	}
+	s.noteReceiverWithoutRegistry(r, caller.Namespace, receiver, messageID)
 
 	msg := asyncbus.Message{
-		ID:      messageID,
-		Subject: asyncbus.Subject(self.RegistryID),
+		ID: messageID,
+		// Addressed to the receiver, so the hop waits in that agent's own queue: its pending count is what
+		// a queue-depth AgentScalingPolicy scales the agent on.
+		Subject: jsname.AgentSubject(self.RegistryID, caller.Namespace, receiver),
 		Data:    body,
 		Headers: asyncPublishHeaders(r.Header, caller.Namespace, self.RegistryID, caller.Agent),
 	}
@@ -137,6 +142,22 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 	}
 	// 202: durably accepted, not yet delivered — the seam's contract exactly.
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// noteReceiverWithoutRegistry logs a hop to an agent that belongs to no registry. The dispatcher keeps a
+// queue only for registry members, so such a hop waits until the agent joins one, or until the stream's
+// retention drops it, and nothing else would record that it is waiting. It is still accepted: two agents
+// created together can publish before the controller has recorded the receiver.
+func (s *Server) noteReceiverWithoutRegistry(r *http.Request, namespace, receiver, messageID string) {
+	row, ok, err := s.agentCapabilities.Get(r.Context(), namespace, receiver)
+	if err != nil {
+		s.log.Error(err, "async publish: could not check the receiver's registry", "receiver", namespace+"/"+receiver)
+		return
+	}
+	if !ok || row.RegistryID == "" {
+		s.log.Info("async publish: the receiver belongs to no registry yet; the hop waits until it joins one "+
+			"or expires", "receiver", namespace+"/"+receiver, "messageId", messageID)
+	}
 }
 
 // asyncPublishHeaders copies the CloudEvent binding headers and stamps the platform's authoritative

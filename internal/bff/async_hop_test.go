@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentcapability"
 	"github.com/ctxmesh/ctxmesh/internal/run"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
@@ -116,8 +117,8 @@ func TestAsyncPublish_EnqueuesOnTheSendersRegistrySubject(t *testing.T) {
 	sent := bus.published()
 	require.Len(t, sent, 1)
 	assert.Equal(t, "msg-1", sent[0].ID, "the CloudEvent id is the idempotency key")
-	assert.Equal(t, asyncbus.Subject("reg-a"), sent[0].Subject,
-		"routed by the registry the CONTROL PLANE says the sender is in")
+	assert.Equal(t, jsname.AgentSubject("reg-a", "team-ns", "reviewer"), sent[0].Subject,
+		"routed by the registry the CONTROL PLANE says the sender is in, to the receiver's own queue")
 	assert.Equal(t, `{"messageId":"msg-1"}`, string(sent[0].Data), "the CloudEvent body is moved verbatim")
 	assert.Equal(t, "reviewer", sent[0].Headers["Ce-Type"], "the binding headers survive the hop")
 	assert.Equal(t, "team-ns", sent[0].Headers[headerAsyncNamespace])
@@ -141,7 +142,8 @@ func TestAsyncPublish_CallerCannotForgeItsRegistryOrNamespace(t *testing.T) {
 
 	sent := bus.published()
 	require.Len(t, sent, 1)
-	assert.Equal(t, asyncbus.Subject("reg-a"), sent[0].Subject, "the forged registry is ignored")
+	assert.Equal(t, jsname.AgentSubject("reg-a", "team-ns", "reviewer"), sent[0].Subject,
+		"the forged registry and namespace are ignored")
 	assert.Equal(t, "reg-a", sent[0].Headers[headerAsyncRegistry], "the platform re-stamps its own view")
 	assert.Equal(t, "team-ns", sent[0].Headers[headerAsyncNamespace])
 }
