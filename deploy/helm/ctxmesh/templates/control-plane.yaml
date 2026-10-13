@@ -1096,6 +1096,10 @@ spec:
           value: {{ .Values.controllerManager.egress.streamIdleTimeout | default "" | quote }}
         - name: KNOWLEDGE_SETTLE_WINDOW
           value: {{ .Values.knowledgeSettleWindow | default "" | quote }}
+        - name: ASYNC_BACKEND
+          value: {{ .Values.bff.asyncBackend | default "" | quote }}
+        - name: NATS_URL
+          value: {{ .Values.bff.natsURL | default "" | quote }}
         envFrom:
         - secretRef:
             name: ctxmesh-postgres-dsn

@@ -652,6 +652,7 @@ func main() {
 	}
 	if err := (&controller.AgentScalingPolicyReconciler{
 		KEDAAvailable: kedaAvailable,
+		AsyncBackend:  controller.AsyncBackendFromEnv(os.Getenv),
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {

@@ -216,6 +216,14 @@ spec:
           # `knowledgeSettleWindow` key since M143 that reached no container.
           - name: KNOWLEDGE_SETTLE_WINDOW
             value: ""
+          # The async backend, from the same chart values the BFF reads (bff.asyncBackend,
+          # bff.natsURL). The controller never connects to the broker: a queue-depth
+          # AgentScalingPolicy names, in its ScaledObject, where KEDA reads the agent's
+          # queue, and without the JetStream backend there is none to name.
+          - name: ASYNC_BACKEND
+            value: ""
+          - name: NATS_URL
+            value: ""
         # CONTROLPLANE_DSN (ADR 0044) — the manager REQUIRES it at startup (ToolRegistry
         # retired to Postgres; cmd/main.go hard-exits without it). Sourced from the shared
         # bff-adapters Secret (same one the BFF/run-worker/token-service read), never a
