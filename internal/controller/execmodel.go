@@ -292,7 +292,10 @@ func (r *AgentDeploymentReconciler) reconcileEventingDeployment(
 	maps.Copy(podLabels, pod.labels)
 	maps.Copy(podLabels, selector)
 
-	replicas := eventingReplicas(deploy)
+	replicas, kedaScales, err := r.eventingReplicaPlan(ctx, deploy)
+	if err != nil {
+		return fmt.Errorf("resolving queue-depth policy: %w", err)
+	}
 
 	dep := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -302,7 +305,11 @@ func (r *AgentDeploymentReconciler) reconcileEventingDeployment(
 	}
 
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, dep, func() error {
-		dep.Spec.Replicas = &replicas
+		// While KEDA scales the Deployment, its HPA owns spec.replicas: writing it here on every
+		// reconcile would undo each scale-up the moment the Deployment changed.
+		if !kedaScales || dep.Spec.Replicas == nil {
+			dep.Spec.Replicas = &replicas
+		}
 		// spec.selector is immutable post-create; set it once. On update
 		// CreateOrUpdate re-applies the same derived value, so it never drifts.
 		dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: selector}
@@ -324,11 +331,47 @@ func (r *AgentDeploymentReconciler) reconcileEventingDeployment(
 	return nil
 }
 
+// eventingReplicaPlan decides who sets an eventing Deployment's replicas.
+//
+// With no queue-depth policy, the count is fixed at eventingReplicas. While a queue-depth policy's
+// ScaledObject is in effect (its status.backend is keda-scaledobject, which the policy controller sets
+// only once the ScaledObject exists and clears when it deletes it), KEDA's HPA owns the count and
+// replicas is only the starting point for a new Deployment. A queue-depth policy with no ScaledObject,
+// because the install has no queue to read, still bounds the fixed count: it is raised to min and
+// lowered to max. A min of 0 cannot be honoured without a queue metric, since nothing would wake an agent
+// at zero, so the floor is 1. Of several queue-depth policies the first by name applies, matching which
+// ScaledObject KEDA accepts.
+func (r *AgentDeploymentReconciler) eventingReplicaPlan(
+	ctx context.Context,
+	deploy *agentsv1beta1.AgentDeployment,
+) (replicas int32, kedaScales bool, err error) {
+	replicas = eventingReplicas(deploy)
+	policies, err := listAgentScalingPolicies(ctx, r.Client, deploy.Namespace, deploy.Name)
+	if err != nil {
+		return 0, false, err
+	}
+	var chosen *agentsv1beta1.AgentScalingPolicy
+	for i := range policies {
+		if policies[i].Spec.Trigger == triggerQueueDepth && (chosen == nil || policies[i].Name < chosen.Name) {
+			chosen = &policies[i]
+		}
+	}
+	if chosen == nil {
+		return replicas, false, nil
+	}
+	return clampReplicas(replicas, max(chosen.Spec.Min, 1), chosen.Spec.Max),
+		chosen.Status.Backend == backendKEDAScaledObject, nil
+}
+
+// clampReplicas keeps n within [lo, hi]; hi wins when the bounds cross.
+func clampReplicas(n, lo, hi int32) int32 {
+	return min(max(n, lo), hi)
+}
+
 // eventingReplicas returns the fixed replica count for an eventing Deployment
-// when no KEDA scaling policy drives it: spec.scaling.min if set (and > 0),
+// when no queue-depth policy bounds it: spec.scaling.min if set (and > 0),
 // else 1. A plain Deployment has no KPA, so it must not default to 0 (that would
-// idle a consumer with nothing to wake it); a queue-depth ScaledObject, when
-// present, overrides replicas via the HPA it manages.
+// idle a consumer with nothing to wake it).
 func eventingReplicas(deploy *agentsv1beta1.AgentDeployment) int32 {
 	if deploy.Spec.Scaling != nil && deploy.Spec.Scaling.Min > 0 {
 		return deploy.Spec.Scaling.Min

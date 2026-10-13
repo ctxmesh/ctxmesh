@@ -19,6 +19,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -580,4 +581,88 @@ func assertNoEventingService(t *testing.T, name, namespace string) {
 	var svc corev1.Service
 	err := k8sClient.Get(testCtx, types.NamespacedName{Name: eventingServiceName(name), Namespace: namespace}, &svc)
 	assert.True(t, apierrors.IsNotFound(err), "no eventing Service expected, got err=%v", err)
+}
+
+// eventingReplicasOf reads the eventing Deployment's replica count.
+func eventingReplicasOf(t *testing.T, name, namespace string) int32 {
+	t.Helper()
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep))
+	require.NotNil(t, dep.Spec.Replicas)
+	return *dep.Spec.Replicas
+}
+
+// setEventingReplicas changes the Deployment's replicas the way KEDA's HPA does.
+func setEventingReplicas(t *testing.T, name, namespace string, n int32) {
+	t.Helper()
+	var dep appsv1.Deployment
+	require.NoError(t, k8sClient.Get(testCtx, types.NamespacedName{Name: name, Namespace: namespace}, &dep))
+	dep.Spec.Replicas = &n
+	require.NoError(t, k8sClient.Update(testCtx, &dep))
+}
+
+// TestExecModel_Eventing_QueueDepthScaler_OwnsReplicas verifies that while a
+// queue-depth ScaledObject is in effect the AgentDeployment reconciler leaves the
+// eventing Deployment's replicas to KEDA instead of resetting them on every
+// reconcile, and takes them back when the scaler goes.
+func TestExecModel_Eventing_QueueDepthScaler_OwnsReplicas(t *testing.T) {
+	const (
+		name      = "eventing-keda"
+		namespace = "default"
+		policy    = "eventing-keda-scale"
+	)
+	createExecAgent(t, name, namespace, "eventing", nil)
+	createScalingPolicy(t, policy, namespace, name, triggerQueueDepth, func(s *agentsv1beta1.AgentScalingPolicySpec) {
+		s.Min, s.Max = 0, 6
+	})
+	reconcileScalingNN(t, newScalingReconciler(), policy, namespace)
+
+	r := newReconciler()
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, int32(1), eventingReplicasOf(t, name, namespace), "a new Deployment starts at one replica")
+
+	setEventingReplicas(t, name, namespace, 4)
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, int32(4), eventingReplicasOf(t, name, namespace), "the scaler's count is not reset")
+
+	// The install loses its queue: the ScaledObject goes, and the count is the controller's again.
+	reconcileScalingNN(t, newScalingReconcilerOn(AsyncBackend{}), policy, namespace)
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, int32(1), eventingReplicasOf(t, name, namespace), "a fixed count once no scaler is in effect")
+}
+
+// TestExecModel_Eventing_QueueDepthWithoutQueue_KeepsBounds verifies that a
+// queue-depth policy with no queue to read still bounds the eventing Deployment's
+// fixed replica count: raised to min and lowered to max, never below one.
+func TestExecModel_Eventing_QueueDepthWithoutQueue_KeepsBounds(t *testing.T) {
+	const namespace = "default"
+	for name, tc := range map[string]struct {
+		min, max, want int32
+		scalingMin     int32
+	}{
+		"raised to min":           {min: 3, max: 5, want: 3},
+		"lowered to max":          {min: 0, max: 2, want: 2, scalingMin: 4},
+		"min zero still runs one": {min: 0, max: 5, want: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			agent := "bounded-" + strings.ReplaceAll(name, " ", "-")
+			deploy := createExecAgent(t, agent, namespace, "eventing", nil)
+			if tc.scalingMin > 0 {
+				deploy.Spec.Scaling = &agentsv1beta1.ScalingSpec{Min: tc.scalingMin, Max: 10}
+				require.NoError(t, k8sClient.Update(testCtx, deploy))
+			}
+			createScalingPolicy(t, agent+"-scale", namespace, agent, triggerQueueDepth, func(s *agentsv1beta1.AgentScalingPolicySpec) {
+				s.Min, s.Max = tc.min, tc.max
+			})
+			reconcileScalingNN(t, newScalingReconcilerOn(AsyncBackend{}), agent+"-scale", namespace)
+
+			r := newReconciler()
+			reconcileNN(t, r, agent, namespace)
+			assert.Equal(t, tc.want, eventingReplicasOf(t, agent, namespace))
+
+			setEventingReplicas(t, agent, namespace, tc.want+1)
+			reconcileNN(t, r, agent, namespace)
+			assert.Equal(t, tc.want, eventingReplicasOf(t, agent, namespace), "the fixed count is re-asserted")
+		})
+	}
 }
