@@ -25,6 +25,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+
+	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
 )
 
 // The NATS JetStream backend (M141, ADR 0121) — the platform's self-hosted durable async broker.
@@ -39,11 +41,11 @@ const (
 	// streamName is the single stream carrying every registry's async AMP traffic. One stream with
 	// per-registry SUBJECTS (rather than a stream per registry) keeps provisioning static: adding a
 	// registry adds a subject, not a broker object, so nothing has to reconcile stream lifecycle against
-	// AgentRegistry lifecycle. Consumers still bind per-registry via a subject filter.
-	streamName = "CTXMESH_A2A"
+	// AgentRegistry lifecycle. Consumers bind with a subject filter.
+	streamName = jsname.Stream
 	// subjectPrefix namespaces our subjects inside a NATS server an operator may share with other
-	// workloads. The wildcard CTXMESH_A2A.> is what the stream captures.
-	subjectPrefix = "ctxmesh.a2a"
+	// workloads. The wildcard ctxmesh.a2a.> is what the stream captures.
+	subjectPrefix = jsname.SubjectPrefix
 
 	// publishTimeout bounds a publish. It must be a real bound: a publish that hangs would stall the AMP
 	// hop that triggered it, and the caller has its own deadline to honour.
@@ -87,30 +89,18 @@ func nakDelay(numDelivered uint64) time.Duration {
 	return redeliveryBackoff[i]
 }
 
-// Subject builds the routing subject for a registry. Exported so the publisher and the dispatcher agree
-// on one spelling instead of formatting it independently at two call sites.
+// Subject builds the registry-only routing subject, ctxmesh.a2a.<registryId>. Hops are published on
+// jsname.AgentSubject, which addresses the receiver too; this form is still consumed so that a hop published
+// on it before an upgrade is delivered.
 func Subject(registryID string) string {
-	return subjectPrefix + "." + sanitizeSubjectToken(registryID)
-}
-
-// sanitizeSubjectToken keeps a registry id from breaking out of its subject token. A registry id is a DNS
-// label by CRD validation, so this is defence in depth rather than a live threat — but a subject token is
-// a routing decision, and a '.' or '>' smuggled into one would silently widen what a consumer receives.
-func sanitizeSubjectToken(s string) string {
-	return strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			return r
-		default:
-			return '_'
-		}
-	}, s)
+	return jsname.RegistrySubject(registryID)
 }
 
 // JetStreamBus is both Publisher and Subscriber over one NATS connection.
 type JetStreamBus struct {
 	nc     *nats.Conn
 	js     jetstream.JetStream
+	maxAge time.Duration
 	closed sync.Once
 }
 
@@ -189,7 +179,7 @@ func NewJetStream(ctx context.Context, opts JetStreamOptions) (*JetStreamBus, er
 		nc.Close()
 		return nil, fmt.Errorf("asyncbus: ensuring stream %q: %w", streamName, err)
 	}
-	return &JetStreamBus{nc: nc, js: js}, nil
+	return &JetStreamBus{nc: nc, js: js, maxAge: maxAge}, nil
 }
 
 // Publish durably enqueues the message: it returns only after JetStream has ACKED it, which it does after
@@ -219,7 +209,8 @@ func (b *JetStreamBus) Publish(ctx context.Context, msg Message) error {
 //
 // The consumer is created with CreateOrUpdateConsumer, so a restart REJOINS the existing durable rather
 // than starting a fresh one — that is what makes an un-acked or a while-you-were-away message arrive
-// after the consumer comes back, which is the property the whole seam exists for.
+// after the consumer comes back, which is the property the whole seam exists for. Subscribing an existing
+// durable with a different subject moves its filter.
 func (b *JetStreamBus) Subscribe(ctx context.Context, subject, durable string, handler Handler) error {
 	if strings.TrimSpace(subject) == "" || strings.TrimSpace(durable) == "" {
 		return fmt.Errorf("asyncbus: subscribe needs both a subject and a durable name")
@@ -241,6 +232,11 @@ func (b *JetStreamBus) Subscribe(ctx context.Context, subject, durable string, h
 		BackOff: redeliveryBackoff,
 		// Deliver everything the durable has not yet acked, oldest first.
 		DeliverPolicy: jetstream.DeliverAllPolicy,
+		// A durable nothing has pulled from for twice the stream's retention is deleted by the broker, so
+		// the durable of an agent that is gone does not outlive it forever. Twice is what keeps a re-created
+		// durable exact: every message still stored was published after the old one went quiet, so
+		// delivering them all delivers none twice.
+		InactiveThreshold: 2 * b.maxAge,
 	})
 	if err != nil {
 		return fmt.Errorf("asyncbus: creating durable consumer %q: %w", durable, err)
