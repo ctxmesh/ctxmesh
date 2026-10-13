@@ -34,7 +34,6 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
 	authnv1 "k8s.io/api/authentication/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,7 +44,6 @@ import (
 	eventingv1 "knative.dev/eventing/pkg/apis/eventing/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -170,7 +168,7 @@ const (
 // Cluster-wide get;list;watch stays: the controller genuinely resolves SecretBindings'
 // referenced Secrets in agent namespaces. Reads were never the finding — SEC-3's cache half
 // is closed harder than the audit asked, since Secrets are not cached at all
-// (client.CacheOptions{DisableFor: Secret}).
+// (controller.CacheScope).
 // +kubebuilder:rbac:groups=admissionregistration.k8s.io,resources=validatingwebhookconfigurations,verbs=get;list;watch;create;update
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,namespace=ctxmesh,verbs=create;update
@@ -422,18 +420,15 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
+	// The cache holds the controller's own objects of the core and Knative kinds, not the cluster's,
+	// and Secrets not at all (SEC-3); see controller.CacheScope. NewCache and NewClient go together:
+	// the cache filters on the label the client stamps.
+	cacheScope := controller.CacheScope{PlatformNamespace: managerNamespace()}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:  scheme,
-		Metrics: metricsServerOptions,
-		// SEC-3: never cache Secrets on the manager client. The ModelRoute reconciler reads
-		// provider-key Secrets from ARBITRARY tenant namespaces (SecretBinding.spec.secretRef)
-		// — a full-object Secret cache mirrors EVERY Secret in the cluster into manager memory
-		// (128Mi → OOM) and puts every tenant's secret material in one process. Live
-		// (uncached) Secret reads keep memory bounded AND preserve the syncGatewaySecrets
-		// clobber-guard (a filtered/absent cache would return NotFound for an unlabelled
-		// pre-existing Secret → overwrite it). Rotation events still fire via the
-		// metadata-only Watch (builder.OnlyMetadata) in the ModelRoute reconciler.
-		Client:                 client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}}},
+		Scheme:                 scheme,
+		Metrics:                metricsServerOptions,
+		NewCache:               cacheScope.NewCache,
+		NewClient:              cacheScope.NewClient,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
