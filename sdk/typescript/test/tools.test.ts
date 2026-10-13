@@ -27,15 +27,21 @@ import * as recordMod from "../src/_record.js";
 import { ApprovalRequiredError, ConfigError, EndpointError } from "../src/errors.js";
 import { Tool, ToolsClient, DELEGATE_TOOL_NAME, HANDOFF_TOOL_NAME, KNOWLEDGE_SEARCH_TOOL_NAME } from "../src/tools.js";
 import { DiscoveryStub, startPlane, type MockPlane, type StubResponse } from "../src/testing.js";
+import { FakeLauncher } from "./generated/fake-launcher.js";
 
 let plane: MockPlane;
+// The launcher's own routes (/tools, /delegate, /handoff, /knowledge/search) are served by the fake
+// generated from sdk/launcher-routes.json; DiscoveryStub stays for the MCP servers a manifest names.
+let fake: FakeLauncher;
 
 beforeEach(async () => {
   plane = await startPlane();
+  fake = await FakeLauncher.start();
 });
 
 afterEach(async () => {
   await plane.stop();
+  await fake.stop();
   vi.restoreAllMocks();
   // Clean up env vars mutated within tests.
   delete process.env["DELEGATE_ENABLED"];
@@ -108,10 +114,7 @@ describe("ToolsClient.list — discovery sidecar", () => {
   it("surfaces inputSchema and description from manifest when present", async () => {
     const schema = { type: "object", properties: { n: { type: "integer" } } };
     // Patch the manifest inline.
-    plane.discovery["routes"].set("GET /tools", () => ({
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    fake.respond("GET /tools", 200, {
         version: "x",
         tools: [
           {
@@ -123,10 +126,9 @@ describe("ToolsClient.list — discovery sidecar", () => {
             description: "Count whitespace-separated words.",
           },
         ],
-      }),
-    }));
+      });
 
-    const client = new ToolsClient(plane.config);
+    const client = new ToolsClient({ ...plane.config, discoveryBaseUrl: fake.baseUrl } as typeof plane.config);
     const tools = await client.list();
     expect(tools[0]?.inputSchema).toEqual(schema);
     expect(tools[0]?.description).toBe("Count whitespace-separated words.");
@@ -318,20 +320,16 @@ describe("ToolsClient.call — full MCP session", () => {
       return { status: 400 };
     });
     // Also route GET /tools and POST /mcp (redirect).
-    discovery2["routes"].set("GET /tools", () => ({
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    await discovery2.start();
+    fake.respond("GET /tools", 200, {
         version: "x",
         tools: [
           { name: "word-count", mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" },
         ],
-      }),
-    }));
-    await discovery2.start();
+      });
 
     const { PlaneConfig } = await import("../src/config.js");
-    const config = PlaneConfig.forTest({ discoveryBaseUrl: discovery2.baseUrl });
+    const config = PlaneConfig.forTest({ discoveryBaseUrl: fake.baseUrl });
     const client = new ToolsClient(config);
     await expect(client.call("word-count", { text: "x" })).rejects.toBeInstanceOf(EndpointError);
 
@@ -360,15 +358,11 @@ describe("ToolsClient.call — full MCP session", () => {
       }
       return { status: 400 };
     });
-    discovery2["routes"].set("GET /tools", () => ({
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ version: "x", tools: [{ name: "word-count", mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" }] }),
-    }));
     await discovery2.start();
+    fake.respond("GET /tools", 200, { version: "x", tools: [{ name: "word-count", mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" }] });
 
     const { PlaneConfig } = await import("../src/config.js");
-    const config = PlaneConfig.forTest({ discoveryBaseUrl: discovery2.baseUrl });
+    const config = PlaneConfig.forTest({ discoveryBaseUrl: fake.baseUrl });
     const client = new ToolsClient(config);
     const err = await client.call("word-count", { text: "x" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ConfigError);
@@ -407,15 +401,11 @@ describe("ToolsClient.call — full MCP session", () => {
       }
       return { status: 400 };
     });
-    discovery2["routes"].set("GET /tools", () => ({
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ version: "x", tools: [{ name: "word-count", mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" }] }),
-    }));
     await discovery2.start();
+    fake.respond("GET /tools", 200, { version: "x", tools: [{ name: "word-count", mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" }] });
 
     const { PlaneConfig } = await import("../src/config.js");
-    const config = PlaneConfig.forTest({ discoveryBaseUrl: discovery2.baseUrl });
+    const config = PlaneConfig.forTest({ discoveryBaseUrl: fake.baseUrl });
     const client = new ToolsClient(config);
     const result = await client.call("word-count", { text: "x" });
     expect(result).toEqual({ count: 99 });
@@ -529,15 +519,11 @@ describe("ToolsClient.call — full MCP session", () => {
         body: JSON.stringify({ error: "approval_required", tool: DiscoveryStub.MCP_TOOL_NAME, run: "run-1" }),
       };
     });
-    discovery2["routes"].set("GET /tools", () => ({
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ version: "x", tools: [{ name: DiscoveryStub.CATALOG_NAME, mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" }] }),
-    }));
     await discovery2.start();
+    fake.respond("GET /tools", 200, { version: "x", tools: [{ name: DiscoveryStub.CATALOG_NAME, mode: "remote", endpoint: `${discovery2.baseUrl}/mcp/`, transport: "streamable-http" }] });
 
     const { PlaneConfig } = await import("../src/config.js");
-    const config = PlaneConfig.forTest({ discoveryBaseUrl: discovery2.baseUrl });
+    const config = PlaneConfig.forTest({ discoveryBaseUrl: fake.baseUrl });
     const client = new ToolsClient(config);
     const err = await client.call(DiscoveryStub.CATALOG_NAME, { text: "x" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApprovalRequiredError);
@@ -549,64 +535,85 @@ describe("ToolsClient.call — full MCP session", () => {
 
 // ── delegate() ───────────────────────────────────────────────────────────────
 
+// The delegate listener is served by the generated fake: it answers with the launcher's goldens and
+// records any request that breaks the /delegate or /handoff schema.
+function delegateConfig(overrides: { delegateEnabled?: boolean } = {}): typeof plane.config {
+  return { ...plane.config, delegateBaseUrl: fake.baseUrl, delegateEnabled: true, ...overrides } as typeof plane.config;
+}
+
 describe("ToolsClient.delegate", () => {
   it("throws ConfigError when delegateEnabled is false", async () => {
-    // plane.config has delegateEnabled=false by default.
-    const client = new ToolsClient(plane.config);
+    const client = new ToolsClient(delegateConfig({ delegateEnabled: false }));
     await expect(client.delegate("researcher", "find it")).rejects.toBeInstanceOf(ConfigError);
+    expect(fake.received).toHaveLength(0);
   });
 
   it("POSTs to /delegate with the correct body and returns the launcher response", async () => {
-    const config = { ...plane.config, delegateEnabled: true } as typeof plane.config;
-    const client = new ToolsClient(config);
+    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-delegate-token");
+    const client = new ToolsClient(delegateConfig());
 
     const result = await client.delegate("researcher", "find it", "step-2", "call-9");
 
-    expect(result).toMatchObject({ ok: true, answer: "sub-answer" });
+    expect(result).toEqual(fake.golden("POST /delegate").response.body);
 
-    const req = plane.delegate.requests[0];
+    const req = fake.received[0];
     expect(req?.method).toBe("POST");
     expect(req?.path).toBe("/delegate");
-    expect(req?.json()).toMatchObject({
+    expect(req?.json()).toEqual({
       subAgent: "researcher",
       input: "find it",
       step: "step-2",
       callId: "call-9",
     });
+    fake.assertConforms();
+  });
+
+  it("returns a launcher refusal as ok=false rather than throwing", async () => {
+    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-delegate-token");
+    fake.useGolden("POST /delegate", "refuses-without-a-run-capability");
+    const result = await new ToolsClient(delegateConfig()).delegate("researcher", "x", "1", "c1");
+    expect(result["ok"]).toBe(false);
+    expect(result["error"]).toBeTruthy();
   });
 
   it("relays X-Ctxmesh-Run-Capability when set", async () => {
     vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-delegate-token");
 
-    const config = { ...plane.config, delegateEnabled: true } as typeof plane.config;
-    const client = new ToolsClient(config);
-    await client.delegate("researcher", "task");
+    await new ToolsClient(delegateConfig()).delegate("researcher", "task", "1", "c1");
 
-    const req = plane.delegate.requests[0];
-    expect(req?.headers["x-ctxmesh-run-capability"]).toBe("cap-delegate-token");
+    expect(fake.received[0]?.headers["x-ctxmesh-run-capability"]).toBe("cap-delegate-token");
+    fake.assertConforms();
   });
 
   it("does NOT relay capability when currentCapability returns undefined", async () => {
-    const config = { ...plane.config, delegateEnabled: true } as typeof plane.config;
-    const client = new ToolsClient(config);
-    await client.delegate("researcher", "task");
+    await new ToolsClient(delegateConfig()).delegate("researcher", "task", "1", "c1");
 
-    const req = plane.delegate.requests[0];
-    expect(req?.headers["x-ctxmesh-run-capability"]).toBeUndefined();
+    expect(fake.received[0]?.headers["x-ctxmesh-run-capability"]).toBeUndefined();
+    // The launcher refuses a delegation with no run capability; the fake records the break.
+    expect(fake.violations()).toEqual(["POST /delegate: missing required header X-Ctxmesh-Run-Capability"]);
+  });
+
+  it("sends a body the launcher refuses when step and callId are omitted", async () => {
+    // Both are optional in the signature, but the launcher requires them (its idempotency key).
+    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-delegate-token");
+    await new ToolsClient(delegateConfig()).delegate("researcher", "task");
+    expect(fake.violations().join("\n")).toContain('missing required property "step"');
   });
 
   it("relays suspend + spawn headers on an L7 suspend-signal request (ADR 0091)", async () => {
-    const config = { ...plane.config, delegateEnabled: true } as typeof plane.config;
-    const client = new ToolsClient(config);
+    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-delegate-token");
+    fake.useGolden("POST /delegate", "suspends-without-spawning-when-asked");
+    const client = new ToolsClient(delegateConfig());
 
-    await client.delegate("researcher", "find it", "3", "c1", {
+    const result = await client.delegate("researcher", "find it", "3", "c1", {
       suspend: true,
       spawnRoot: "root-9",
       spawnDepth: 0,
     });
+    expect(result).toMatchObject({ ok: true, suspend: true });
 
-    const req = plane.delegate.requests[0];
-    expect(req?.json()).toMatchObject({
+    const req = fake.received[0];
+    expect(req?.json()).toEqual({
       subAgent: "researcher",
       input: "find it",
       step: "3",
@@ -615,69 +622,67 @@ describe("ToolsClient.delegate", () => {
     });
     expect(req?.headers["x-ctxmesh-spawn-root"]).toBe("root-9");
     expect(req?.headers["x-ctxmesh-spawn-depth"]).toBe("0"); // depth 0 IS relayed (a root supervisor)
+    fake.assertConforms();
   });
 
   it("omits suspend + spawn headers on a plain delegate (byte-for-byte the M64 call)", async () => {
-    const config = { ...plane.config, delegateEnabled: true } as typeof plane.config;
-    const client = new ToolsClient(config);
+    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-delegate-token");
+    await new ToolsClient(delegateConfig()).delegate("researcher", "task", "1", "c1");
 
-    await client.delegate("researcher", "task");
-
-    const req = plane.delegate.requests[0];
+    const req = fake.received[0];
     expect(req?.json()).not.toHaveProperty("suspend");
     expect(req?.headers["x-ctxmesh-spawn-root"]).toBeUndefined();
     expect(req?.headers["x-ctxmesh-spawn-depth"]).toBeUndefined();
+    fake.assertConforms();
   });
 });
 
 // ── handoff() ────────────────────────────────────────────────────────────────
 
 describe("ToolsClient.handoff", () => {
+  beforeEach(() => {
+    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-handoff-token");
+  });
+
   it("POSTs to /handoff with the correct body and returns the launcher response", async () => {
-    const client = new ToolsClient(plane.config);
-    const result = await client.handoff("billing", "refund needed");
+    const result = await new ToolsClient(delegateConfig()).handoff("billing", "refund needed");
 
-    expect(result).toMatchObject({ ok: true, runId: "hand-1", handedOffTo: "billing" });
+    expect(result).toEqual(fake.golden("POST /handoff").response.body);
 
-    const req = plane.delegate.requests[0];
+    const req = fake.received[0];
     expect(req?.method).toBe("POST");
     expect(req?.path).toBe("/handoff");
     // includeHistory defaults true (replay B's full history — today's behavior, m83.6).
-    expect(req?.json()).toMatchObject({
-      targetAgent: "billing",
-      message: "refund needed",
-      includeHistory: true,
-    });
+    expect(req?.json()).toEqual({ targetAgent: "billing", message: "refund needed", includeHistory: true });
+    fake.assertConforms();
   });
 
   it("uses empty string for message when not provided", async () => {
-    const client = new ToolsClient(plane.config);
-    await client.handoff("billing");
-
-    const req = plane.delegate.requests[0];
-    expect((req?.json() as { message: string }).message).toBe("");
+    await new ToolsClient(delegateConfig()).handoff("billing");
+    expect((fake.received[0]?.json() as { message: string }).message).toBe("");
+    fake.assertConforms();
   });
 
   it("relays includeHistory=false so B skips the transfer-turn history replay (m83.6)", async () => {
-    const client = new ToolsClient(plane.config);
-    await client.handoff("billing", "here is a summary…", false);
-
-    const req = plane.delegate.requests[0];
-    expect(req?.json()).toMatchObject({
+    await new ToolsClient(delegateConfig()).handoff("billing", "here is a summary…", false);
+    expect(fake.received[0]?.json()).toEqual({
       targetAgent: "billing",
       message: "here is a summary…",
       includeHistory: false,
     });
+    fake.assertConforms();
   });
 
   it("relays X-Ctxmesh-Run-Capability when set", async () => {
-    vi.spyOn(capMod, "currentCapability").mockReturnValue("cap-handoff-token");
+    await new ToolsClient(delegateConfig()).handoff("billing", "msg");
+    expect(fake.received[0]?.headers["x-ctxmesh-run-capability"]).toBe("cap-handoff-token");
+  });
 
-    const client = new ToolsClient(plane.config);
-    await client.handoff("billing", "msg");
-
-    const req = plane.delegate.requests[0];
-    expect(req?.headers["x-ctxmesh-run-capability"]).toBe("cap-handoff-token");
+  it("returns a roster refusal as ok=false rather than throwing", async () => {
+    fake.useGolden("POST /handoff", "refuses-a-target-outside-the-roster");
+    const result = await new ToolsClient(delegateConfig()).handoff("stranger");
+    expect(result["ok"]).toBe(false);
+    expect(result["error"]).toBeTruthy();
   });
 });
 
@@ -688,27 +693,8 @@ describe("ToolsClient.call — knowledge_search local dispatch", () => {
     process.env["KNOWLEDGE_BASE_ENABLED"] = "true";
     process.env["KNOWLEDGE_BASES"] = JSON.stringify([{ name: "kb-alpha" }]);
 
-    // Add /knowledge/search to the memory stub.
-    plane.memory["routes"].set("POST /knowledge/search", () => ({
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        results: [
-          {
-            content: "relevant passage",
-            documentRef: "doc-1",
-            chunkIndex: 0,
-            startOffset: 0,
-            endOffset: 10,
-            mimeType: "text/plain",
-            score: 0.9,
-          },
-        ],
-      }),
-    }));
-
     const { KnowledgeClient } = await import("../src/knowledge.js");
-    const config = { ...plane.config, knowledgeEnabled: true, memoryBaseUrl: plane.memory.baseUrl } as typeof plane.config;
+    const config = { ...plane.config, knowledgeEnabled: true, memoryBaseUrl: fake.baseUrl } as typeof plane.config;
     const kc = new KnowledgeClient(config);
     const client = new ToolsClient(config, kc);
 
@@ -718,15 +704,15 @@ describe("ToolsClient.call — knowledge_search local dispatch", () => {
     expect(ksTool).toBeDefined();
     expect(ksTool?.transport).toBe("internal");
 
-    // call() routes it locally.
+    // call() routes it locally and returns the launcher's chunks.
     const results = await client.call(KNOWLEDGE_SEARCH_TOOL_NAME, { query: "climate", knowledge_base: "kb-alpha" });
-    expect(Array.isArray(results)).toBe(true);
+    expect(results).toEqual((fake.golden("POST /knowledge/search").response.body as { results: unknown }).results);
     // Confirm NO MCP call was made.
     expect(plane.discovery.mcpCalls).toHaveLength(0);
 
     // The /knowledge/search endpoint was hit (not the discovery MCP).
-    const ksReq = plane.memory.requests.find((r) => r.path === "/knowledge/search");
-    expect(ksReq).toBeDefined();
+    expect(fake.isCovered("POST /knowledge/search")).toBe(true);
+    fake.assertConforms();
   });
 });
 
