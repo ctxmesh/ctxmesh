@@ -641,18 +641,22 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "mcptoolbinding")
 		os.Exit(1)
 	}
+	// The async backend, read from the settings the BFF starts it from: it decides what a queue-depth
+	// policy can scale on and whether the BFF's dispatcher must reach eventing agents.
+	asyncBackend := controller.AsyncBackendFromEnv(os.Getenv)
 	if err := (&controller.AgentRegistryReconciler{
 		EventingAvailable: eventingAvailable,
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		PlatformNamespace: platformNamespace,
+		AsyncBackend:      asyncBackend,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agentregistry")
 		os.Exit(1)
 	}
 	if err := (&controller.AgentScalingPolicyReconciler{
 		KEDAAvailable: kedaAvailable,
-		AsyncBackend:  controller.AsyncBackendFromEnv(os.Getenv),
+		AsyncBackend:  asyncBackend,
 		Client:        mgr.GetClient(),
 		Scheme:        mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {

@@ -1227,3 +1227,100 @@ func namespaceSelectorValues(peers []networkingv1.NetworkPolicyPeer) []string {
 	}
 	return out
 }
+
+// getAsyncDeliveryPolicy fetches the registry's async delivery NetworkPolicy, or nil when there is none.
+func getAsyncDeliveryPolicy(t *testing.T, registryName, namespace string) *networkingv1.NetworkPolicy {
+	t.Helper()
+	var np networkingv1.NetworkPolicy
+	err := k8sClient.Get(testCtx, types.NamespacedName{Name: registryName + asyncDeliveryPolicySuffix, Namespace: namespace}, &np)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	require.NoError(t, err)
+	return &np
+}
+
+// TestRegistry_AsyncDeliveryPolicy_AdmitsTheDispatcherOnJetStream verifies that,
+// on the JetStream backend, the BFF's dispatcher may reach the registry's
+// eventing members on the ports their agents listen on, and nothing more: the
+// peer is the BFF's pods in the platform namespace (both selectors in one peer),
+// the target is eventing members only, and the rule is the policy's only one.
+// Without JetStream there is no such policy, and one left over is deleted.
+func TestRegistry_AsyncDeliveryPolicy_AdmitsTheDispatcherOnJetStream(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "delivery-mesh"
+		registryID = "delivery-mesh"
+	)
+	member := map[string]string{"registry": registryID}
+	mkLabeledAgent(t, "delivery-serving", namespace, member)
+	eventing := mkLabeledAgent(t, "delivery-eventing", namespace, member)
+	eventing.Spec.ExecutionModel, eventing.Spec.Port = "eventing", 9090
+	require.NoError(t, k8sClient.Update(testCtx, eventing))
+	other := mkLabeledAgent(t, "delivery-eventing-b", namespace, member)
+	other.Spec.ExecutionModel = "eventing"
+	require.NoError(t, k8sClient.Update(testCtx, other))
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	for _, agent := range []string{"delivery-serving", "delivery-eventing", "delivery-eventing-b"} {
+		reconcileNN(t, newReconciler(), agent, namespace)
+	}
+
+	r := newRegistryReconciler()
+	r.PlatformNamespace = "ctxmesh-system"
+	reconcileRegistry(t, r, regName, namespace)
+	assert.Nil(t, getAsyncDeliveryPolicy(t, regName, namespace), "no JetStream backend: no delivery policy")
+
+	r.AsyncBackend = AsyncBackend{Kind: asyncBackendJetStream, NATSURL: "nats://nats.broker.svc:4222"}
+	reconcileRegistry(t, r, regName, namespace)
+	np := getAsyncDeliveryPolicy(t, regName, namespace)
+	require.NotNil(t, np, "JetStream: the dispatcher must be admitted")
+
+	require.Len(t, np.OwnerReferences, 1)
+	assert.Equal(t, regName, np.OwnerReferences[0].Name)
+	assert.Equal(t, map[string]string{registryIDLabel: registryID}, np.Spec.PodSelector.MatchLabels)
+	assert.Equal(t, []metav1.LabelSelectorRequirement{
+		{Key: eventingWorkloadLabel, Operator: metav1.LabelSelectorOpExists},
+	}, np.Spec.PodSelector.MatchExpressions, "only the registry's eventing members' pods")
+	assert.Equal(t, []networkingv1.PolicyType{networkingv1.PolicyTypeIngress}, np.Spec.PolicyTypes)
+	assert.Empty(t, np.Spec.Egress)
+
+	require.Len(t, np.Spec.Ingress, 1, "one rule")
+	rule := np.Spec.Ingress[0]
+	require.Len(t, rule.From, 1, "one peer")
+	peer := rule.From[0]
+	require.NotNil(t, peer.NamespaceSelector, "never any pod in any namespace")
+	require.NotNil(t, peer.PodSelector, "never every pod of the platform namespace")
+	assert.Equal(t, map[string]string{namespaceNameLabel: "ctxmesh-system"}, peer.NamespaceSelector.MatchLabels,
+		"the namespace the platform is installed into")
+	assert.Equal(t, map[string]string{"control-plane": "bff"}, peer.PodSelector.MatchLabels, "the BFF's pods")
+	ports := make([]int32, 0, len(rule.Ports))
+	for _, p := range rule.Ports {
+		require.NotNil(t, p.Protocol)
+		assert.Equal(t, corev1.ProtocolTCP, *p.Protocol)
+		ports = append(ports, p.Port.IntVal)
+	}
+	assert.Equal(t, []int32{8080, 9090}, ports, "the ports the eventing agents listen on, and no other")
+
+	r.AsyncBackend = AsyncBackend{}
+	reconcileRegistry(t, r, regName, namespace)
+	assert.Nil(t, getAsyncDeliveryPolicy(t, regName, namespace), "leaving JetStream deletes the policy")
+}
+
+// TestRegistry_AsyncDeliveryPolicy_NoEventingMember verifies that a registry with
+// no eventing member gets no delivery policy, even on JetStream: serving agents
+// receive through the Knative route the registry policy already admits.
+func TestRegistry_AsyncDeliveryPolicy_NoEventingMember(t *testing.T) {
+	const (
+		namespace  = "default"
+		regName    = "serving-only-mesh"
+		registryID = "serving-only-mesh"
+	)
+	mkLabeledAgent(t, "serving-only-a", namespace, map[string]string{"registry": registryID})
+	mkRegistryMesh(t, regName, namespace, registryID, registryID)
+	reconcileNN(t, newReconciler(), "serving-only-a", namespace)
+
+	r := newRegistryReconciler()
+	r.AsyncBackend = AsyncBackend{Kind: asyncBackendJetStream, NATSURL: "nats://nats.broker.svc:4222"}
+	reconcileRegistry(t, r, regName, namespace)
+	assert.Nil(t, getAsyncDeliveryPolicy(t, regName, namespace))
+}

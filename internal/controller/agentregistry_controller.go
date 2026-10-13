@@ -220,6 +220,10 @@ type AgentRegistryReconciler struct {
 	// PlatformNamespace is the namespace the platform is installed into, which members' egress policy
 	// admits. Empty means DefaultPlatformNamespace.
 	PlatformNamespace string
+
+	// AsyncBackend is the install's async backend. On JetStream the BFF's dispatcher delivers hops to
+	// eventing members, and a second policy admits it (reconcileAsyncDeliveryPolicy).
+	AsyncBackend AsyncBackend
 }
 
 // RBAC — STANDALONE marker block. Markers inside a type's doc comment are
@@ -281,6 +285,9 @@ func (r *AgentRegistryReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// ── Step 2: converge the NetworkPolicy ────────────────────────────────────
 	if err := r.reconcileNetworkPolicy(ctx, &registry); err != nil {
 		return ctrl.Result{}, fmt.Errorf("reconciling NetworkPolicy: %w", err)
+	}
+	if err := r.reconcileAsyncDeliveryPolicy(ctx, &registry, members); err != nil {
+		return ctrl.Result{}, fmt.Errorf("reconciling the async delivery NetworkPolicy: %w", err)
 	}
 
 	// ── Step 3: converge the async-eventing plane (DLQ sink + Broker) ─────────
