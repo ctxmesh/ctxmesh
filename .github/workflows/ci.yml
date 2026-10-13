@@ -175,13 +175,13 @@ jobs:
       # the pinned venv from the provisioned python3 — deterministic in CI.
       - name: Python SDK lint + tests (ruff + pytest, pinned venv)
         run: make py-lint py-test
-  # The four plane-client SDKs (ADR 0139). Without this they are code nobody compiles: the
-  # contract gate proves each route STRING appears in them, which a comment satisfies.
+  # All six SDKs: each one's own tests, then the conformance suite, which drives every SDK through
+  # its public API against a real launcher built from this tree (make sdk-conformance).
   sdks:
     name: sdks
     needs: lint
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:
@@ -227,8 +227,22 @@ jobs:
         run: |
           set -euo pipefail
           gem install minitest webrick --no-document
-          ruby -Ilib test/routes_test.rb
+          for t in test/*_test.rb; do ruby -Ilib "$t"; done
           gem build ctxmesh.gemspec
+
+      # The TypeScript SDK's own tests ran in no CI job before this step.
+      - name: TypeScript SDK (eslint + tsc + vitest)
+        run: make sdk-ts-lint sdk-ts-test
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.9"
+      # The suite builds cmd/launcher and the root module's tools, which need the root Go version.
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+      - name: SDK conformance (one contract, six SDKs, a real launcher)
+        run: make sdk-conformance
 
   ui:
     name: ui
