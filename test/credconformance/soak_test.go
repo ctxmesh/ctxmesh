@@ -19,16 +19,42 @@ package credconformance_test
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credpostgres"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
+	"github.com/ctxmesh/ctxmesh/internal/runcap"
 )
+
+// soakReview stands in for TokenReview: the one sidecar token it was given reviews as that agent's
+// ServiceAccount, and every other token is rejected.
+type soakReview struct {
+	token string
+	id    credplane.CallerIdentity
+}
+
+func (r soakReview) Verify(_ context.Context, token string) (credplane.CallerIdentity, error) {
+	if token != r.token {
+		return credplane.CallerIdentity{}, credplane.ErrCallerRejected
+	}
+	return r.id, nil
+}
+
+// bearer adds the sidecar's token to every request, as the egress sidecar's transport does.
+type bearer struct{ token string }
+
+func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	return http.DefaultTransport.RoundTrip(r)
+}
 
 // auditSink records every credential-plane ActionUse, thread-safe, so the soak can prove
 // no grant was ever attributed to the wrong user.
@@ -59,7 +85,11 @@ func (a *auditSink) record(e credresolve.AuditEvent) {
 // (no real accounts needed).
 func TestSoak_NoBleed_Plane(t *testing.T) {
 	const users, rounds = 32, 30 // 960 concurrent distinct-user resolves through the plane
-	const ns, server = "soak-ns", "srv"
+	const ns, agent, server = "soak-ns", "soak-agent", "srv"
+	// The service resolves only for the user a run capability names, in that capability's boundary,
+	// for a caller whose reviewed token is that agent's sidecar (ADR 0154). So every resolve here
+	// carries what a real sidecar carries.
+	boundary := credresolve.AgentBoundary(ns, agent)
 	ctx := context.Background()
 
 	sink := newAuditSink()
@@ -83,15 +113,38 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 	for i := range users {
 		want[i] = fmt.Sprintf("token-%03d", i)
 		g := credpostgres.Grant{AccessToken: want[i], ExpiresAt: farFuture}
-		if err := backend.Store(ctx, ns, "", server, userHash(i), g); err != nil {
+		if err := backend.Store(ctx, ns, boundary, server, userHash(i), g); err != nil {
 			t.Fatalf("seed %d: %v", i, err)
 		}
 	}
 
 	// Drive the plane over the real client→server delegation path.
-	srv := httptest.NewServer(credplane.NewServer(backend, logr.Discard()).Handler())
+	pub, priv, err := runcap.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("capability keypair: %v", err)
+	}
+	const audience = "soak-capability-audience"
+	signer := runcap.NewSigner(priv, audience, nil)
+	const sidecarToken = "soak-sidecar-token"
+	auth := credplane.CallerAuth{
+		Sidecar: soakReview{token: sidecarToken, id: credplane.CallerIdentity{
+			Namespace: ns, ServiceAccount: credplane.AgentServiceAccountPrefix + agent,
+		}},
+		Capabilities: runcap.NewVerifier(pub, audience, nil),
+	}
+	capabilities := make([]string, users)
+	for i := range users {
+		capabilities[i], err = signer.Mint(runcap.MintRequest{
+			User: userHash(i), Agent: ns + "/" + agent, Boundary: boundary, RunID: fmt.Sprintf("run-%03d", i), TTL: 10 * time.Minute,
+		})
+		if err != nil {
+			t.Fatalf("mint capability %d: %v", i, err)
+		}
+	}
+
+	srv := httptest.NewServer(credplane.NewServer(backend, auth, logr.Discard()).Handler())
 	defer srv.Close()
-	client := credplane.NewClient(srv.URL, nil)
+	client := credplane.NewClient(srv.URL, &http.Client{Transport: bearer{token: sidecarToken}})
 
 	var bleed, resolves int64
 	var mu sync.Mutex
@@ -101,7 +154,7 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				cred, err := client.Resolve(ctx, ns, "", server, userHash(i))
+				cred, err := client.Resolve(runcap.WithToken(ctx, capabilities[i]), ns, boundary, server, userHash(i))
 				mu.Lock()
 				resolves++
 				if err != nil || cred.Value != want[i] {
