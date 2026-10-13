@@ -12,6 +12,7 @@ from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError, EndpointError
 from ctxmesh.tools import SPAWN_DEPTH_HEADER, SPAWN_ROOT_HEADER, Tool
 
+from ._generated_fake_launcher import FakeLauncher
 from .launcher_stub import DiscoveryStub
 
 
@@ -337,55 +338,56 @@ def test_delegate_tool_absent_when_disabled(client, discovery_stub: DiscoveryStu
     assert "delegate_to" not in [t.name for t in client.tools.list()]
 
 
-def test_delegate_posts_and_relays_capability(client, monkeypatch):
+@pytest.fixture
+def launcher(monkeypatch):
+    """The fake launcher generated from sdk/launcher-routes.json, standing in for the delegate
+    listener. tools.delegate/handoff post to a fixed 127.0.0.1:2994, so point them at it."""
+    with FakeLauncher() as fake:
+        monkeypatch.setattr("ctxmesh.tools._DELEGATE_ENDPOINT", f"{fake.base_url}/delegate")
+        monkeypatch.setattr("ctxmesh.tools._HANDOFF_ENDPOINT", f"{fake.base_url}/handoff")
+        yield fake
+
+
+def _last(fake: FakeLauncher, route: str):
+    reqs = [r for r in fake.received if r.route == route]
+    assert reqs, f"no request reached {route}"
+    return reqs[-1]
+
+
+def test_delegate_and_handoff_target_the_launcher_delegate_listener():
+    """Both post to the launcher's delegate listener on :2994, not the memory port."""
+    import ctxmesh.tools as tools_mod
+
+    assert tools_mod._DELEGATE_ENDPOINT.endswith(":2994/delegate")
+    assert tools_mod._HANDOFF_ENDPOINT.endswith(":2994/handoff")
+
+
+def test_delegate_posts_and_relays_capability(client, launcher, monkeypatch):
     """delegate() POSTs the spawn body to the launcher-local endpoint, relays the run capability,
     and returns the launcher's {ok, answer} verbatim."""
-    captured = {}
-
-    class _Resp:
-        def json(self):
-            return {"ok": True, "answer": "sub-answer", "subRun": "sub-1"}
-
-    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
-        captured.update(
-            method=method, url=url, body=json.loads(body), headers=headers, expect=expect
-        )
-        return _Resp()
-
-    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
     monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
 
     out = client.tools.delegate(sub_agent="researcher", task="find it", step="2", call_id="c9")
 
-    assert out == {"ok": True, "answer": "sub-answer", "subRun": "sub-1"}
-    assert captured["method"] == "POST"
-    assert captured["url"].endswith(":2994/delegate")
-    assert captured["expect"] == (200,)
-    assert captured["body"] == {
+    assert out == launcher.golden("POST /delegate")["response"]["body"]
+    req = _last(launcher, "POST /delegate")
+    assert req.method == "POST"
+    assert req.json() == {
         "subAgent": "researcher",
         "input": "find it",
         "step": "2",
         "callId": "c9",
     }
     assert (
-        captured["headers"][CAPABILITY_HEADER] == "cap-token"
+        req.headers[CAPABILITY_HEADER.lower()] == "cap-token"
     ), "the parent capability is relayed (OBO)"
+    launcher.assert_conforms()
 
 
-def test_delegate_suspend_flag_and_spawn_headers(client, monkeypatch):
+def test_delegate_suspend_flag_and_spawn_headers(client, launcher, monkeypatch):
     """delegate(suspend=True, spawn_root, spawn_depth) (L7, ADR 0091) sets `suspend` in the body and
     relays the spawn-tree position headers, and returns the launcher's suspend-signal verbatim."""
-    captured = {}
-
-    class _Resp:
-        def json(self):
-            return {"ok": True, "suspend": True, "endpoint": "http://researcher.ns/invoke"}
-
-    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
-        captured.update(body=json.loads(body), headers=headers)
-        return _Resp()
-
-    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    launcher.use_golden("POST /delegate", "suspends-without-spawning-when-asked")
     monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
 
     out = client.tools.delegate(
@@ -398,33 +400,26 @@ def test_delegate_suspend_flag_and_spawn_headers(client, monkeypatch):
         spawn_depth=0,
     )
 
-    assert out == {"ok": True, "suspend": True, "endpoint": "http://researcher.ns/invoke"}
-    assert captured["body"]["suspend"] is True
-    assert captured["headers"][SPAWN_ROOT_HEADER] == "root-9"
-    assert captured["headers"][SPAWN_DEPTH_HEADER] == "0", "depth 0 IS relayed (a root supervisor)"
+    suspended = launcher.golden("POST /delegate", "suspends-without-spawning-when-asked")
+    assert out == suspended["response"]["body"]
+    req = _last(launcher, "POST /delegate")
+    assert req.json()["suspend"] is True
+    assert req.headers[SPAWN_ROOT_HEADER.lower()] == "root-9"
+    assert req.headers[SPAWN_DEPTH_HEADER.lower()] == "0", "depth 0 IS relayed (a root supervisor)"
+    launcher.assert_conforms()
 
 
-def test_delegate_without_suspend_omits_flag_and_headers(client, monkeypatch):
+def test_delegate_without_suspend_omits_flag_and_headers(client, launcher, monkeypatch):
     """A plain delegate (no suspend, unknown spawn position) is byte-for-byte the M64 blocking call:
     no `suspend` key, no spawn headers — so existing behavior is unchanged."""
-    captured = {}
-
-    class _Resp:
-        def json(self):
-            return {"ok": True, "answer": "a"}
-
-    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
-        captured.update(body=json.loads(body), headers=headers)
-        return _Resp()
-
-    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
     monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: None)
 
     client.tools.delegate(sub_agent="r", task="t", step="1", call_id="c1")
 
-    assert "suspend" not in captured["body"]
-    assert SPAWN_ROOT_HEADER not in captured["headers"]
-    assert SPAWN_DEPTH_HEADER not in captured["headers"]
+    req = _last(launcher, "POST /delegate")
+    assert "suspend" not in req.json()
+    assert SPAWN_ROOT_HEADER.lower() not in req.headers
+    assert SPAWN_DEPTH_HEADER.lower() not in req.headers
 
 
 # ── handoff_to (M67, ADR 0060 §5) ──────────────────────────────────────────────
@@ -464,57 +459,33 @@ def test_handoff_tool_absent_when_disabled(client, discovery_stub: DiscoveryStub
     assert "handoff_to" not in [t.name for t in client.tools.list()]
 
 
-def test_handoff_posts_and_relays_capability(client, monkeypatch):
+def test_handoff_posts_and_relays_capability(client, launcher, monkeypatch):
     """handoff() POSTs the transfer body to the launcher-local :2994/handoff endpoint, relays the
     run capability (OBO for the conversation owner), and returns the launcher's outcome verbatim."""
-    captured = {}
-
-    class _Resp:
-        def json(self):
-            return {"ok": True, "runId": "hand-1", "sourceRun": "A-1", "handedOffTo": "billing"}
-
-    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
-        captured.update(
-            method=method, url=url, body=json.loads(body), headers=headers, expect=expect
-        )
-        return _Resp()
-
-    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
     monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
 
     out = client.tools.handoff(target_agent="billing", message="refund needed")
 
-    assert out == {"ok": True, "runId": "hand-1", "sourceRun": "A-1", "handedOffTo": "billing"}
-    assert captured["method"] == "POST"
-    assert captured["url"].endswith(":2994/handoff")
-    assert captured["expect"] == (200,)
+    assert out == launcher.golden("POST /handoff")["response"]["body"]
+    req = _last(launcher, "POST /handoff")
+    assert req.method == "POST"
     # include_history defaults True (replay B's full history — today's behavior, m83.6).
-    assert captured["body"] == {
+    assert req.json() == {
         "targetAgent": "billing",
         "message": "refund needed",
         "includeHistory": True,
     }
-    assert captured["headers"][CAPABILITY_HEADER] == "cap-token", "the capability is relayed (OBO)"
+    assert req.headers[CAPABILITY_HEADER.lower()] == "cap-token", "the capability is relayed (OBO)"
+    launcher.assert_conforms()
 
 
-def test_handoff_relays_include_history_false(client, monkeypatch):
+def test_handoff_relays_include_history_false(client, launcher, monkeypatch):
     """handoff(include_history=False) (m83.6) posts includeHistory=false so the BFF records the
     transfer-turn history skip and B starts from `message` as a SUMMARY."""
-    captured = {}
-
-    class _Resp:
-        def json(self):
-            return {"ok": True, "runId": "hand-9"}
-
-    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
-        captured.update(body=json.loads(body))
-        return _Resp()
-
-    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
     monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: None)
 
     client.tools.handoff(target_agent="billing", message="summary…", include_history=False)
-    assert captured["body"] == {
+    assert _last(launcher, "POST /handoff").json() == {
         "targetAgent": "billing",
         "message": "summary…",
         "includeHistory": False,
@@ -544,50 +515,32 @@ def test_mcp_headers_omits_record_when_not_recorded():
     assert RECORD_HEADER not in headers
 
 
-def test_delegate_by_capability_sends_the_query_not_a_name(client, monkeypatch):
+def test_delegate_by_capability_sends_the_query_not_a_name(client, launcher, monkeypatch):
     """delegate(capability=...) (M141.4, ADR 0120) carries the capability QUERY in the body so the
     launcher resolves who can do the work — the SDK never has to know the agent's name."""
-    captured = {}
-
-    class _Resp:
-        def json(self):
-            return {"ok": True, "answer": "the brief", "subAgent": "summarizer", "subRun": "sub-9"}
-
-    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
-        captured.update(body=json.loads(body))
-        return _Resp()
-
-    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
+    resolved = {"ok": True, "answer": "the brief", "subAgent": "summarizer", "subRun": "sub-9"}
+    launcher.respond("POST /delegate", 200, resolved)
     monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
 
     out = client.tools.delegate(
         sub_agent="", task="summarize it", step="2", call_id="c9", capability="summarize a long PDF"
     )
 
-    assert captured["body"]["capability"] == "summarize a long PDF"
-    assert captured["body"]["subAgent"] == ""
+    body = _last(launcher, "POST /delegate").json()
+    assert body["capability"] == "summarize a long PDF"
+    assert body["subAgent"] == ""
     assert out["subAgent"] == "summarizer", "the launcher echoes the agent it resolved"
+    launcher.assert_conforms()
 
 
-def test_delegate_by_name_omits_the_capability_field(client, monkeypatch):
+def test_delegate_by_name_omits_the_capability_field(client, launcher, monkeypatch):
     """A by-name delegation must not carry an empty `capability`: its presence is what selects the
     discovery path, so sending it always would make every call look like a capability query."""
-    captured = {}
-
-    class _Resp:
-        def json(self):
-            return {"ok": True, "answer": "done"}
-
-    def fake_request(method, url, *, body=None, headers=None, timeout=None, expect=None):
-        captured.update(body=json.loads(body))
-        return _Resp()
-
-    monkeypatch.setattr("ctxmesh.tools._http.request", fake_request)
     monkeypatch.setattr("ctxmesh.tools.current_capability", lambda: "cap-token")
 
     client.tools.delegate(sub_agent="researcher", task="find it", step="2", call_id="c9")
 
-    assert "capability" not in captured["body"]
+    assert "capability" not in _last(launcher, "POST /delegate").json()
 
 
 def test_delegate_tool_schema_offers_name_or_capability(client, discovery_stub, monkeypatch):

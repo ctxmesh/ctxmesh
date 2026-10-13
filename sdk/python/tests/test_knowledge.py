@@ -1,17 +1,14 @@
 """Knowledge client + synthetic tool + multimodal helpers (M68, ADR 0061).
 
-Tests mirror the memory/tools test style: a lightweight HTTP stub stands in for the
-launcher's :2998 /knowledge/search endpoint; env manipulation with monkeypatch gates
-the KNOWLEDGE_BASE_ENABLED + KNOWLEDGE_BASES signals.
+The launcher's :2998 /knowledge/search endpoint is the fake generated from
+sdk/launcher-routes.json, so its answers are the ones the real launcher was proven to give; env
+manipulation with monkeypatch gates the KNOWLEDGE_BASE_ENABLED + KNOWLEDGE_BASES signals.
 """
 
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Iterator, List, Optional
-from urllib.parse import urlparse
+from typing import Any, Dict, Iterator, List
 
 import pytest
 
@@ -21,100 +18,37 @@ from ctxmesh.config import PlaneConfig
 from ctxmesh.errors import ConfigError
 from ctxmesh.knowledge import KnowledgeClient
 
-# ── minimal stub for :2998/knowledge/search ───────────────────────────────────
+from ._generated_fake_launcher import FakeLauncher
 
+# ── the generated fake launcher for :2998/knowledge/search ─────────────────────
 
-class KnowledgeStub:
-    """Tiny in-process HTTP stub for POST /knowledge/search (the M68 wire contract)."""
-
-    def __init__(self, results: Optional[List[Dict[str, Any]]] = None) -> None:
-        self.results = (
-            results
-            if results is not None
-            else [
-                {
-                    "content": "The capital of France is Paris.",
-                    "documentRef": "doc-42",
-                    "chunkIndex": 0,
-                    "startOffset": 0,
-                    "endOffset": 40,
-                    "mimeType": "text/plain",
-                    "score": 0.97,
-                }
-            ]
-        )
-        self.requests: List[Dict[str, Any]] = []
-        self._force_status: Optional[int] = None
-
-        handler_cls = self._make_handler()
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-
-    @property
-    def base_url(self) -> str:
-        host, port = self._server.server_address
-        return f"http://{host}:{port}"
-
-    def __enter__(self) -> "KnowledgeStub":
-        self._thread.start()
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self._server.shutdown()
-        self._server.server_close()
-        self._thread.join(timeout=2)
-
-    def _make_handler(self):
-        stub = self
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def log_message(self, *_args: Any) -> None:
-                pass
-
-            def do_POST(self) -> None:
-                parsed = urlparse(self.path)
-                length = int(self.headers.get("Content-Length", 0) or 0)
-                body = self.rfile.read(length) if length else b""
-                stub.requests.append(
-                    {
-                        "path": parsed.path,
-                        "body": json.loads(body) if body else {},
-                        "headers": {k.lower(): v for k, v in self.headers.items()},
-                    }
-                )
-                if stub._force_status is not None:
-                    self.send_response(stub._force_status)
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
-                resp_body = json.dumps({"results": stub.results}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(resp_body)))
-                self.end_headers()
-                self.wfile.write(resp_body)
-
-        return Handler
+KB_ROUTE = "POST /knowledge/search"
 
 
 @pytest.fixture
-def kb_stub() -> Iterator[KnowledgeStub]:
-    with KnowledgeStub() as stub:
-        yield stub
+def kb_stub() -> Iterator[FakeLauncher]:
+    with FakeLauncher() as fake:
+        yield fake
 
 
-def _kb_config(stub: KnowledgeStub) -> PlaneConfig:
-    """A PlaneConfig pointing at the knowledge stub's base URL."""
-    # The KnowledgeClient uses memory_base_url (same :2998 listener).
-    return PlaneConfig.for_test(memory_base_url=stub.base_url)
+def _kb_config(fake: FakeLauncher) -> PlaneConfig:
+    """A PlaneConfig pointing at the fake launcher (the KnowledgeClient uses :2998)."""
+    return PlaneConfig.for_test(memory_base_url=fake.base_url)
+
+
+def _golden_results(fake: FakeLauncher) -> List[Dict[str, Any]]:
+    return fake.golden(KB_ROUTE)["response"]["body"]["results"]
+
+
+def _kb_requests(fake: FakeLauncher) -> List[Dict[str, Any]]:
+    """The bodies of every /knowledge/search request the fake received."""
+    return [r.json() for r in fake.received if r.route == KB_ROUTE]
 
 
 # ── KnowledgeClient.search ────────────────────────────────────────────────────
 
 
-def test_search_posts_correct_body(kb_stub: KnowledgeStub, monkeypatch):
+def test_search_posts_correct_body(kb_stub: FakeLauncher, monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "docs", "namespace": "default"}]))
 
@@ -122,32 +56,32 @@ def test_search_posts_correct_body(kb_stub: KnowledgeStub, monkeypatch):
     kc = KnowledgeClient(cfg)
     results = kc.search("capital of France", knowledge_base="docs", top_k=5, threshold=0.5)
 
-    assert results == kb_stub.results
-    assert len(kb_stub.requests) == 1
-    req = kb_stub.requests[0]
-    assert req["path"] == "/knowledge/search"
-    body = req["body"]
+    assert results == _golden_results(kb_stub)
+    assert [r.path for r in kb_stub.received] == ["/knowledge/search"]
+    body = _kb_requests(kb_stub)[0]
     assert body["knowledgeBase"] == "docs"
     assert body["query"] == "capital of France"
     assert body["topK"] == 5
     assert body["threshold"] == 0.5
     # SDK must NOT send embeddingModel (the launcher fills it from the KB spec).
     assert "embeddingModel" not in body
+    kb_stub.assert_conforms()
 
 
-def test_search_returns_results_list(kb_stub: KnowledgeStub, monkeypatch):
+def test_search_returns_results_list(kb_stub: FakeLauncher, monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "kb1", "namespace": "default"}]))
 
     cfg = _kb_config(kb_stub)
     kc = KnowledgeClient(cfg)
     results = kc.search("Paris", knowledge_base="kb1")
+    want = _golden_results(kb_stub)[0]
     assert isinstance(results, list)
-    assert results[0]["documentRef"] == "doc-42"
-    assert results[0]["score"] == 0.97
+    assert results[0]["documentRef"] == want["documentRef"]
+    assert results[0]["score"] == want["score"]
 
 
-def test_search_defaults_to_single_granted_kb(kb_stub: KnowledgeStub, monkeypatch):
+def test_search_defaults_to_single_granted_kb(kb_stub: FakeLauncher, monkeypatch):
     """When knowledge_base is None and exactly one KB is granted, default to it."""
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "solo-kb", "namespace": "ns"}]))
@@ -156,9 +90,8 @@ def test_search_defaults_to_single_granted_kb(kb_stub: KnowledgeStub, monkeypatc
     kc = KnowledgeClient(cfg)
     # No knowledge_base argument — should default to "solo-kb"
     results = kc.search("something")
-    assert results == kb_stub.results
-    req = kb_stub.requests[0]
-    assert req["body"]["knowledgeBase"] == "solo-kb"
+    assert results == _golden_results(kb_stub)
+    assert _kb_requests(kb_stub)[0]["knowledgeBase"] == "solo-kb"
 
 
 def test_search_raises_on_multiple_kbs_without_choice(monkeypatch):
@@ -223,7 +156,7 @@ def test_available_returns_empty_when_no_roster(monkeypatch):
     assert kc.available() == []
 
 
-def test_client_exposes_knowledge_attr(kb_stub: KnowledgeStub, monkeypatch):
+def test_client_exposes_knowledge_attr(kb_stub: FakeLauncher, monkeypatch):
     """client.knowledge is a KnowledgeClient, exposed at the SDK Client level."""
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "kb", "namespace": "ns"}]))
@@ -231,7 +164,7 @@ def test_client_exposes_knowledge_attr(kb_stub: KnowledgeStub, monkeypatch):
     c = agent.from_config(cfg)
     assert isinstance(c.knowledge, KnowledgeClient)
     results = c.knowledge.search("Paris", knowledge_base="kb")
-    assert results == kb_stub.results
+    assert results == _golden_results(kb_stub)
 
 
 # ── synthetic knowledge_search tool ──────────────────────────────────────────
@@ -292,7 +225,7 @@ def test_knowledge_search_tool_absent_when_roster_empty(monkeypatch):
         assert "knowledge_search" not in [t.name for t in tools]
 
 
-def test_knowledge_search_tool_dispatches_to_client(kb_stub: KnowledgeStub, monkeypatch):
+def test_knowledge_search_tool_dispatches_to_client(kb_stub: FakeLauncher, monkeypatch):
     """A managed loop knowledge_search tool call dispatches to client.knowledge.search and
     returns results including provenance (documentRef/chunkIndex) so the model can cite."""
     from ctxmesh.managed import _dispatch_knowledge_search
@@ -306,19 +239,21 @@ def test_knowledge_search_tool_dispatches_to_client(kb_stub: KnowledgeStub, monk
     result_str = _dispatch_knowledge_search(c, {"query": "Paris", "knowledge_base": "docs"})
     # Result is JSON-encoded; parse and verify provenance fields are present
     result = json.loads(result_str)
+    want = _golden_results(kb_stub)[0]
     assert isinstance(result, list)
     assert len(result) == 1
-    assert result[0]["documentRef"] == "doc-42"
-    assert result[0]["chunkIndex"] == 0
-    assert result[0]["content"] == "The capital of France is Paris."
+    assert result[0]["documentRef"] == want["documentRef"]
+    assert result[0]["chunkIndex"] == want["chunkIndex"]
+    assert result[0]["content"] == want["content"]
 
-    # The stub was actually called
-    assert len(kb_stub.requests) == 1
-    assert kb_stub.requests[0]["body"]["knowledgeBase"] == "docs"
-    assert kb_stub.requests[0]["body"]["query"] == "Paris"
+    # The launcher was actually called
+    bodies = _kb_requests(kb_stub)
+    assert len(bodies) == 1
+    assert bodies[0]["knowledgeBase"] == "docs"
+    assert bodies[0]["query"] == "Paris"
 
 
-def test_knowledge_search_dispatch_defaults_kb(kb_stub: KnowledgeStub, monkeypatch):
+def test_knowledge_search_dispatch_defaults_kb(kb_stub: FakeLauncher, monkeypatch):
     """When knowledge_base is absent in args and one KB is granted, the dispatch defaults to it."""
     from ctxmesh.managed import _dispatch_knowledge_search
 
@@ -331,19 +266,18 @@ def test_knowledge_search_dispatch_defaults_kb(kb_stub: KnowledgeStub, monkeypat
     result_str = _dispatch_knowledge_search(c, {"query": "test query"})
     result = json.loads(result_str)
     assert isinstance(result, list)
-    req = kb_stub.requests[0]
-    assert req["body"]["knowledgeBase"] == "solo"
+    assert _kb_requests(kb_stub)[0]["knowledgeBase"] == "solo"
 
 
-def test_knowledge_search_dispatch_error_is_honest_text(kb_stub: KnowledgeStub, monkeypatch):
+def test_knowledge_search_dispatch_error_is_honest_text(kb_stub: FakeLauncher, monkeypatch):
     """When the retrieval fails, the dispatch returns honest error text (never raises)."""
     from ctxmesh.managed import _dispatch_knowledge_search
 
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "kb", "namespace": "ns"}]))
 
-    # Make the stub return a 500
-    kb_stub._force_status = 500
+    # The launcher answers 502 when the token service fails.
+    kb_stub.respond(KB_ROUTE, 502, "knowledge search failed\n")
     cfg = _kb_config(kb_stub)
     c = agent.from_config(cfg)
     result = _dispatch_knowledge_search(c, {"query": "Paris", "knowledge_base": "kb"})
@@ -369,7 +303,7 @@ def test_knowledge_search_dispatch_empty_query_returns_error(monkeypatch):
 # ── m68.11: citation/provenance in tool result ────────────────────────────────
 
 
-def test_knowledge_search_dispatch_result_carries_citation(kb_stub: KnowledgeStub, monkeypatch):
+def test_knowledge_search_dispatch_result_carries_citation(kb_stub: FakeLauncher, monkeypatch):
     """_dispatch_knowledge_search adds a 'citation' field ('<documentRef>#<chunkIndex>') to each
     result chunk (ADR 0061 governance #4 — attributable RAG, m68.11). Raw provenance fields are
     kept alongside the citation so consuming code can still parse them."""
@@ -383,17 +317,19 @@ def test_knowledge_search_dispatch_result_carries_citation(kb_stub: KnowledgeStu
 
     result_str = _dispatch_knowledge_search(c, {"query": "Paris", "knowledge_base": "docs"})
     result = json.loads(result_str)
+    want = _golden_results(kb_stub)[0]
     assert isinstance(result, list)
     assert len(result) == 1
     hit = result[0]
     # Citation string must be "<documentRef>#<chunkIndex>"
     assert "citation" in hit, "citation field must be present in the tool result"
-    assert hit["citation"] == "doc-42#0", f"expected 'doc-42#0', got {hit['citation']!r}"
+    expected = f"{want['documentRef']}#{want['chunkIndex']}"
+    assert hit["citation"] == expected, f"expected {expected!r}, got {hit['citation']!r}"
     # Raw provenance fields must still be present (not replaced by citation).
-    assert hit["documentRef"] == "doc-42"
-    assert hit["chunkIndex"] == 0
-    assert hit["content"] == "The capital of France is Paris."
-    assert hit["score"] == 0.97
+    assert hit["documentRef"] == want["documentRef"]
+    assert hit["chunkIndex"] == want["chunkIndex"]
+    assert hit["content"] == want["content"]
+    assert hit["score"] == want["score"]
 
 
 def test_knowledge_search_dispatch_citation_multiple_chunks(monkeypatch):
@@ -423,7 +359,8 @@ def test_knowledge_search_dispatch_citation_multiple_chunks(monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "kb", "namespace": "ns"}]))
 
-    with KnowledgeStub(results=multi_results) as stub:
+    with FakeLauncher() as stub:
+        stub.respond(KB_ROUTE, 200, {"results": multi_results})
         cfg = _kb_config(stub)
         c = agent.from_config(cfg)
         result_str = _dispatch_knowledge_search(c, {"query": "Paris", "knowledge_base": "kb"})
@@ -452,7 +389,8 @@ def test_knowledge_search_dispatch_no_citation_when_doc_ref_empty(monkeypatch):
     monkeypatch.setenv("KNOWLEDGE_BASE_ENABLED", "true")
     monkeypatch.setenv("KNOWLEDGE_BASES", json.dumps([{"name": "kb", "namespace": "ns"}]))
 
-    with KnowledgeStub(results=no_ref_results) as stub:
+    with FakeLauncher() as stub:
+        stub.respond(KB_ROUTE, 200, {"results": no_ref_results})
         cfg = _kb_config(stub)
         c = agent.from_config(cfg)
         result_str = _dispatch_knowledge_search(c, {"query": "test", "knowledge_base": "kb"})
@@ -526,7 +464,7 @@ def test_multimodal_helpers_exported_at_top_level():
     assert ctxmesh.content is content
 
 
-def test_content_parts_pass_through_to_model_chat(kb_stub: KnowledgeStub, monkeypatch):
+def test_content_parts_pass_through_to_model_chat():
     """content() produces a list of dicts that can be used verbatim as the 'content' field
     of a message for model.chat. This is a shape/contract test, not a live gateway call."""
     msgs = [
