@@ -1,203 +1,197 @@
-//! Coverage is asserted against sdk/launcher-routes.json — generated from cmd/launcher — with a
-//! fake that 404s anything unregistered.
-//!
-//! The previous fake was a permissive catch-all written by the author of the client it tests, so
-//! both encoded the same wrong assumption and every test passed while 8 of 10 routes failed
-//! against a real launcher.
+//! The fake is generated from sdk/launcher-routes.json, whose goldens cmd/launcher proves against
+//! the real handlers. It 404s anything the launcher does not serve and records every request that
+//! breaks a route's schema, so a client calling the wrong path, or sending the wrong field, fails
+//! here.
+
+mod fake_launcher;
 
 use ctxmesh::{Client, Config, Entry, Error};
+use fake_launcher::FakeLauncher;
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 
-const CAP: &str = "cap-token";
+const CAP: &str = "probe-run-capability";
 
-#[derive(Clone, Debug)]
-struct Route {
-    method: String,
-    path: String,
-    /// The SDK tier that owes the route (ADR 0139); empty means every SDK.
-    tier: String,
+fn client_for(f: &FakeLauncher) -> Client {
+    let p = f.port();
+    Client::with_config(Config::for_test(p, p, p, p, "conv-1"))
 }
 
-impl Route {
-    /// `{param}` matches exactly ONE segment: `/memory/{id}` must NOT match
-    /// `/memory/agent/remember`. Conflating those produced the `/memory/agent` fiction.
-    fn matches(&self, m: &str, p: &str) -> bool {
-        if self.method != "ANY" && self.method != m {
-            return false;
-        }
-        let want: Vec<&str> = self.path.trim_matches('/').split('/').collect();
-        let got: Vec<&str> = p.trim_matches('/').split('/').collect();
-        want.len() == got.len()
-            && want
-                .iter()
-                .zip(&got)
-                .all(|(w, g)| w.starts_with('{') && !g.is_empty() || w == g)
+fn entry(role: &str, content: &str) -> Entry {
+    Entry {
+        role: role.into(),
+        content: content.into(),
     }
-}
-
-fn load_routes() -> Vec<Route> {
-    let mut dir = std::env::current_dir().expect("cwd");
-    for _ in 0..6 {
-        let f = dir.join("launcher-routes.json");
-        if let Ok(s) = std::fs::read_to_string(&f) {
-            let v: serde_json::Value = serde_json::from_str(&s).expect("fixture is not JSON");
-            let out: Vec<Route> = v["routes"]
-                .as_array()
-                .expect("routes")
-                .iter()
-                .map(|r| Route {
-                    method: r["method"].as_str().unwrap_or_default().to_string(),
-                    path: r["path"].as_str().unwrap_or_default().to_string(),
-                    tier: r["tier"].as_str().unwrap_or_default().to_string(),
-                })
-                .collect();
-            assert!(
-                !out.is_empty(),
-                "the fixture is empty; this test would assert nothing"
-            );
-            return out;
-        }
-        if !dir.pop() {
-            break;
-        }
-    }
-    panic!("launcher-routes.json not found — the fixture IS the contract");
-}
-
-/// Mirrors what the real handlers return — verified against cmd/launcher, not against the client.
-fn body_for(pattern: &str) -> &'static str {
-    match pattern {
-        "/memory/agent/search" => {
-            r#"{"results":[{"content":"strong","score":0.9},{"content":"weak","score":0.1}]}"#
-        }
-        "/knowledge/search" => r#"{"results":[{"content":"c","documentRef":"d","score":0.5}]}"#,
-        "/skills" => r#"{"skills":[{"name":"s","description":"d"}]}"#,
-        "/skills/load" => r#"{"body":"the skill body"}"#, // "body", not "content"
-        "/delegate" => r#"{"ok":true,"subAgent":"sub","subRun":"r1","answer":"42"}"#,
-        "/handoff" => r#"{"ok":true,"runId":"r1","handedOffTo":"other"}"#,
-        "/memory/{conversationId}" | "/memory/{conversationId}/search" => {
-            r#"[{"role":"user","content":"hi"}]"#
-        }
-        _ => "{}",
-    }
-}
-
-struct Plane {
-    port: u16,
-    seen: Arc<Mutex<Vec<String>>>,
-    reqs: Arc<Mutex<Vec<String>>>,
-}
-
-fn plane(routes: Vec<Route>, status: u16) -> Plane {
-    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
-    let port = server.server_addr().to_ip().expect("ip").port();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let reqs = Arc::new(Mutex::new(Vec::new()));
-    let (s, q) = (Arc::clone(&seen), Arc::clone(&reqs));
-
-    std::thread::spawn(move || {
-        for req in server.incoming_requests() {
-            let path = req.url().split('?').next().unwrap_or("").to_string();
-            let method = req.method().to_string();
-            q.lock().unwrap().push(format!("{method} {path}"));
-            match routes.iter().find(|r| r.matches(&method, &path)) {
-                None => {
-                    // Exactly what a real launcher does, and the whole point of this fake.
-                    let _ = req.respond(
-                        tiny_http::Response::from_string("404 page not found")
-                            .with_status_code(404),
-                    );
-                }
-                Some(hit) => {
-                    s.lock()
-                        .unwrap()
-                        .push(format!("{} {}", hit.method, hit.path));
-                    let _ = req.respond(
-                        tiny_http::Response::from_string(body_for(&hit.path))
-                            .with_status_code(status)
-                            .with_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"Content-Type"[..],
-                                    &b"application/json"[..],
-                                )
-                                .unwrap(),
-                            ),
-                    );
-                }
-            }
-        }
-    });
-    Plane { port, seen, reqs }
 }
 
 #[test]
 fn every_launcher_route_is_exercised() {
-    let routes = load_routes();
-    let p = plane(routes.clone(), 200);
-    let c = Client::with_config(Config::for_test(p.port, p.port, p.port, p.port, "conv-1"));
-
-    c.memory_get(None).expect("memory_get");
-    c.memory_append(
-        &Entry {
-            role: "user".into(),
-            content: "hi".into(),
-        },
-        None,
-    )
-    .expect("append");
-    c.memory_put(
-        &[Entry {
-            role: "user".into(),
-            content: "hi".into(),
-        }],
-        None,
-    )
-    .expect("put");
-    c.memory_search("hi", None, Some(CAP))
-        .expect("memory_search");
+    let fake = FakeLauncher::start();
+    let c = client_for(&fake);
     let mut tags = BTreeMap::new();
-    tags.insert("topic".to_string(), "x".to_string());
-    c.remember("a fact", &tags).expect("remember");
-    c.search_agent("q", 3, 0.0).expect("search_agent");
-    c.knowledge_search("q", Some("kb"), 3).expect("knowledge");
-    c.skills().expect("skills");
-    c.skill_load("s").expect("skill_load");
-    c.feedback("t1", "helpfulness", 1.0, Some("clear"))
-        .expect("feedback");
-    c.call_agent("other", serde_json::json!({"q":1}))
-        .expect("amp");
-    c.call_agent_legacy("other", serde_json::json!({"q":1}))
-        .expect("a2a");
-    c.delegate("sub", "step-1", "call-1", CAP, serde_json::json!({"x":1}))
-        .expect("delegate");
-    c.handoff("other", CAP, Some("over to you"), true)
-        .expect("handoff");
+    tags.insert("topic".to_string(), "preferences".to_string());
 
-    let seen = p.seen.lock().unwrap().clone();
-    let reqs = p.reqs.lock().unwrap().clone();
-    // A plane-client SDK owes every route but the authoring tier's (ADR 0139): tool discovery is
-    // read by the managed loop, and a plane client has no tools client.
-    for r in routes
-        .iter()
-        .filter(|r| r.tier.is_empty() || r.tier == "plane-client")
-    {
-        assert!(
-            seen.contains(&format!("{} {}", r.method, r.path)),
-            "launcher serves {} {} and no SDK call reached it; requests={reqs:?}",
-            r.method,
-            r.path
-        );
+    // Every call the plane-client tier owes. One fake serves every listener, so a route sent to
+    // the wrong PORT still reaches it; delegate_uses_its_own_listener covers ports.
+    let calls: Vec<(&str, Result<(), Error>)> = vec![
+        ("GET /memory/{conversationId}", c.memory_get(None).map(drop)),
+        (
+            "POST /memory/{conversationId}/append",
+            c.memory_append(&entry("user", "hi"), None),
+        ),
+        (
+            "PUT /memory/{conversationId}",
+            c.memory_put(&[entry("user", "hi")], None),
+        ),
+        (
+            "GET /memory/{conversationId}/search",
+            c.memory_search("metric", None, Some(CAP)).map(drop),
+        ),
+        (
+            "POST /memory/agent/remember",
+            c.remember("The user prefers metric units.", &tags),
+        ),
+        (
+            "POST /memory/agent/search",
+            c.search_agent("units", 3, 0.0).map(drop),
+        ),
+        (
+            "POST /knowledge/search",
+            c.knowledge_search("When do deploys go out?", Some("handbook"), 3)
+                .map(drop),
+        ),
+        ("GET /skills", c.skills().map(drop)),
+        ("POST /skills/load", c.skill_load("deploy").map(drop)),
+        (
+            "ANY /feedback",
+            c.feedback(
+                "0af7651916cd43dd8448eb211c80319c",
+                "helpfulness",
+                0.9,
+                Some("clear answer"),
+            ),
+        ),
+        (
+            "POST /amp/{targetAgent}",
+            c.call_agent("peer-agent", serde_json::json!({"question": "ping"}))
+                .map(drop),
+        ),
+        (
+            "POST /a2a/{targetAgent}",
+            c.call_agent_legacy("peer-agent", serde_json::json!({"question": "ping"}))
+                .map(drop),
+        ),
+        (
+            "POST /delegate",
+            c.delegate(
+                "researcher",
+                "1",
+                "call-1",
+                CAP,
+                "Summarise the quarterly report".into(),
+            )
+            .map(drop),
+        ),
+        (
+            "POST /handoff",
+            c.handoff(
+                "billing",
+                CAP,
+                Some("The customer is asking about an invoice."),
+                true,
+            )
+            .map(drop),
+        ),
+    ];
+    let failed: Vec<String> = calls
+        .into_iter()
+        .filter_map(|(k, r)| r.err().map(|e| format!("{k}: {e}")))
+        .collect();
+    assert!(failed.is_empty(), "calls failed: {failed:#?}");
+
+    for key in fake.route_keys() {
+        let why = fake.waived(&key);
+        if why.is_empty() {
+            assert!(
+                fake.is_covered(&key),
+                "the launcher serves {key} and no SDK call reached it"
+            );
+        } else {
+            assert!(
+                !fake.is_covered(&key),
+                "{key} is waived for Rust ({why}) but the SDK reaches it now: delete the waiver"
+            );
+        }
     }
+    fake.assert_conforms();
+}
+
+#[test]
+fn responses_decode_as_the_launcher_sends_them() {
+    let fake = FakeLauncher::start();
+    let c = client_for(&fake);
+
+    let entries = c.memory_get(Some("conv-1")).expect("memory_get");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[1].content, "You prefer metric units.");
+    let facts = c.search_agent("units", 3, 0.0).expect("search_agent");
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].content, "The user prefers metric units.");
+    assert_eq!(facts[0].score, 0.91);
+    let chunks = c
+        .knowledge_search("When do deploys go out?", Some("handbook"), 3)
+        .expect("knowledge");
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].document_ref, "handbook/deploys.md");
+    let skills = c.skills().expect("skills");
+    assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].name, "deploy");
+    let reply = c
+        .call_agent("peer-agent", serde_json::json!({"question": "ping"}))
+        .expect("call_agent");
+    assert_eq!(reply["answer"], "pong");
+    let h = c
+        .handoff("billing", CAP, Some("over to you"), true)
+        .expect("handoff");
+    assert!(h.ok);
+    assert_eq!(h.run_id, "run-billing-1");
+    assert_eq!(h.handed_off_to, "billing");
+    fake.assert_conforms();
 }
 
 #[test]
 fn skill_load_returns_the_body() {
     // The launcher answers {"body": …}. Reading "content" gave "" with NO error, so a skill loaded
     // as nothing and the model carried on without it.
-    let p = plane(load_routes(), 200);
-    let c = Client::with_config(Config::for_test(p.port, p.port, p.port, p.port, "c"));
-    assert_eq!(c.skill_load("s").expect("load"), "the skill body");
+    let fake = FakeLauncher::start();
+    let want = fake.golden("POST /skills/load", "")["response"]["body"]["body"]
+        .as_str()
+        .expect("the golden carries a body")
+        .to_string();
+    let got = client_for(&fake).skill_load("deploy").expect("load");
+    assert!(!got.is_empty());
+    assert_eq!(got, want);
+}
+
+#[test]
+fn refusals_surface_the_launcher_status() {
+    let fake = FakeLauncher::start();
+    fake.use_golden(
+        "POST /knowledge/search",
+        "refuses-a-knowledge-base-not-granted",
+    );
+    fake.use_golden("POST /skills/load", "refuses-a-skill-not-attached");
+    fake.use_golden("POST /memory/agent/remember", "requires-content");
+    let c = client_for(&fake);
+
+    assert!(matches!(
+        c.knowledge_search("salaries", Some("payroll"), 3),
+        Err(Error::Denied { .. })
+    ));
+    assert!(matches!(c.skill_load("payroll"), Err(Error::Denied { .. })));
+    assert!(matches!(
+        c.remember("  ", &BTreeMap::new()),
+        Err(Error::Api { status: 400, .. })
+    ));
 }
 
 #[test]
@@ -225,51 +219,87 @@ fn delegate_refuses_without_its_required_fields() {
 #[test]
 fn delegate_uses_its_own_listener() {
     // /delegate and /handoff are served by a DIFFERENT listener. Sending them to the memory port
-    // was a 404 in all four SDKs.
-    let memory = plane(load_routes(), 200);
-    let delegate = plane(load_routes(), 200);
+    // was a 404 in all four plane-client SDKs.
+    let memory = FakeLauncher::start();
+    let delegate = FakeLauncher::start();
     let c = Client::with_config(Config::for_test(
-        memory.port,
-        memory.port,
-        memory.port,
-        delegate.port,
+        memory.port(),
+        memory.port(),
+        memory.port(),
+        delegate.port(),
         "c",
     ));
-    c.delegate("sub", "s", "c", CAP, serde_json::Value::Null)
+    c.delegate("researcher", "1", "call-1", CAP, "x".into())
         .expect("delegate");
-
     assert!(
-        delegate
-            .seen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|s| s == "POST /delegate"),
+        delegate.is_covered("POST /delegate"),
         "/delegate did not reach the delegate listener"
     );
     assert!(
-        !memory
-            .seen
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|s| s == "POST /delegate"),
-        "/delegate reached the MEMORY listener — the 404 bug is back"
+        !memory.is_covered("POST /delegate"),
+        "/delegate reached the MEMORY listener"
     );
 }
 
 #[test]
-fn delegate_refusal_is_not_success() {
-    // The launcher answers 200 for every outcome and signals success in "ok". Decoding
-    // {runId, accepted} made refusal, failure and success indistinguishable — and dropped
-    // "answer", which is the entire point of delegating.
-    let p = plane(load_routes(), 200);
-    let c = Client::with_config(Config::for_test(p.port, p.port, p.port, p.port, "c"));
+fn delegate_decodes_success_and_refusal() {
+    // The launcher answers 200 for every outcome and signals success in "ok", so a refusal decoded
+    // as a transport success would be silent data loss, and "answer" is the point of delegating.
+    let fake = FakeLauncher::start();
+    let c = client_for(&fake);
+    let input: serde_json::Value = "Summarise the quarterly report".into();
+
     let d = c
-        .delegate("sub", "s", "c", CAP, serde_json::Value::Null)
+        .delegate("researcher", "1", "call-1", CAP, input.clone())
         .expect("delegate");
     assert!(d.ok, "ok must be decoded");
-    assert_eq!(d.answer, "42", "answer must survive");
+    assert_eq!(d.answer, "The quarterly report is ready.");
+    assert_eq!(d.sub_run, "sub-run-1");
+
+    fake.use_golden("POST /delegate", "refuses-without-a-run-capability");
+    let d = c
+        .delegate("researcher", "1", "call-1", CAP, input)
+        .expect("delegate");
+    assert!(!d.ok, "a refusal must decode as ok=false");
+    assert!(!d.error.is_empty(), "a refusal carries its reason");
+    fake.assert_conforms();
+}
+
+#[test]
+fn the_fake_refuses_what_the_launcher_refuses() {
+    // The fake is only worth generating if it catches the defects hand-written fakes let through.
+    let fake = FakeLauncher::start();
+    let base = format!("http://127.0.0.1:{}", fake.port());
+    let _ = ureq_post(
+        &format!("{base}/memory/agent/remember"),
+        r#"{"text":"a fact"}"#,
+    );
+    assert!(
+        !fake.violations().is_empty(),
+        "a remember body without content passed the fake"
+    );
+    assert_eq!(
+        ureq_post(&format!("{base}/memory/agent/forget"), "{}"),
+        404,
+        "a path the launcher does not serve must 404"
+    );
+    assert_eq!(
+        ureq_post(&format!("{base}/skills"), "{}"),
+        405,
+        "a served path under the wrong method must 405"
+    );
+}
+
+/// The status of a raw POST, outside the SDK.
+fn ureq_post(url: &str, body: &str) -> u16 {
+    match ureq::post(url)
+        .set("Content-Type", "application/json")
+        .send_string(body)
+    {
+        Ok(r) => r.status(),
+        Err(ureq::Error::Status(code, _)) => code,
+        Err(e) => panic!("POST {url}: {e}"),
+    }
 }
 
 #[test]
@@ -302,10 +332,11 @@ fn unwired_capabilities_refuse_locally() {
 fn knowledge_base_is_required() {
     // The handler answers 400 "knowledgeBase is required", so the omit-to-search-all mode the SDK
     // used to document does not exist.
-    let p = plane(load_routes(), 200);
-    let c = Client::with_config(Config::for_test(p.port, p.port, p.port, p.port, "c"));
+    let fake = FakeLauncher::start();
+    let c = client_for(&fake);
     assert!(matches!(
         c.knowledge_search("q", None, 3),
         Err(Error::Invalid(_))
     ));
+    assert!(fake.received().is_empty(), "refused locally, nothing sent");
 }
