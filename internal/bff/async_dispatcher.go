@@ -48,12 +48,17 @@ import (
 // Each registry member has a durable consumer of its own (jsname.AgentDurable), so the consumer's pending
 // count is the number of hops waiting for that agent: the metric a queue-depth AgentScalingPolicy scales
 // the agent on. The set follows the capability registry. A hop to an agent that is not a member yet waits
-// in the stream and is delivered once the agent joins, within the stream's retention.
+// in the stream and is delivered once the agent joins, within the stream's retention. Each durable
+// delivers several hops at once (the bus's MaxInFlight), so an agent KEDA has scaled out gets work for
+// every replica.
 
 const (
-	// asyncDispatchTimeout bounds one delivery attempt. Generous, because the callee may be a ksvc cold
-	// starting from zero — and a timeout here is a NACK, which costs a backoff cycle, not a lost message.
-	asyncDispatchTimeout = 60 * time.Second
+	// asyncDispatchTimeout bounds one delivery attempt, from reading the capability registry to the agent's
+	// answer. It outlasts the receiving launcher, which bounds processing a delivery at 90s plus a few
+	// seconds of admission and dedupe, so the dispatcher never gives up on a run the agent is still
+	// finishing. It stays under asyncbus.AckWait, so the broker never redelivers a hop still being
+	// delivered. A timeout is a NACK, which costs a backoff cycle, not a lost message.
+	asyncDispatchTimeout = 105 * time.Second
 
 	// asyncDurableName is the durable that drains hops published on the registry-only subject
 	// (jsname.RegistrySubjects) before hops were addressed to their receiver. It is a fixed name on
@@ -95,6 +100,8 @@ func (s *Server) StartAsyncDispatcher(ctx context.Context, cfg AsyncDispatcherCo
 		resync = defaultAsyncMemberResync
 	}
 	deliver := func(hctx context.Context, msg asyncbus.Message) error {
+		hctx, cancel := context.WithTimeout(hctx, asyncDispatchTimeout)
+		defer cancel()
 		// The backend records nothing about a nack, so every failed attempt is logged here with its
 		// reason; past the delivery budget the backend stops redelivering the message.
 		err := s.deliverAsyncHop(hctx, client, msg)

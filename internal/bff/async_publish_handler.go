@@ -17,10 +17,14 @@ limitations under the License.
 package bff
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
+	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus"
 	"github.com/ctxmesh/ctxmesh/internal/asyncbus/jsname"
 	"github.com/ctxmesh/ctxmesh/internal/runcap"
@@ -124,7 +128,17 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "the CloudEvent needs a type (ce-type) — it names the receiver")
 		return
 	}
-	s.noteReceiverWithoutRegistry(r, caller.Namespace, receiver, messageID)
+	// The receiver becomes a token of the subject the hop is published on, so it must be an agent name
+	// before anything is sent: an arbitrary one could make the broker close the connection.
+	if !isAgentName(receiver) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"the CloudEvent type (ce-type) must name an agent: a DNS-1123 name of at most %d characters",
+			agentsv1beta1.AgentDeploymentNameMaxLength))
+		return
+	}
+	if !s.admitReceiver(w, r, self.RegistryID, caller.Namespace, receiver, messageID) {
+		return
+	}
 
 	msg := asyncbus.Message{
 		ID: messageID,
@@ -144,20 +158,32 @@ func (s *Server) handleAsyncPublish(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
-// noteReceiverWithoutRegistry logs a hop to an agent that belongs to no registry. The dispatcher keeps a
-// queue only for registry members, so such a hop waits until the agent joins one, or until the stream's
-// retention drops it, and nothing else would record that it is waiting. It is still accepted: two agents
-// created together can publish before the controller has recorded the receiver.
-func (s *Server) noteReceiverWithoutRegistry(r *http.Request, namespace, receiver, messageID string) {
+// isAgentName reports whether name can be an AgentDeployment's name.
+func isAgentName(name string) bool {
+	return len(name) <= agentsv1beta1.AgentDeploymentNameMaxLength && len(validation.IsDNS1123Subdomain(name)) == 0
+}
+
+// admitReceiver refuses a hop to an agent in another registry, which would never be delivered and would
+// count as work waiting in that agent's queue, scaling it for nothing. A hop to an agent in no registry is
+// accepted and logged: the dispatcher keeps a queue only for registry members, so it waits until the agent
+// joins one or the stream's retention drops it, and two agents created together can publish before the
+// controller has recorded the receiver. It writes the refusal and returns false.
+func (s *Server) admitReceiver(w http.ResponseWriter, r *http.Request, registryID, namespace, receiver, messageID string) bool {
 	row, ok, err := s.agentCapabilities.Get(r.Context(), namespace, receiver)
 	if err != nil {
-		s.log.Error(err, "async publish: could not check the receiver's registry", "receiver", namespace+"/"+receiver)
-		return
+		s.log.Error(err, "async publish: reading the receiver's registry failed", "receiver", namespace+"/"+receiver)
+		writeError(w, http.StatusBadGateway, "the capability registry is unavailable")
+		return false
 	}
-	if !ok || row.RegistryID == "" {
+	switch {
+	case ok && row.RegistryID != "" && row.RegistryID != registryID:
+		writeError(w, http.StatusForbidden, "the receiver belongs to another registry — async AMP does not cross registries")
+		return false
+	case !ok || row.RegistryID == "":
 		s.log.Info("async publish: the receiver belongs to no registry yet; the hop waits until it joins one "+
 			"or expires", "receiver", namespace+"/"+receiver, "messageId", messageID)
 	}
+	return true
 }
 
 // asyncPublishHeaders copies the CloudEvent binding headers and stamps the platform's authoritative

@@ -75,7 +75,22 @@ const (
 // handleHealth serves GET /api/health — a liveness + version probe. It needs no
 // cluster access, so it works even before the SPA is authenticated (the SPA
 // dashboard renders it to prove the BFF seam).
+//
+// It fails, 503, once the async backend's connection is closed for good. The
+// client does not reopen one the broker ended, so every publish and every
+// durable consumer would stay dead until the process restarts; failing the
+// liveness probe is what restarts it. A broker that is only unreachable leaves
+// the connection reconnecting, not closed, and the probe passing.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	if b, ok := s.asyncPublisher.(asyncBackendHealth); ok {
+		if err := b.Err(); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, HealthResponse{
+				Status:  "async backend connection closed: " + err.Error(),
+				Version: s.version,
+			})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, HealthResponse{
 		Status:  "ok",
 		Version: s.version,
@@ -1007,4 +1022,10 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // reason (e.g. storage_quota_exceeded) without parsing the human message.
 func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, errorBody{Error: msg, Code: code})
+}
+
+// asyncBackendHealth is an async backend that can lose its connection for good: Err is nil while it is
+// usable.
+type asyncBackendHealth interface {
+	Err() error
 }

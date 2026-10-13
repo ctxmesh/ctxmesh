@@ -910,6 +910,8 @@ func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 		URL:             natsURL,
 		CredentialsFile: strings.TrimSpace(os.Getenv("NATS_CREDENTIALS_FILE")),
 		Replicas:        envInt(os.Getenv("NATS_STREAM_REPLICAS")),
+		// How many hops to one agent are delivered at once; unset or invalid ⇒ asyncbus.DefaultMaxInFlight.
+		MaxInFlight: envInt(os.Getenv("ASYNC_DELIVERY_CONCURRENCY")),
 	})
 	if err != nil {
 		log.Error(err, "async A2A backend NOT started: the broker is unreachable — "+
@@ -917,7 +919,7 @@ func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 		return nil
 	}
 	log.Info("async A2A backend connected (ADR 0121): durable hops enabled",
-		"backend", backend, "url", natsURL)
+		"backend", backend, "url", natsURL, "deliveryConcurrency", os.Getenv("ASYNC_DELIVERY_CONCURRENCY"))
 	return bus
 }
 

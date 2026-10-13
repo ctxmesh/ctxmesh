@@ -247,7 +247,9 @@ func TestAsyncDispatch_DeliversTheCloudEventToTheTarget(t *testing.T) {
 // THE SECOND SECURITY PROPERTY: the dispatcher refuses to cross a registry boundary. The callee's own
 // layer-1 check reads the envelope's registryId — which the PRODUCER wrote — so a crafted envelope could
 // otherwise claim a registry its sender is not in. Checking the target's REAL registry against the one
-// the message was published into (stamped by the edge) closes that.
+// the message was published into (stamped by the edge) closes that. The edge now refuses such a hop
+// before it is published; this is the check for one already in the stream, such as one an older BFF
+// published.
 func TestAsyncDispatch_RefusesToCrossARegistryBoundary(t *testing.T) {
 	delivered := false
 	agent := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

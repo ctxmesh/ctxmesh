@@ -52,8 +52,8 @@ func AgentSubject(registryID, namespace, agent string) string {
 }
 
 // AgentFilter matches every hop addressed to one agent, whatever registry it was published into. The
-// dispatcher refuses a hop whose registry is not the receiver's, so a crossing is still consumed, logged and
-// acknowledged rather than left waiting unseen.
+// publish edge refuses a hop to an agent in another registry; one that got into the stream anyway is still
+// consumed, and the dispatcher refuses, logs and acknowledges it rather than leaving it waiting unseen.
 func AgentFilter(namespace, agent string) string {
 	return SubjectPrefix + ".*." + Token(namespace) + "." + Token(agent)
 }
