@@ -1,5 +1,5 @@
 {
-  "description": "The launcher's agent-facing wire contract: every route an SDK calls, what it accepts, what it answers, and golden examples that are true of the real handlers in the world at the bottom. Route identity (method, path, listener, portEnv, defaultPort) is generated from cmd/launcher by hack/gen-launcher-routes.sh; the rest is written by hand and proven by cmd/launcher's TestSDKContractGoldens. Schemas use a JSON Schema subset (type, properties, required, additionalProperties, items, enum, minLength, maxLength, description) because every SDK's generated fake re-implements the validator. goldens[0] of each route is the success example the generated fakes serve and the probes compare against. tier names the SDK tier that owes a route (ADR 0139); absent means every SDK. Removing a route means deleting its entry, goldens included.",
+  "description": "The launcher's agent-facing wire contract: every route an SDK calls, what it accepts, what it answers, and golden examples that are true of the real handlers in the world at the bottom. Route identity (method, path, listener, portEnv, defaultPort) is generated from cmd/launcher by hack/gen-launcher-routes.sh; the rest is written by hand and proven by cmd/launcher's TestSDKContractGoldens. Schemas use a JSON Schema subset (type, properties, required, additionalProperties, items, enum, minLength, maxLength, description) because every SDK's generated fake re-implements the validator. goldens[0] of each route is the success example the generated fakes serve and the probes compare against. tier names the SDK tier that owes a route (ADR 0139); absent means every SDK. sdkResult lists the response fields every SDK's result must carry with the launcher's value ('[]' descends into each element, '$' is the whole body); the probes require them. Removing a route means deleting its entry, goldens included.",
   "routes": [
     {
       "method": "POST",
@@ -258,6 +258,9 @@
             }
           }
         }
+      ],
+      "sdkResult": [
+        "$"
       ]
     },
     {
@@ -521,7 +524,10 @@
       "sdkWaivers": {
         "python": "The mesh client posts to the legacy /a2a path, so no call reaches /amp yet; m184.51 moves it to /amp and retires /a2a.",
         "typescript": "The mesh client posts to the legacy /a2a path, so no call reaches /amp yet; m184.51 moves it to /amp and retires /a2a."
-      }
+      },
+      "sdkResult": [
+        "$"
+      ]
     },
     {
       "method": "POST",
@@ -725,6 +731,12 @@
             }
           }
         }
+      ],
+      "sdkResult": [
+        "ok",
+        "subAgent",
+        "subRun",
+        "answer"
       ]
     },
     {
@@ -1004,6 +1016,11 @@
             }
           }
         }
+      ],
+      "sdkResult": [
+        "ok",
+        "runId",
+        "handedOffTo"
       ]
     },
     {
@@ -1182,6 +1199,11 @@
             "bodyText": "knowledgeBase is required\n"
           }
         }
+      ],
+      "sdkResult": [
+        "results[].content",
+        "results[].documentRef",
+        "results[].score"
       ]
     },
     {
@@ -1389,6 +1411,10 @@
             "bodyText": "invalid JSON body\n"
           }
         }
+      ],
+      "sdkResult": [
+        "results[].content",
+        "results[].score"
       ]
     },
     {
@@ -1517,6 +1543,10 @@
             }
           }
         }
+      ],
+      "sdkResult": [
+        "[].role",
+        "[].content"
       ]
     },
     {
@@ -1910,6 +1940,10 @@
             "body": []
           }
         }
+      ],
+      "sdkResult": [
+        "[].role",
+        "[].content"
       ]
     },
     {
@@ -1980,6 +2014,10 @@
             }
           }
         }
+      ],
+      "sdkResult": [
+        "skills[].name",
+        "skills[].description"
       ]
     },
     {
@@ -2140,6 +2178,9 @@
             }
           }
         }
+      ],
+      "sdkResult": [
+        "body"
       ]
     },
     {
@@ -2229,6 +2270,10 @@
             }
           }
         }
+      ],
+      "sdkResult": [
+        "tools[].name",
+        "tools[].endpoint"
       ]
     }
   ],

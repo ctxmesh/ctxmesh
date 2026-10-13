@@ -58,6 +58,10 @@ type Route struct {
 	// Tier is the SDK tier that owes the route (ADR 0139): TierAuthoring routes are owed only by
 	// authoring SDKs. Empty means every SDK owes it.
 	Tier string `json:"tier,omitempty"`
+	// SDKResult lists the response fields every SDK's result must carry with the launcher's value:
+	// "[]" descends into each array element and "$" is the whole body. A probe that compared only
+	// what an SDK decoded would pass an SDK that silently dropped a field.
+	SDKResult []string `json:"sdkResult,omitempty"`
 	// SDKWaivers names, per language, why that SDK has no call reaching this route and which card
 	// removes the gap. A waiver is reported as WAIVED, never PASS.
 	SDKWaivers map[string]string `json:"sdkWaivers,omitempty"`
@@ -286,4 +290,41 @@ func (c *Contract) PathKnown(path string) bool {
 		}
 	}
 	return false
+}
+
+// Resolve reports whether path, in sdkResult notation, names a value in a decoded JSON document.
+func Resolve(v any, path string) bool {
+	if path == "$" {
+		return true
+	}
+	return resolve(v, strings.Split(path, "."))
+}
+
+func resolve(v any, segs []string) bool {
+	if len(segs) == 0 {
+		return true
+	}
+	key, each := strings.CutSuffix(segs[0], "[]")
+	if key != "" {
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return false
+		}
+		if v, ok = obj[key]; !ok {
+			return false
+		}
+	}
+	if !each {
+		return resolve(v, segs[1:])
+	}
+	arr, ok := v.([]any)
+	if !ok || len(arr) == 0 {
+		return false
+	}
+	for _, e := range arr {
+		if !resolve(e, segs[1:]) {
+			return false
+		}
+	}
+	return true
 }

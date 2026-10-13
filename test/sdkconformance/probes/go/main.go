@@ -26,10 +26,14 @@ type golden struct {
 }
 
 type route struct {
-	Method  string   `json:"method"`
-	Path    string   `json:"path"`
-	Goldens []golden `json:"goldens"`
+	Method    string   `json:"method"`
+	Path      string   `json:"path"`
+	SDKResult []string `json:"sdkResult"`
+	Goldens   []golden `json:"goldens"`
 }
+
+// required is the current route's sdkResult: the response fields the SDK's result must carry.
+var required []string
 
 func main() {
 	raw, err := os.ReadFile(os.Getenv("CTXMESH_PROBE_CONTRACT"))
@@ -59,6 +63,7 @@ func main() {
 		case !ok:
 			fmt.Printf("MISSING %s: the Go SDK has no call for it\n", key)
 		default:
+			required = r.SDKResult
 			if cerr := check(r.Goldens[0]); cerr != nil {
 				fmt.Printf("FAIL %s: %s\n", key, strings.ReplaceAll(cerr.Error(), "\n", " "))
 			} else {
@@ -157,10 +162,56 @@ func expectJSON(what string, got any, err error, want json.RawMessage) error {
 	if err := json.Unmarshal(want, &w); err != nil {
 		return err
 	}
+	want = mustJSON(w)
 	if path, ok := within(g, w, "$"); !ok {
 		return fmt.Errorf("%s decoded as %s, but the launcher sent %s (differs at %s)", what, mustJSON(got), want, path)
 	}
+	for _, field := range required {
+		if at, ok := carries(g, w, field); !ok {
+			return fmt.Errorf("%s decoded as %s, which does not carry %s with the launcher's value (at %s); the launcher sent %s",
+				what, mustJSON(got), field, at, want)
+		}
+	}
 	return nil
+}
+
+// carries reports whether got holds want's value at a sdkResult path. within alone passes an SDK
+// that dropped a field, because it compares only what the SDK kept.
+func carries(got, want any, path string) (string, bool) {
+	if path == "$" {
+		return "$", reflect.DeepEqual(got, want)
+	}
+	return carry(got, want, strings.Split(path, "."), "$")
+}
+
+func carry(got, want any, segs []string, at string) (string, bool) {
+	if len(segs) == 0 {
+		return at, reflect.DeepEqual(got, want)
+	}
+	key, each := strings.CutSuffix(segs[0], "[]")
+	if key != "" {
+		g, _ := got.(map[string]any)
+		w, _ := want.(map[string]any)
+		gv, present := g[key]
+		if !present {
+			return at + "." + key, false
+		}
+		got, want, at = gv, w[key], at+"."+key
+	}
+	if !each {
+		return carry(got, want, segs[1:], at)
+	}
+	ga, _ := got.([]any)
+	wa, _ := want.([]any)
+	if len(ga) != len(wa) {
+		return at, false
+	}
+	for i := range wa {
+		if p, ok := carry(ga[i], wa[i], segs[1:], fmt.Sprintf("%s[%d]", at, i)); !ok {
+			return p, false
+		}
+	}
+	return at, true
 }
 
 // within reports whether every value in got appears, equal, at the same place in want, and whether

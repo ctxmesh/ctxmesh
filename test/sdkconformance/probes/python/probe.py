@@ -49,6 +49,35 @@ def within(got: Any, want: Any, at: str = "$") -> Tuple[str, bool]:
     )
 
 
+# The route being probed: its golden response body and its sdkResult paths.
+CURRENT: Dict[str, Any] = {"body": None, "required": []}
+
+
+def same(got: Any, want: Any) -> bool:
+    return within(got, want)[1] and within(want, got)[1]
+
+
+def carry(got: Any, want: Any, segs: list, at: str) -> Tuple[str, bool]:
+    if not segs:
+        return at, same(got, want)
+    seg = segs[0]
+    each = seg.endswith("[]")
+    key = seg[:-2] if each else seg
+    if key:
+        if not isinstance(got, dict) or key not in got:
+            return f"{at}.{key}", False
+        got, want, at = got[key], (want or {}).get(key), f"{at}.{key}"
+    if not each:
+        return carry(got, want, segs[1:], at)
+    if not isinstance(got, list) or not isinstance(want, list) or len(got) != len(want):
+        return at, False
+    for i, (g, w) in enumerate(zip(got, want)):
+        where, ok = carry(g, w, segs[1:], f"{at}[{i}]")
+        if not ok:
+            return where, False
+    return at, True
+
+
 def expect(what: str, got: Any, want: Any) -> None:
     where, ok = within(got, want)
     if not ok:
@@ -56,6 +85,20 @@ def expect(what: str, got: Any, want: Any) -> None:
             f"{what} decoded as {json.dumps(got, default=str)}, but the launcher sent "
             f"{json.dumps(want)} (differs at {where})"
         )
+    # within compares only what the SDK kept, so it passes an SDK that dropped a field; the
+    # route's sdkResult names the fields every SDK must carry.
+    if want is not CURRENT["body"]:
+        return
+    for path in CURRENT["required"]:
+        if path == "$":
+            where, ok = "$", same(got, want)
+        else:
+            where, ok = carry(got, want, path.split("."), "$")
+        if not ok:
+            raise AssertionError(
+                f"{what} decoded as {json.dumps(got, default=str)}, which does not carry {path} "
+                f"with the launcher's value (at {where}); the launcher sent {json.dumps(want)}"
+            )
 
 
 def calls(c, capability: str) -> Dict[str, Callable[[Dict[str, Any]], None]]:
@@ -191,6 +234,8 @@ def main() -> int:
                 print(f"MISSING {key}: the Python SDK has no call for it")
                 continue
             try:
+                CURRENT["body"] = r["goldens"][0]["response"].get("body")
+                CURRENT["required"] = r.get("sdkResult", [])
                 check(r["goldens"][0])
             except Exception as exc:  # noqa: BLE001 - a probe reports, it does not stop
                 reason = f"{type(exc).__name__}: {exc}".replace("\n", " ")

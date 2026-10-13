@@ -76,6 +76,14 @@ func (r Route) check() []string {
 	if len(r.Goldens) == 0 {
 		return append(out, "has no golden example; every route needs at least one")
 	}
+	if len(r.SDKResult) > 0 {
+		body, err := Decode(r.Goldens[0].Response.Body)
+		for _, path := range r.SDKResult {
+			if err != nil || !Resolve(body, path) {
+				out = append(out, "sdkResult "+path+" names nothing in the first golden's response, so requiring it proves nothing")
+			}
+		}
+	}
 	if s := r.Goldens[0].Response.Status; s < 200 || s > 299 {
 		out = append(out, fmt.Sprintf("the first golden answers %d; it must be the success example SDK fakes serve", s))
 	}

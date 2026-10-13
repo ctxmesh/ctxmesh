@@ -43,12 +43,48 @@ def differs_at(got, want, at = "$")
   end
 end
 
+# The current route's sdkResult: the response fields every SDK's result must carry.
+$required = []
+
+def same?(got, want) = differs_at(got, want).nil? && differs_at(want, got).nil?
+
+# Whether got holds want's value at a sdkResult path ("[]" descends into each element). Returns
+# where it does not, or nil.
+def missing_at(got, want, segs, at = "$")
+  return(same?(got, want) ? nil : at) if segs.empty?
+
+  each = segs.first.end_with?("[]")
+  key = each ? segs.first.delete_suffix("[]") : segs.first
+  unless key.empty?
+    return "#{at}.#{key}" unless got.is_a?(Hash) && got.key?(key)
+
+    got, want, at = got[key], (want || {})[key], "#{at}.#{key}"
+  end
+  return missing_at(got, want, segs.drop(1), at) unless each
+  return at unless got.is_a?(Array) && want.is_a?(Array) && got.size == want.size
+
+  got.each_with_index do |g, i|
+    where = missing_at(g, want[i], segs.drop(1), "#{at}[#{i}]")
+    return where if where
+  end
+  nil
+end
+
 def expect(what, got, golden)
   want = golden["response"]["body"]
   where = differs_at(got, want)
-  return if where.nil?
+  unless where.nil?
+    raise "#{what} decoded as #{JSON.generate(got)}, but the launcher sent #{JSON.generate(want)} (differs at #{where})"
+  end
 
-  raise "#{what} decoded as #{JSON.generate(got)}, but the launcher sent #{JSON.generate(want)} (differs at #{where})"
+  # differs_at compares only what the SDK kept, so it passes an SDK that dropped a field.
+  $required.each do |path|
+    missed = path == "$" ? (same?(got, want) ? nil : "$") : missing_at(got, want, path.split("."))
+    next if missed.nil?
+
+    raise "#{what} decoded as #{JSON.generate(got)}, which does not carry #{path} with the launcher's value " \
+          "(at #{missed}); the launcher sent #{JSON.generate(want)}"
+  end
 end
 
 calls = {
@@ -125,6 +161,7 @@ contract.fetch("routes").each do |route|
     puts "MISSING #{key}: the Ruby SDK has no call for it"
   else
     begin
+      $required = route.fetch("sdkResult", [])
       call.call(client, route["goldens"].first)
       puts "PASS #{key}"
     rescue StandardError => e

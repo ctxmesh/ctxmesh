@@ -23,7 +23,10 @@ fn main() {
     let client = Client::from_env();
     for route in contract["routes"].as_array().into_iter().flatten() {
         let key = format!("{} {}", s(&route["method"]), s(&route["path"]));
-        let golden = &route["goldens"][0];
+        // The route's sdkResult rides with the golden, so expect can require those fields.
+        let mut golden = route["goldens"][0].clone();
+        golden["sdkResult"] = route["sdkResult"].clone();
+        let golden = &golden;
         match (&client, check_for(&key)) {
             (Err(e), _) => {
                 println!("FAIL {key}: the SDK does not configure from the launcher's env: {e}")
@@ -194,12 +197,63 @@ fn check_for(key: &str) -> Option<Check> {
 fn expect(what: &str, got: Result<Value, String>, g: &Value) -> Result<(), String> {
     let got = got?;
     let want = &g["response"]["body"];
-    match within(&got, want, "$") {
-        None => Ok(()),
-        Some(at) => Err(format!(
+    if let Some(at) = within(&got, want, "$") {
+        return Err(format!(
             "{what} decoded as {got}, but the launcher sent {want} (differs at {at})"
-        )),
+        ));
     }
+    // within compares only what the SDK kept, so it passes an SDK that dropped a field.
+    for path in g["sdkResult"].as_array().into_iter().flatten() {
+        let path = s(path);
+        let missed = if path == "$" {
+            (!same(&got, want)).then(|| "$".to_string())
+        } else {
+            carry(&got, want, &path.split('.').collect::<Vec<_>>(), "$")
+        };
+        if let Some(at) = missed {
+            return Err(format!(
+                "{what} decoded as {got}, which does not carry {path} with the launcher's value \
+                 (at {at}); the launcher sent {want}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn same(got: &Value, want: &Value) -> bool {
+    within(got, want, "$").is_none() && within(want, got, "$").is_none()
+}
+
+/// Where `got` fails to hold `want`'s value at a sdkResult path ("[]" descends into each element).
+fn carry(got: &Value, want: &Value, segs: &[&str], at: &str) -> Option<String> {
+    let Some((first, rest)) = segs.split_first() else {
+        return (!same(got, want)).then(|| at.to_string());
+    };
+    let (key, each) = match first.strip_suffix("[]") {
+        Some(k) => (k, true),
+        None => (*first, false),
+    };
+    let (got, want, at) = if key.is_empty() {
+        (got, want, at.to_string())
+    } else {
+        let Some(g) = got.get(key) else {
+            return Some(format!("{at}.{key}"));
+        };
+        (g, &want[key], format!("{at}.{key}"))
+    };
+    if !each {
+        return carry(got, want, rest, &at);
+    }
+    let (Some(ga), Some(wa)) = (got.as_array(), want.as_array()) else {
+        return Some(at);
+    };
+    if ga.len() != wa.len() {
+        return Some(at);
+    }
+    ga.iter()
+        .zip(wa)
+        .enumerate()
+        .find_map(|(i, (gv, wv))| carry(gv, wv, rest, &format!("{at}[{i}]")))
 }
 
 /// Where `got` first differs from `want`, or None: every non-empty value in got appears, equal,

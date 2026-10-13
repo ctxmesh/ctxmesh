@@ -21,6 +21,9 @@ public final class ConformanceProbe {
 
   interface Check { Object run(Map<String, Object> golden) throws Exception; }
 
+  /** The current route's sdkResult: the response fields every SDK's result must carry. */
+  private static List<Object> required = List.of();
+
   public static void main(String[] args) throws Exception {
     Map<String, Object> contract = map(Json.read(Files.readString(Path.of(System.getenv("CTXMESH_PROBE_CONTRACT")))));
     String capability = System.getenv("CTXMESH_PROBE_CAPABILITY");
@@ -43,6 +46,7 @@ public final class ConformanceProbe {
         System.out.println("MISSING " + key + ": the Java SDK has no call for it");
       } else {
         try {
+          required = list(r.get("sdkResult"));
           check.run(map(list(r.get("goldens")).get(0)));
           System.out.println("PASS " + key);
         } catch (Exception | AssertionError e) {
@@ -173,6 +177,40 @@ public final class ConformanceProbe {
     if (at != null) {
       throw new AssertionError(what + " decoded as " + Json.write(got) + ", but the launcher sent "
           + Json.write(want) + " (differs at " + at + ")");
+    }
+    // within compares only what the SDK kept, so it passes an SDK that dropped a field.
+    for (Object path : required) {
+      String p = String.valueOf(path);
+      String missed = "$".equals(p) ? (same(got, want) ? null : "$") : carry(got, want, List.of(p.split("\\.")), "$");
+      if (missed != null) {
+        throw new AssertionError(what + " decoded as " + Json.write(got) + ", which does not carry " + p
+            + " with the launcher's value (at " + missed + "); the launcher sent " + Json.write(want));
+      }
+    }
+    return null;
+  }
+
+  private static boolean same(Object got, Object want) {
+    return within(got, want, "$") == null && within(want, got, "$") == null;
+  }
+
+  /** Where got fails to hold want's value at a sdkResult path ("[]" descends into each element). */
+  private static String carry(Object got, Object want, List<String> segs, String at) {
+    if (segs.isEmpty()) return same(got, want) ? null : at;
+    boolean each = segs.get(0).endsWith("[]");
+    String key = each ? segs.get(0).substring(0, segs.get(0).length() - 2) : segs.get(0);
+    if (!key.isEmpty()) {
+      if (!(got instanceof Map<?, ?> g) || !g.containsKey(key)) return at + "." + key;
+      got = g.get(key);
+      want = map(want).get(key);
+      at = at + "." + key;
+    }
+    List<String> rest = segs.subList(1, segs.size());
+    if (!each) return carry(got, want, rest, at);
+    if (!(got instanceof List<?> gl) || !(want instanceof List<?> wl) || gl.size() != wl.size()) return at;
+    for (int i = 0; i < wl.size(); i++) {
+      String p = carry(gl.get(i), wl.get(i), rest, at + "[" + i + "]");
+      if (p != null) return p;
     }
     return null;
   }

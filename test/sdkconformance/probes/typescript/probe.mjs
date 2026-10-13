@@ -61,6 +61,31 @@ function within(got, want, at) {
   return got === want ? "" : at;
 }
 
+// The route being probed: its golden response body and its sdkResult paths.
+const current = { body: undefined, required: [] };
+
+function same(got, want) {
+  return !within(got, want, "$") && !within(want, got, "$");
+}
+
+// carry: got holds want's value at a sdkResult path ("[]" descends into each element).
+function carry(got, want, segs, at) {
+  if (segs.length === 0) return same(got, want) ? "" : at;
+  const each = segs[0].endsWith("[]");
+  const key = each ? segs[0].slice(0, -2) : segs[0];
+  if (key) {
+    if (got === null || typeof got !== "object" || !(key in got)) return `${at}.${key}`;
+    [got, want, at] = [got[key], (want ?? {})[key], `${at}.${key}`];
+  }
+  if (!each) return carry(got, want, segs.slice(1), at);
+  if (!Array.isArray(got) || !Array.isArray(want) || got.length !== want.length) return at;
+  for (let i = 0; i < want.length; i++) {
+    const p = carry(got[i], want[i], segs.slice(1), `${at}[${i}]`);
+    if (p) return p;
+  }
+  return "";
+}
+
 function expectJSON(what, got, want) {
   const normalised = JSON.parse(JSON.stringify(got ?? null));
   const at = within(normalised, want, "$");
@@ -68,6 +93,18 @@ function expectJSON(what, got, want) {
     throw new Error(
       `${what} decoded as ${JSON.stringify(normalised)}, but the launcher sent ${JSON.stringify(want)} (differs at ${at})`,
     );
+  }
+  // within compares only what the SDK kept, so it passes an SDK that dropped a field; the route's
+  // sdkResult names the fields every SDK must carry.
+  if (want !== current.body) return;
+  for (const path of current.required) {
+    const missed = path === "$" ? (same(normalised, want) ? "" : "$") : carry(normalised, want, path.split("."), "$");
+    if (missed) {
+      throw new Error(
+        `${what} decoded as ${JSON.stringify(normalised)}, which does not carry ${path} with the launcher's value ` +
+          `(at ${missed}); the launcher sent ${JSON.stringify(want)}`,
+      );
+    }
   }
 }
 
@@ -149,6 +186,8 @@ for (const route of contract.routes) {
     continue;
   }
   try {
+    current.body = route.goldens[0].response.body;
+    current.required = route.sdkResult ?? [];
     await call(route.goldens[0]);
     line(`PASS ${key}`);
   } catch (err) {

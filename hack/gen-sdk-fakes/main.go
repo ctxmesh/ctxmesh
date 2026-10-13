@@ -162,6 +162,7 @@ func fakeContract(c *sdkconformance.Contract, lang, tier string) (string, error)
 		r["key"] = c.Routes[i].Key()
 		r["servedMethod"] = c.Routes[i].ServedMethod()
 		delete(r, "sdkWaivers")
+		delete(r, "sdkResult")
 		delete(r, "tier")
 		if why, _ := c.Routes[i].Exemption(lang, tier); why != "" {
 			r["waived"] = why

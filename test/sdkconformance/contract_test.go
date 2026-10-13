@@ -120,3 +120,18 @@ func TestValidatorSemantics(t *testing.T) {
 		t.Errorf("a keyword outside the subset must be refused, got %v", bad)
 	}
 }
+
+func TestResolve(t *testing.T) {
+	doc, err := Decode([]byte(`{"ok":true,"results":[{"content":"a"},{"content":"b"}],"empty":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]bool{
+		"$": true, "ok": true, "results[].content": true,
+		"answer": false, "results[].score": false, "empty[].content": false, "ok[].x": false,
+	} {
+		if got := Resolve(doc, path); got != want {
+			t.Errorf("Resolve(%q) = %t, want %t", path, got, want)
+		}
+	}
+}
