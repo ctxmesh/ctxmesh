@@ -18,6 +18,7 @@ package bff
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -36,6 +37,10 @@ const resourceSkills = "skills"
 // control-plane database does not get a broken skills page — it gets a stated absence, the same
 // contract the prompt store and the KB upload endpoint use.
 const msgSkillStoreRequired = "skills require the control-plane database; this install has none"
+
+// maxSkillRequestBytes bounds a skill or skill-version request body. Every field in one is bounded
+// far below this (ValidateSkill, ValidateVersion); the cap keeps an oversized body from being decoded.
+const maxSkillRequestBytes = 16 << 10
 
 // handleListSkills serves GET /api/skills?namespace=<ns>.
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
@@ -130,8 +135,7 @@ func (s *Server) handleUpsertSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req UpsertSkillRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeSkillRequest(w, r, &req) {
 		return
 	}
 	ns := strings.TrimSpace(req.Namespace)
@@ -168,8 +172,7 @@ func (s *Server) handleAddSkillVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	ns, name := r.PathValue("ns"), r.PathValue("name")
 	var req AddSkillVersionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !decodeSkillRequest(w, r, &req) {
 		return
 	}
 	// A version is a WRITE to the skill, so it authorizes on update rather than create: the
@@ -225,4 +228,20 @@ func (s *Server) handleDeleteSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// decodeSkillRequest decodes a bounded JSON body into v, answering 413 for one over
+// maxSkillRequestBytes and 400 for one that is not JSON. It reports whether v was decoded.
+func decodeSkillRequest(w http.ResponseWriter, r *http.Request, v any) bool {
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSkillRequestBytes)).Decode(v)
+	if err == nil {
+		return true
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		writeError(w, http.StatusRequestEntityTooLarge, "request body is over the 16 KiB a skill request may hold")
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "invalid JSON body")
+	return false
 }

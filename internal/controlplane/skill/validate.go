@@ -23,6 +23,8 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Bounds. A skill's description is ALWAYS-ON context cost — progressive disclosure exists
@@ -34,6 +36,22 @@ const (
 	MaxNameLength       = 63
 	MaxBodyBytes        = 1 << 20 // 1 MiB
 )
+
+// Bounds on a version's pointers. They are echoed into the AgentDeployment's SkillBodies condition,
+// whose message the API server caps, so an unbounded one could keep every agent attaching the skill
+// from writing its status.
+const (
+	MaxRepoLength      = 512
+	MaxRefLength       = 255
+	MaxPathLength      = 1024
+	MaxObjectKeyLength = 1024
+)
+
+// canonicalDigest is the only digest form a version can have: Digest's output.
+var canonicalDigest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// keySegment is what one segment of an uploaded version's object key may hold.
+var keySegment = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // dns1123 is the name shape every Kubernetes-adjacent identifier in this product uses.
 var dns1123 = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
@@ -72,6 +90,10 @@ func ValidateVersion(v SkillVersion) error {
 	if v.Digest == "" {
 		return fmt.Errorf("skill version has no digest — the digest IS its identity")
 	}
+	if !ValidDigest(v.Digest) {
+		return fmt.Errorf("skill version digest %q must be \"sha256:\" and 64 lowercase hex characters, "+
+			"the sha256 of the body's bytes", truncate(v.Digest, 80))
+	}
 	switch v.Source {
 	case SourceGit:
 		if v.Repo == "" || v.Ref == "" || v.Path == "" {
@@ -80,20 +102,19 @@ func ValidateVersion(v SkillVersion) error {
 		if v.ObjectKey != "" {
 			return fmt.Errorf("git-sourced skill version must not also carry an object key")
 		}
-		if !isImmutableRef(v.Ref) {
-			return fmt.Errorf(
-				"skill version ref %q is not an immutable pin: use a full commit SHA or a tag, "+
-					"never a branch — a version that can change underneath a deployment is not a version",
-				v.Ref)
+		if err := ValidGitPin(v.Repo, v.Ref, v.Path); err != nil {
+			return err
 		}
 	case SourceUpload:
 		if v.ObjectKey == "" {
 			return fmt.Errorf("uploaded skill version has no object key — the bytes live in the object store, not here")
 		}
 		if !OwnsObjectKey(v.Namespace, v.ObjectKey) {
-			return fmt.Errorf("uploaded skill version object key %q must be under %q: the controller reads "+
-				"uploaded bodies with the platform's store credential, so a key outside the namespace's "+
-				"prefix would read another namespace's objects", v.ObjectKey, ObjectKeyPrefix(v.Namespace))
+			return fmt.Errorf("uploaded skill version object key %q must be under %q, at most %d characters, "+
+				"in clean form, with each segment made of letters, digits, '.', '_' and '-': the controller "+
+				"reads uploaded bodies with the platform's store credential, so a key outside the namespace's "+
+				"prefix would read another namespace's objects",
+				truncate(v.ObjectKey, 200), ObjectKeyPrefix(v.Namespace), MaxObjectKeyLength)
 		}
 		if v.Repo != "" || v.Ref != "" || v.Path != "" {
 			return fmt.Errorf("uploaded skill version must not also carry a git pin")
@@ -115,12 +136,70 @@ func ObjectKeyPrefix(namespace string) string {
 }
 
 // OwnsObjectKey reports whether key names an object under the namespace's prefix. The key must be in
-// clean form: "skills/a/../b/x" has the prefix as text but names an object of namespace b.
+// clean form, because "skills/a/../b/x" has the prefix as text but names an object of namespace b, and
+// each segment is restricted to letters, digits, '.', '_' and '-', so no store reads one differently.
 func OwnsObjectKey(namespace, key string) bool {
 	prefix := ObjectKeyPrefix(namespace)
-	return namespace != "" && strings.HasPrefix(key, prefix) && len(key) > len(prefix) &&
-		path.Clean(key) == key
+	if namespace == "" || len(key) > MaxObjectKeyLength || !strings.HasPrefix(key, prefix) ||
+		len(key) == len(prefix) || path.Clean(key) != key {
+		return false
+	}
+	for seg := range strings.SplitSeq(key, "/") {
+		if !keySegment.MatchString(seg) {
+			return false
+		}
+	}
+	return true
 }
+
+// ValidDigest reports whether d is a version digest in canonical form. Any other spelling, such as an
+// upper-case one, can never equal a body's Digest, so a version carrying it could never be mounted.
+func ValidDigest(d string) bool {
+	return canonicalDigest.MatchString(d)
+}
+
+// ValidGitPin checks a git pointer is bounded, pinned and in clean form. The ref and path become part
+// of the URL the controller fetches, so a ".." segment, a query or a fragment in either could make it
+// read a file the pointer does not name.
+func ValidGitPin(repo, ref, filePath string) error {
+	switch {
+	case len(repo) > MaxRepoLength:
+		return fmt.Errorf("skill version repo is %d characters, over the %d-character cap", len(repo), MaxRepoLength)
+	case len(ref) > MaxRefLength:
+		return fmt.Errorf("skill version ref is %d characters, over the %d-character cap", len(ref), MaxRefLength)
+	case len(filePath) > MaxPathLength:
+		return fmt.Errorf("skill version path is %d characters, over the %d-character cap", len(filePath), MaxPathLength)
+	}
+	if !isImmutableRef(ref) {
+		return fmt.Errorf(
+			"skill version ref %q is not an immutable pin: use a full commit SHA or a tag, "+
+				"never a branch — a version that can change underneath a deployment is not a version",
+			truncate(ref, 80))
+	}
+	for _, p := range []struct{ name, value string }{{"ref", ref}, {"path", filePath}} {
+		if strings.HasPrefix(p.value, "/") || path.Clean(p.value) != p.value ||
+			strings.ContainsAny(p.value, "?#%\\") || strings.ContainsFunc(p.value, unicode.IsControl) {
+			return fmt.Errorf("skill version %s %q must be a clean relative path with no '.' or '..' "+
+				"segment and no '?', '#', '%%' or '\\'", p.name, truncate(p.value, 80))
+		}
+	}
+	return nil
+}
+
+// truncate shortens s for an error message, at a rune boundary.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
+}
+
+// IsImmutableRef reports whether a git ref is a pin a version may name: a full commit SHA, or a tag.
+func IsImmutableRef(ref string) bool { return isImmutableRef(ref) }
 
 // isImmutableRef reports whether a git ref pins content that cannot move.
 //

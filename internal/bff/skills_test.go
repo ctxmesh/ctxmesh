@@ -92,7 +92,7 @@ func TestABranchRefIs422(t *testing.T) {
 	s := newSkillServer(t, store, true)
 
 	rec := do(t, s, http.MethodPost, "/api/skills/team-a/summarise/versions",
-		`{"digest":"sha256:abc","source":"git","repo":"https://x/y.git","ref":"main","path":"a/SKILL.md"}`)
+		`{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source":"git","repo":"https://x/y.git","ref":"main","path":"a/SKILL.md"}`)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	assert.Contains(t, rec.Body.String(), "not an immutable pin")
 }
@@ -108,12 +108,47 @@ func TestAnObjectKeyOutsideTheNamespaceIs422(t *testing.T) {
 	s := newSkillServer(t, store, true)
 
 	rec := do(t, s, http.MethodPost, "/api/skills/team-a/summarise/versions",
-		`{"digest":"sha256:abc","source":"upload","objectKey":"knowledge/team-b/kb/doc.pdf"}`)
+		`{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source":"upload","objectKey":"knowledge/team-b/kb/doc.pdf"}`)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	assert.Contains(t, rec.Body.String(), "skills/team-a/")
 	got, err := store.ListVersions(context.Background(), "team-a", "summarise")
 	require.NoError(t, err)
 	assert.Empty(t, got, "a refused key must persist nothing")
+}
+
+// TestAMalformedVersionIs422. Every field a version carries is echoed into the SkillBodies condition
+// of each agent attaching it, so each is bounded, and a digest is accepted only in the one form a body
+// can hash to.
+func TestAMalformedVersionIs422(t *testing.T) {
+	t.Parallel()
+
+	store := skill.NewMemStore()
+	require.NoError(t, store.UpsertSkill(context.Background(),
+		skill.Skill{Namespace: "team-a", Name: "summarise"}))
+	s := newSkillServer(t, store, true)
+	sha := strings.Repeat("c", 40)
+
+	for name, body := range map[string]string{
+		"short digest":     `{"digest":"sha256:abc","source":"upload","objectKey":"skills/team-a/abc"}`,
+		"upper-case hex":   `{"digest":"sha256:` + strings.Repeat("A", 64) + `","source":"upload","objectKey":"skills/team-a/abc"}`,
+		"long path":        `{"digest":"sha256:` + strings.Repeat("a", 64) + `","source":"git","repo":"https://github.com/a/b","ref":"` + sha + `","path":"` + strings.Repeat("p", skill.MaxPathLength+1) + `"}`,
+		"dot-dot path":     `{"digest":"sha256:` + strings.Repeat("a", 64) + `","source":"git","repo":"https://github.com/a/b","ref":"` + sha + `","path":"a/../../x"}`,
+		"query in path":    `{"digest":"sha256:` + strings.Repeat("a", 64) + `","source":"git","repo":"https://github.com/a/b","ref":"` + sha + `","path":"a?b=c"}`,
+		"odd key segment":  `{"digest":"sha256:` + strings.Repeat("a", 64) + `","source":"upload","objectKey":"skills/team-a/a b"}`,
+		"long object key":  `{"digest":"sha256:` + strings.Repeat("a", 64) + `","source":"upload","objectKey":"skills/team-a/` + strings.Repeat("k", skill.MaxObjectKeyLength) + `"}`,
+		"tag with dot-dot": `{"digest":"sha256:` + strings.Repeat("a", 64) + `","source":"git","repo":"https://github.com/a/b","ref":"refs/tags/../../x","path":"a"}`,
+	} {
+		rec := do(t, s, http.MethodPost, "/api/skills/team-a/summarise/versions", body)
+		assert.Equalf(t, http.StatusUnprocessableEntity, rec.Code, "%s: %s", name, rec.Body.String())
+	}
+
+	huge := `{"digest":"sha256:` + strings.Repeat("a", 64) + `","source":"upload","objectKey":"` + strings.Repeat("k", 32<<10) + `"}`
+	rec := do(t, s, http.MethodPost, "/api/skills/team-a/summarise/versions", huge)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "an oversized body is not decoded")
+
+	got, err := store.ListVersions(context.Background(), "team-a", "summarise")
+	require.NoError(t, err)
+	assert.Empty(t, got, "a refused version persists nothing")
 }
 
 // TestVersionAddIsIdempotent. Same bytes are the same version, so a retry must succeed rather
@@ -126,7 +161,7 @@ func TestVersionAddIsIdempotent(t *testing.T) {
 	require.NoError(t, store.UpsertSkill(ctx, skill.Skill{Namespace: "team-a", Name: "summarise"}))
 	s := newSkillServer(t, store, true)
 
-	body := `{"digest":"sha256:abc","source":"upload","objectKey":"skills/team-a/abc"}`
+	body := `{"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source":"upload","objectKey":"skills/team-a/abc"}`
 	for i := range 2 {
 		rec := do(t, s, http.MethodPost, "/api/skills/team-a/summarise/versions", body)
 		require.Equalf(t, http.StatusOK, rec.Code, "attempt %d", i+1)

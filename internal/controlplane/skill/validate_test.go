@@ -84,12 +84,47 @@ func TestAnUploadKeyStaysInItsNamespace(t *testing.T) {
 		"skills/team-a/",
 		"skills/team-ab/SKILL.md",
 		"/skills/team-a/SKILL.md",
+		"skills/team-a/a b.md",
+		"skills/team-a/%2e%2e/team-b/x",
+		"skills/team-a/x?y",
+		"skills/team-a/" + strings.Repeat("k", MaxObjectKeyLength),
 	} {
 		v.ObjectKey = foreign
 		err := ValidateVersion(v)
 		require.Errorf(t, err, "key %q must be refused for namespace team-a", foreign)
 		assert.Contains(t, err.Error(), "skills/team-a/")
 	}
+}
+
+// TestAVersionsPointersAreBoundedAndClean. Every pointer is echoed into the SkillBodies condition of
+// each agent attaching the version, and the ref and path become part of the URL the controller
+// fetches: a long one could stop status writes, and a '..', '?' or '#' could fetch another file.
+func TestAVersionsPointersAreBoundedAndClean(t *testing.T) {
+	t.Parallel()
+
+	v := gitVersion()
+	require.NoError(t, ValidateVersion(v))
+
+	for name, mutate := range map[string]func(*SkillVersion){
+		"short digest":      func(v *SkillVersion) { v.Digest = "sha256:abc" },
+		"upper-case digest": func(v *SkillVersion) { v.Digest = "sha256:" + strings.Repeat("A", 64) },
+		"other algorithm":   func(v *SkillVersion) { v.Digest = "sha512:" + strings.Repeat("a", 64) },
+		"long repo":         func(v *SkillVersion) { v.Repo = "https://github.com/" + strings.Repeat("r", MaxRepoLength) },
+		"long path":         func(v *SkillVersion) { v.Path = strings.Repeat("p", MaxPathLength+1) },
+		"long tag":          func(v *SkillVersion) { v.Ref = "refs/tags/" + strings.Repeat("t", MaxRefLength) },
+		"dot-dot path":      func(v *SkillVersion) { v.Path = "skills/../../other/SKILL.md" },
+		"absolute path":     func(v *SkillVersion) { v.Path = "/etc/SKILL.md" },
+		"query in path":     func(v *SkillVersion) { v.Path = "SKILL.md?raw=1" },
+		"fragment in path":  func(v *SkillVersion) { v.Path = "SKILL.md#x" },
+		"escape in path":    func(v *SkillVersion) { v.Path = "%2e%2e/SKILL.md" },
+		"newline in path":   func(v *SkillVersion) { v.Path = "SKILL.md\nx" },
+		"dot-dot tag":       func(v *SkillVersion) { v.Ref = "refs/tags/../../heads/main" },
+	} {
+		bad := gitVersion()
+		mutate(&bad)
+		assert.Errorf(t, ValidateVersion(bad), "%s must be refused", name)
+	}
+	assert.True(t, ValidDigest(Digest([]byte("x"))), "Digest's own output is canonical")
 }
 
 // TestDigestIsContentIdentity. Same bytes ⇒ same version, whichever source produced them. That
