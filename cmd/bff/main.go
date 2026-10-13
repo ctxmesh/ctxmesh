@@ -520,7 +520,7 @@ func run(addr, staticDir, version string, log logr.Logger) error {
 		// Async A2A backend (M141.4, ADR 0121): the durable bus an agent hands a hop to. nil ⇒ the
 		// publish edge is absent and the dispatcher never starts, so Knative Eventing remains the only
 		// async path — exactly today's behaviour.
-		AsyncPublisher: asyncBus,
+		AsyncPublisher: asyncPublisherFor(asyncBus),
 		// Sender-constrained run capabilities (M142.5, ADR 0124). The bind store rides the shared
 		// state-layer Valkey so "already bound" is the same answer on every replica; without an addr
 		// there is no exchange edge, and capabilities stay bearer.
@@ -889,6 +889,17 @@ func newIngestOCR(log logr.Logger) ocr.OCR {
 // is one feature among many here, and taking the whole console down because a broker is late to start
 // would be a worse outcome than the honest degrade (the publish edge is simply absent, so a producer gets
 // a clear 404 instead of a silent black hole).
+// asyncPublisherFor returns bus as a Publisher, and a nil interface when there is no bus. Assigning a nil
+// *JetStreamBus straight to the interface makes it non-nil, so every "is there a publisher" check passes
+// and the health check calls Err on a nil receiver: the BFF then never becomes ready on an install
+// without JetStream.
+func asyncPublisherFor(bus *asyncbus.JetStreamBus) asyncbus.Publisher {
+	if bus == nil {
+		return nil
+	}
+	return bus
+}
+
 func newAsyncBus(log logr.Logger) *asyncbus.JetStreamBus {
 	backend := strings.ToLower(strings.TrimSpace(os.Getenv("ASYNC_BACKEND")))
 	if backend == "" {
