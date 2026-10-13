@@ -106,7 +106,7 @@ sdk;^sdk/;sdk-contract sdk-readme-truth tier0 bff-route-callers
 # The credential plane behind the token service: where an on-behalf-of grant is stored, sealed and
 # refreshed. A change here decides whether a tool call can authenticate at all, so it needs the e2e
 # credential flows, not only unit tests.
-credentials;^internal/(credplane|credpostgres|credprovider|credresolve)/;tier0 tier1 tier2
+credentials;^internal/(credplane|credpostgres|credprovider|credresolve|credstore)/;tier0 tier1 tier2
 # The memory and knowledge requests the token service serves to every agent. They moved out of
 # internal/credplane and keep its e2e tier.
 runtime;^internal/controlplane/(embedding|knowledge/retrieval|agentmemory/recall)/;tier0 tier1 tier2
