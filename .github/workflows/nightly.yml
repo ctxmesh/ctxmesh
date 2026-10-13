@@ -202,18 +202,16 @@ jobs:
         # registryId check — ADR 0007 addendum). On the M=7 stack Calico also
         # enforces the NetworkPolicy defense-in-depth layer (bonus vs the M=1 run).
         run: make -C agent-brain/harness tier2 SLICE=m6-mesh
-      - name: M7 async eventing e2e (event→trigger, DLQ, cron/job, scaling mechanism)
+      - name: M7 async eventing e2e (event→trigger, DLQ, cron/job, queue-depth scaling)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
         env:
           AGENT_ENGINE: ${{ github.workspace }}
-        # Needs the M=7 stack (KEDA + Knative Eventing + object store). Deploys an
-        # eventing agent (plain Deployment + Trigger), a job + a CronJob batch
-        # agent, and a queue-depth AgentScalingPolicy. Asserts: CloudEvent →
-        # trigger (agent.invoke span), poison → per-registry DLQ, CronJob/Job
-        # complete (native-sidecar collector), and the KEDA scaling MECHANISM
-        # (ScaledObject accepted + HPA created + target resolves). Live
-        # queue-depth scale-up is a documented phase-2 limitation (the in-memory
-        # channel exposes no queue_depth metric) — specs/eventing-scaling.md.
+        # Needs the M=7 stack (KEDA + Knative Eventing + object store + NATS). Deploys an
+        # eventing agent (plain Deployment + Trigger), a job + a CronJob batch agent, and
+        # queue-depth AgentScalingPolicies. Asserts: CloudEvent → trigger (agent.invoke span),
+        # poison → per-registry DLQ, CronJob/Job complete, the honest refusal of queue-depth
+        # scaling on the Knative backend, and on JetStream that 30 queued hops scale the agent
+        # 0 → >1 → 0 (specs/eventing-scaling.md).
         run: make -C agent-brain/harness tier2 SLICE=m7-eventing
       - name: M8 cost-governance e2e (per-agent budget — soft alert, hard-breach halt, traced)
         if: ${{ !cancelled() && steps.devup.outcome == 'success' }}
