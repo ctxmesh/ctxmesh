@@ -40,6 +40,8 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/bff"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/agentversion"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/pgtest"
+	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 )
 
 // boundCaller is a caller whose SelfSubjectAccessReviews allow skills in one namespace only,
@@ -71,14 +73,17 @@ func developerIn(t *testing.T, namespace string) boundCaller {
 // TestASkillCreatedInTheConsoleResolvesForAnAgent: the BFF and the controller, each wired the way
 // its binary wires it (UseControlPlaneDB on the control-plane database), share skills. A
 // developer creates a skill and a version through the API; an agent referencing it with an alias
-// carries the pinned digest and the description; a reference to a skill nobody created, or one
-// in another namespace, does not resolve.
+// carries the pinned digest and the description, and mounts the uploaded body; a reference to a
+// skill nobody created, or one in another namespace, does not resolve.
 func TestASkillCreatedInTheConsoleResolvesForAnAgent(t *testing.T) {
 	db := pgtest.Open(t, "controller_skills")
 	ctx := context.Background()
 	// The schema outlives the run, so each run works in a namespace of its own.
 	ns := fmt.Sprintf("skills-%d", time.Now().UnixNano())
-	const digest = "sha256:5f2b8c0e9a7d4c3b1a0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b"
+	const body = "Summarise: read the whole document, then write three sentences."
+	digest := skill.Digest([]byte(body))
+	objects := objectstore.NewMemObjectStore()
+	require.NoError(t, objects.Put(ctx, "skills/"+ns+"/summarise.md", strings.NewReader(body), int64(len(body)), ""))
 
 	opts := bff.Options{
 		CallerClients: developerIn(t, ns),
@@ -105,22 +110,22 @@ func TestASkillCreatedInTheConsoleResolvesForAnAgent(t *testing.T) {
 	rec = post("/api/skills", `{"namespace":"elsewhere","name":"summarise"}`)
 	require.Equal(t, http.StatusForbidden, rec.Code, "bound to %s, refused another namespace: %s", ns, rec.Body.String())
 
-	r := &AgentDeploymentReconciler{
-		Client: fake.NewClientBuilder().WithScheme(podTemplateScheme(t)).WithObjects(
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
-			&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "elsewhere"}},
-		).Build(),
-		Scheme: podTemplateScheme(t),
-	}
-	r.UseControlPlaneDB(db, agentversion.NewMemStore())
 	agent := func(namespace string, refs ...string) *agentsv1beta1.AgentDeployment {
 		return &agentsv1beta1.AgentDeployment{
 			ObjectMeta: metav1.ObjectMeta{Name: "writer", Namespace: namespace},
 			Spec:       agentsv1beta1.AgentDeploymentSpec{Image: "ghcr.io/ctxmesh/example-agent:latest", SkillRefs: refs},
 		}
 	}
+	writer := agent(ns, "summarise@latest")
+	kube := fake.NewClientBuilder().WithScheme(podTemplateScheme(t)).WithObjects(
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: ns}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "elsewhere"}},
+		writer,
+	).WithStatusSubresource(&agentsv1beta1.AgentDeployment{}).Build()
+	r := &AgentDeploymentReconciler{Client: kube, Scheme: podTemplateScheme(t), SkillObjects: objects}
+	r.UseControlPlaneDB(db, agentversion.NewMemStore())
 
-	pod, err := r.buildPodTemplate(ctx, agent(ns, "summarise@latest"))
+	pod, err := r.buildPodTemplate(ctx, writer)
 	require.NoError(t, err)
 	env := map[string]string{}
 	for _, e := range pod.containers[0].Env {
@@ -130,6 +135,11 @@ func TestASkillCreatedInTheConsoleResolvesForAnAgent(t *testing.T) {
 	var descriptions map[string]string
 	require.NoError(t, json.Unmarshal([]byte(env[envSkillDescriptions]), &descriptions))
 	assert.Equal(t, map[string]string{"summarise": "Summarise a long document"}, descriptions)
+	assert.Equal(t, skillMountPath, env[envSkillDir], "the uploaded body is mounted for load()")
+	var cms corev1.ConfigMapList
+	require.NoError(t, kube.List(ctx, &cms, client.InNamespace(ns), client.MatchingLabels{skillAgentLabel: "writer"}))
+	require.Len(t, cms.Items, 1)
+	assert.Equal(t, map[string]string{"summarise": body}, cms.Items[0].Data)
 
 	_, err = r.buildPodTemplate(ctx, agent(ns, "translate@latest"))
 	require.Error(t, err, "a skill nobody created does not resolve")

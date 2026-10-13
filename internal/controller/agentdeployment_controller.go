@@ -257,6 +257,16 @@ type AgentDeploymentReconciler struct {
 	// does is failed honestly rather than deployed with them silently missing.
 	Skills skill.Resolver
 
+	// SkillGit fetches the bodies of git-sourced skill versions. Nil ⇒ those bodies are not mounted,
+	// and the SkillBodies condition says so; the binary wires the same github.com fetch the BFF's
+	// prompt resolver uses.
+	SkillGit prompt.Resolver
+
+	// SkillObjects reads the bodies of uploaded skill versions. Nil ⇒ the bundled object store when
+	// this install deploys it (the address and credential agent pods are given), else uploaded bodies
+	// are not mounted.
+	SkillObjects skillObjectReader
+
 	// APIReader is an UNCACHED reader (the manager's API reader). The collector's
 	// Langfuse telemetry Secret is read through it, NOT the cache: a cached read is
 	// racy around informer resync and can render a collector sidecar WITHOUT the
@@ -406,6 +416,17 @@ type AgentDeploymentReconciler struct {
 	// recorded holds, per "<namespace>/<name>", the recordedVersion this process last recorded.
 	recorded sync.Map
 
+	// skillFailures holds, per "<namespace>/<name>", the agent's skill bodies that could not be
+	// mounted and when each is tried again (skillFailureState).
+	skillFailures sync.Map
+
+	// skillSizes holds, per "<namespace>/<skill>@<digest>", the size of a verified skill body. A
+	// digest names fixed bytes, so an entry never goes stale.
+	skillSizes sync.Map
+
+	// bundledObjects holds the object-store reader for the bundled store, per address.
+	bundledObjects sync.Map
+
 	// clock replaces time.Now for the version cache's expiry (tests). Nil ⇒ time.Now.
 	clock func() time.Time
 
@@ -477,6 +498,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// GC does not reach it).
 			r.pruneSpawnBudget(ctx, req.Namespace, req.Name)
 			r.deleteVersions(ctx, req.Namespace, req.Name)
+			r.skillFailures.Delete(req.String())
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
@@ -574,6 +596,11 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// tears down the workloads the other branches own before writing its own.
 	log.Info("Reconciling workload", "name", deploy.Name, "executionModel", model)
 	result, err = r.reconcileWorkload(ctx, &deploy, model, hash, versionName)
+	if err == nil {
+		// A skill body that could not be fetched is tried again on its own backoff; everything else
+		// about the agent is reconciled already.
+		result = r.requeueForSkillBodies(result, deploy.Namespace, deploy.Name)
+	}
 
 	// Prompt-only deploy (M9): a promptResolveError is USER input (missing
 	// PromptVersion / unresolvable git ref/path), surfaced from buildPodTemplate
@@ -1950,6 +1977,13 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 				"agent", deploy.Name)
 		}
 	}
+	// The attached skills' bodies, verified against their digests, for load(). A body that cannot be
+	// mounted is named on the SkillBodies condition and the agent deploys without it; this also prunes
+	// the bodies of skills no longer attached.
+	skillBodies, err := r.reconcileSkillBodies(ctx, deploy, resolvedSkills)
+	if err != nil {
+		return podTemplate{}, err
+	}
 	memDigest := memoryDigest(hasMemory, memAddr)
 	// Long-term memory (M46, ADR 0045) is a structural pod change (env injected) → fold it into the
 	// memory digest so enabling/disabling it or changing perUser/embeddingRoute rolls a new revision
@@ -2033,10 +2067,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// (identityDig, above) rolls a plain agent onto the SA once without re-rolling the proxy fleet.
 	saName := agentIdentitySAName(deploy.Name)
 
-	// Only the REFS reach the pod, never the bodies — that is progressive disclosure made
-	// concrete. Mounting every attached body would defeat the whole reason skills exist rather
-	// than a longer prompt.
-	containers = injectSkills(containers, resolvedSkills, skillDescriptions, false)
+	// The refs and descriptions ride in env; the bodies are files, which cost no context until the
+	// agent calls load().
+	containers = injectSkills(containers, resolvedSkills, skillDescriptions, skillBodies.configMap != "")
+	if skillBodies.configMap != "" {
+		volumes = append(volumes, skillVolume(skillBodies.configMap))
+	}
 
 	// The platform's env is complete, so spec.env goes in now: an entry the platform owns is dropped
 	// rather than duplicated, and the drop is reported.
@@ -2081,6 +2117,12 @@ func (r *AgentDeploymentReconciler) buildPodTemplate(
 	// digests does not.
 	if d := skillDigest(resolvedSkills); d != "" {
 		foldAfterContract("|skills:" + d)
+	}
+	// The mounted bodies move the revision name too: the volume and SKILL_DIR are pod-spec changes,
+	// and a body that becomes mountable later changes what load() returns. No pod named without them
+	// stands in for this one, so an approval given before they were mounted does not carry.
+	if skillBodies.hash != "" {
+		foldAfterContract("|skill-bodies:" + skillBodies.hash)
 	}
 
 	// C8 launcher injection (ADR 0079): when LAUNCHER_IMAGE is configured, inject the launcher-inject

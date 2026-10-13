@@ -612,6 +612,10 @@ func main() {
 		// (ADR 0004, mock-first). A production go-git resolver is a drop-in future
 		// impl of prompt.Resolver swapped in HERE; nothing else changes.
 		PromptResolver: prompt.NewFixtureResolver(),
+		// Skill bodies (ADR 0137) are fetched for real: a digest-pinned version's bytes must be the
+		// bytes at its source, which a fixture cannot produce. The same github.com fetch the BFF's
+		// prompt resolver uses; PROMPT_GIT_TOKEN (a PAT from a Secret) reaches private repos.
+		SkillGit: prompt.NewHTTPResolver(strings.TrimSpace(os.Getenv("PROMPT_GIT_TOKEN"))),
 		// Registry read source — nil ⇒ CRD default; the shared Postgres reader when
 		// ToolRegistry is retired (RETIRE_TR). MUST be the SAME instance the
 		// MCPToolBinding reconciler uses (below), or the two drift.

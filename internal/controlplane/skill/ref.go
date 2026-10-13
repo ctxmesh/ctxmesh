@@ -72,6 +72,10 @@ type Resolver interface {
 	// every run, and a network round-trip there would make progressive disclosure cost more
 	// than it saves.
 	Describe(ctx context.Context, namespace string, names []string) (map[string]string, error)
+
+	// Version returns the version a pinned ref names: where its bytes live, so the controller can
+	// fetch the body it mounts and check it against the digest.
+	Version(ctx context.Context, namespace, name, digest string) (SkillVersion, bool, error)
 }
 
 type storeResolver struct{ s Store }
@@ -143,4 +147,8 @@ func (sr storeResolver) Describe(ctx context.Context, namespace string, names []
 		}
 	}
 	return out, nil
+}
+
+func (sr storeResolver) Version(ctx context.Context, namespace, name, digest string) (SkillVersion, bool, error) {
+	return sr.s.GetVersion(ctx, namespace, name, digest)
 }

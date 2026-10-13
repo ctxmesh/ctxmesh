@@ -288,7 +288,7 @@ func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context
 	if len(cms.Items) <= 1 {
 		return nil // only the current CM (or none) — nothing to prune
 	}
-	inUse, err := r.promptConfigMapsInUse(ctx, deploy)
+	inUse, err := r.configMapsMountedByRevisions(ctx, deploy, promptVolumeName)
 	if err != nil {
 		return err
 	}
@@ -305,19 +305,21 @@ func (r *AgentDeploymentReconciler) pruneOldPromptConfigMaps(ctx context.Context
 	return nil
 }
 
-// promptConfigMapsInUse returns the set of prompt-ConfigMap names still mounted by a live
-// Revision of the agent's ksvc, so they are never pruned.
-func (r *AgentDeploymentReconciler) promptConfigMapsInUse(ctx context.Context, deploy *agentsv1beta1.AgentDeployment) (map[string]bool, error) {
+// configMapsMountedByRevisions returns the names of the ConfigMaps a live Revision of the agent's
+// ksvc mounts as volumeName, so they are never pruned.
+func (r *AgentDeploymentReconciler) configMapsMountedByRevisions(
+	ctx context.Context, deploy *agentsv1beta1.AgentDeployment, volumeName string,
+) (map[string]bool, error) {
 	inUse := map[string]bool{}
 	var revs servingv1.RevisionList
 	if err := r.List(ctx, &revs,
 		client.InNamespace(deploy.Namespace),
 		client.MatchingLabels{knativeServiceLabel: deploy.Name}); err != nil {
-		return nil, fmt.Errorf("listing Revisions for prompt GC: %w", err)
+		return nil, fmt.Errorf("listing Revisions for %s ConfigMap GC: %w", volumeName, err)
 	}
 	for i := range revs.Items {
 		for _, v := range revs.Items[i].Spec.Volumes {
-			if v.Name == promptVolumeName && v.ConfigMap != nil {
+			if v.Name == volumeName && v.ConfigMap != nil {
 				inUse[v.ConfigMap.Name] = true
 			}
 		}

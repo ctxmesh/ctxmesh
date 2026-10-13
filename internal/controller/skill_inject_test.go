@@ -8,9 +8,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// TestOnlyRefsReachThePod. The bodies deliberately do NOT travel with the pod: the launcher
-// fetches a description up front and a body only when the model asks. Shipping every attached
-// body into the container would defeat the reason skills exist rather than a longer prompt.
+// TestOnlyRefsReachThePod. Only the refs and descriptions ride in env, which is what GET /skills
+// answers on every run. A body reaches the container only as a mounted file (skill_bodies.go) and
+// enters the model's context only when the agent calls load(); in env it would be read on every run.
 func TestOnlyRefsReachThePod(t *testing.T) {
 	t.Parallel()
 

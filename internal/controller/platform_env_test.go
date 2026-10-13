@@ -39,6 +39,7 @@ import (
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/skill"
 	"github.com/ctxmesh/ctxmesh/internal/controlplane/toolregistry"
+	"github.com/ctxmesh/ctxmesh/internal/objectstore"
 	"github.com/ctxmesh/ctxmesh/internal/prompt"
 	"github.com/ctxmesh/ctxmesh/internal/telemetry"
 	"github.com/ctxmesh/ctxmesh/internal/toolmanifest"
@@ -209,11 +210,32 @@ func envVarLiteralNames(t *testing.T) (names, unresolved []string) {
 	return names, unresolved
 }
 
-// digestSkills resolves every ref to a fixed digest, as the skill store would.
+// digestSkillBody is the body every digestSkills version holds.
+const digestSkillBody = "Summarise: read the whole document, then write three sentences."
+
+// digestSkills resolves every ref to the digest of digestSkillBody, uploaded under the namespace's
+// prefix, as the skill store would. digestSkillObjects holds those uploads.
 type digestSkills struct{}
 
 func (digestSkills) Resolve(_ context.Context, _ string, r skill.Ref) (skill.Ref, error) {
-	return skill.Ref{Name: r.Name, Version: "sha256:" + strings.Repeat("a", 64)}, nil
+	return skill.Ref{Name: r.Name, Version: skill.Digest([]byte(digestSkillBody))}, nil
+}
+
+func (digestSkills) Version(_ context.Context, namespace, name, digest string) (skill.SkillVersion, bool, error) {
+	return skill.SkillVersion{
+		Namespace: namespace, Skill: name, Digest: digest,
+		Source: skill.SourceUpload, ObjectKey: skill.ObjectKeyPrefix(namespace) + name,
+	}, true, nil
+}
+
+func digestSkillObjects(t *testing.T, namespace string, names ...string) *objectstore.MemObjectStore {
+	t.Helper()
+	store := objectstore.NewMemObjectStore()
+	for _, n := range names {
+		require.NoError(t, store.Put(context.Background(), skill.ObjectKeyPrefix(namespace)+n,
+			strings.NewReader(digestSkillBody), int64(len(digestSkillBody)), "text/markdown"))
+	}
+	return store
 }
 
 func (digestSkills) Describe(_ context.Context, _ string, names []string) (map[string]string, error) {
@@ -333,6 +355,7 @@ func (f platformEnvFixture) build(t *testing.T, env []corev1.EnvVar) (*AgentDepl
 	r.Registry = NewPostgresRegistryReader(tools)
 	r.DevDataPlane = true
 	r.Skills = digestSkills{}
+	r.SkillObjects = digestSkillObjects(t, ns, "summarise")
 	r.OBOEgress = OBOEgressConfig{
 		SidecarImage:           "test.local/egress-sidecar:test",
 		TokenServiceURL:        "http://token-service",
@@ -352,9 +375,7 @@ var platformEnvFixtures = map[string]platformEnvFixture{
 }
 
 // platformEnvNotYetSet are classified variables no path sets today, so no fixture can show them.
-var platformEnvNotYetSet = []string{
-	envSkillDir, // only once skill bodies are mounted
-}
+var platformEnvNotYetSet = []string{}
 
 // envNames is the user container's env names, in order, duplicates kept.
 func envNames(pod podTemplate) []string {
