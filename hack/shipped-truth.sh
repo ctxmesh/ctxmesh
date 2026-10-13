@@ -345,7 +345,7 @@ row m164 has cmd/launcher/amp.go "Header.Set(legacyEnvelopeHeader" "a synchronou
 row m164 has cmd/launcher/async.go "Header.Set(legacyEnvelopeHeader" "an asynchronous hop still stamps the legacy envelope"
 row m164 has-tree internal/controller A2A_MAX_DEPTH "the controller still stamps A2A_MAX_DEPTH (running pods keep their guard limits)"
 row m164 has cmd/launcher/amp.go A2A_MAX_DEPTH "the launcher still reads A2A_MAX_DEPTH"
-row m164 has internal/asyncbus/jetstream.go CTXMESH_A2A "the JetStream stream name was not renamed (in-flight durable hops would strand)"
+row m164 has internal/asyncbus/jsname/jsname.go 'Stream = "CTXMESH_A2A"' "the JetStream stream name was not renamed (in-flight durable hops would strand); it lives in jsname since m184.47"
 row m164 has internal/asyncbus/jetstream.go ctxmesh.a2a "the JetStream subject prefix was not renamed"
 row m164 has cmd/launcher/async.go "a2a:seen:" "the dedup keyspace prefix was not renamed"
 row m164 has config/statelayer/deployment.yaml "~a2a:seen:*" "the Valkey ACL still matches the dedup prefix"
