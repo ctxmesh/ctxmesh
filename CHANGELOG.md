@@ -137,6 +137,18 @@ replica then runs several agent runs at once, and the scheduler places it only b
 so the API server refuses such a spec without both. `scaling.concurrency` is new in this release, so
 no existing object is affected.
 
+**Changed: the controller caches its own objects, not the cluster's.** It held every ConfigMap,
+Service, ServiceAccount, ResourceQuota, Deployment, Job, CronJob, NetworkPolicy, Knative Service,
+Trigger, Broker and ScaledObject in the cluster, every Knative Revision, and the full metadata of every
+Secret, so its memory grew with everything else running beside it. It now labels what it creates
+`agents.ctxmesh.ai/managed-by=ctxmesh-controller` and caches those kinds only where they carry the
+label, plus the install namespace's ConfigMaps and Deployments and Knative's `config-features`.
+Revisions are read when needed. The Secret watch keeps only each Secret's name, namespace, labels and
+resourceVersion; a Secret applied with `kubectl` had carried its data into the controller's memory in
+its `last-applied-configuration` annotation. Objects an earlier controller created get the label the
+first time it reads them after the upgrade, and a label removed from one the controller owns is put
+back the next time it reads it.
+
 **Changed: before its first agent, a workspace's sidebar shows Home, Agents and Providers.** With no
 agent the other pages have nothing to show: no runs, no cost, nothing waiting for approval, nothing
 to stop. The sidebar now lists only the destinations Home's first-run checklist walks through, says
