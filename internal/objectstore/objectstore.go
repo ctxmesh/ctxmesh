@@ -399,7 +399,7 @@ func (m *MemObjectStore) Put(_ context.Context, key string, r io.Reader, _ int64
 func (m *MemObjectStore) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	e, ok := m.entries[key]
 	if !ok {
-		return nil, fmt.Errorf("object %q not found", key)
+		return nil, fmt.Errorf("%w: %q", ErrNotFound, key)
 	}
 	return io.NopCloser(strings.NewReader(string(e.data))), nil
 }

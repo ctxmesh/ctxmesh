@@ -22,6 +22,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -249,4 +250,48 @@ func TestReconcile_SkillDigestMismatchMountsNothing(t *testing.T) {
 	assert.Equal(t, reasonSkillDigestMismatch, cond.Reason)
 	assert.Contains(t, cond.Message, skillName)
 	assert.NotContains(t, cond.Message, skill.Digest([]byte("a procedure nobody reviewed")))
+}
+
+// Through the controller's scoped client (ADR 0155), the skill-body ConfigMap carries the managed-by
+// label, so the cache sees it and the next reconcile reuses its verified body instead of fetching
+// again; the ConfigMap List and a create that races the cache both work against the API server.
+func TestReconcile_SkillBodiesThroughTheScopedClient(t *testing.T) {
+	env, _ := startCache(t, testScope.NewCache, testScope.NewClient, nil)
+	namespace := ensureNamespace(t, "skills-scoped")
+	const (
+		name      = "scoped-skill-agent"
+		skillName = "refund-policy"
+		body      = "Refunds: check the order date, then the receipt."
+	)
+	senv := newSkillEnv(t, namespace, skillName)
+	digest := senv.fromGit(t, namespace, skillName, body)
+
+	deploy := &agentsv1beta1.AgentDeployment{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+		Spec: agentsv1beta1.AgentDeploymentSpec{
+			Image:     "ghcr.io/ctxmesh/example-agent:pinned",
+			SkillRefs: []string{skillName + "@" + digest},
+		},
+	}
+	require.NoError(t, k8sClient.Create(testCtx, deploy))
+	t.Cleanup(func() { _ = k8sClient.Delete(testCtx, deploy) })
+
+	r := senv.reconciler()
+	r.Client, r.APIReader = env.client, k8sClient
+	reconcileNN(t, r, name, namespace)
+
+	cms := skillCMsOf(t, name, namespace)
+	require.Len(t, cms, 1)
+	assert.Equal(t, ManagedByValue, cms[0].Labels[ManagedByLabel], "what the controller writes, its cache can see")
+	assert.Equal(t, map[string]string{skillName: body}, cms[0].Data)
+	require.Eventually(t, func() bool {
+		var cm corev1.ConfigMap
+		return env.cache.Get(testCtx, client.ObjectKeyFromObject(&cms[0]), &cm) == nil
+	}, 10*time.Second, 50*time.Millisecond)
+
+	fetched := senv.git.calls
+	reconcileNN(t, r, name, namespace)
+	assert.Equal(t, fetched, senv.git.calls, "the verified body in the ConfigMap stands in for a fetch")
+	assert.Len(t, skillCMsOf(t, name, namespace), 1)
+	assert.Equal(t, cms[0].Name, skillVolumeOf(ksvcOf(t, name, namespace)).ConfigMap.Name)
 }

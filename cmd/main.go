@@ -613,9 +613,9 @@ func main() {
 		// impl of prompt.Resolver swapped in HERE; nothing else changes.
 		PromptResolver: prompt.NewFixtureResolver(),
 		// Skill bodies (ADR 0137) are fetched for real: a digest-pinned version's bytes must be the
-		// bytes at its source, which a fixture cannot produce. The same github.com fetch the BFF's
-		// prompt resolver uses; PROMPT_GIT_TOKEN (a PAT from a Secret) reaches private repos.
-		SkillGit: prompt.NewHTTPResolver(strings.TrimSpace(os.Getenv("PROMPT_GIT_TOKEN"))),
+		// bytes at its source, which a fixture cannot produce. Public github.com repositories only, with
+		// no token: whoever adds a skill version names the file, so a token would be theirs to use.
+		SkillGit: controller.NewSkillGitFetcher(),
 		// Registry read source — nil ⇒ CRD default; the shared Postgres reader when
 		// ToolRegistry is retired (RETIRE_TR). MUST be the SAME instance the
 		// MCPToolBinding reconciler uses (below), or the two drift.

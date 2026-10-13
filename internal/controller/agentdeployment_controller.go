@@ -416,13 +416,9 @@ type AgentDeploymentReconciler struct {
 	// recorded holds, per "<namespace>/<name>", the recordedVersion this process last recorded.
 	recorded sync.Map
 
-	// skillFailures holds, per "<namespace>/<name>", the agent's skill bodies that could not be
-	// mounted and when each is tried again (skillFailureState).
-	skillFailures sync.Map
-
-	// skillSizes holds, per "<namespace>/<skill>@<digest>", the size of a verified skill body. A
-	// digest names fixed bytes, so an entry never goes stale.
-	skillSizes sync.Map
+	// skillFetches is what every agent's skill-body fetches have learned: failures to wait out, per
+	// pinned ref; breakers, per source host; verified sizes.
+	skillFetches skillFetchState
 
 	// bundledObjects holds the object-store reader for the bundled store, per address.
 	bundledObjects sync.Map
@@ -498,7 +494,7 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			// GC does not reach it).
 			r.pruneSpawnBudget(ctx, req.Namespace, req.Name)
 			r.deleteVersions(ctx, req.Namespace, req.Name)
-			r.skillFailures.Delete(req.String())
+			r.skillFetches.setPrunePending(req.String(), false)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("fetching AgentDeployment: %w", err)
@@ -595,11 +591,12 @@ func (r *AgentDeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	// other kinds — a different object, not a ksvc revision roll — so each branch
 	// tears down the workloads the other branches own before writing its own.
 	log.Info("Reconciling workload", "name", deploy.Name, "executionModel", model)
-	result, err = r.reconcileWorkload(ctx, &deploy, model, hash, versionName)
+	workloadCtx, skillBodies := withSkillBodiesMemo(ctx)
+	result, err = r.reconcileWorkload(workloadCtx, &deploy, model, hash, versionName)
 	if err == nil {
 		// A skill body that could not be fetched is tried again on its own backoff; everything else
 		// about the agent is reconciled already.
-		result = r.requeueForSkillBodies(result, deploy.Namespace, deploy.Name)
+		result = requeueForSkillBodies(result, skillBodies)
 	}
 
 	// Prompt-only deploy (M9): a promptResolveError is USER input (missing
