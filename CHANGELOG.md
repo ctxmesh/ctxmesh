@@ -635,27 +635,40 @@ namespace, pinned to its digest; the console has no skills page yet.
 
 **Fixed: a skill's `load()` answered 501 on every agent.** The controller never mounted skill
 bodies, so `client.skills.load(name)`, as the skills guide shows it, failed for every attached
-skill. The controller now fetches each attached skill's pinned version, from git (a github.com
-repository, with the same fetch the prompt diff uses; a private one needs `PROMPT_GIT_TOKEN` in the
-controller's environment, which the chart does not set) or, for an uploaded version, from the
-bundled object store. It checks that the bytes
-hash to the version's digest and mounts the verified bodies read-only at `SKILL_DIR`, one file per
-skill, from an immutable ConfigMap named `<agent>-skills-<hash>`. `load()` now returns the body, and a
-skill not attached to the agent is still refused with 403. Bytes that do not match the digest are
-never mounted, and the launcher checks a body against its digest again before serving it.
+skill. The controller now fetches each attached skill's pinned version from git, from a **public
+github.com repository** only. It sends no token: whoever adds a skill version names the file, so a
+token would let them read any file it reaches. A private repository answers the same as a missing
+file. The controller checks that the bytes hash to the version's digest and mounts the verified
+bodies read-only at `SKILL_DIR`, one file per skill, from an immutable ConfigMap named
+`<agent>-skills-<hash>`. `load()` now returns the body, and a skill not attached to the agent is still
+refused with 403. Bytes that do not match the digest are never mounted, and the launcher checks a body
+against its digest again before serving it. The controller now makes outbound HTTPS requests to
+raw.githubusercontent.com; see [docs/upgrading.md](docs/upgrading.md).
+
+Uploaded versions are not a working source yet: nothing writes their bytes (m52.M161-upload). The
+controller would read one from the bundled object store, and the version's `objectKey` must now be
+under `skills/<namespace>/`, in clean form, with each segment made of letters, digits, `.`, `_` and
+`-`: the controller reads it with the platform's credential, so a key anywhere else would read another
+namespace's objects.
 
 The bodies of one agent share a **900 KiB cap**, because they share one ConfigMap and a ConfigMap
 holds at most 1 MiB. Skills are packed in `spec.skillRefs` order; one that does not fit is left out
 whole, never truncated, and a later smaller one still mounts. A new `SkillBodies` condition names
-each attached skill whose body is not mounted and why (`DigestMismatch`, `TooLarge`, `FetchFailed`,
-`SourceRefused`, `SourceUnavailable`), and `load()` answers 501 for those. A failed fetch is retried
-on a backoff from 10 seconds to 10 minutes and never holds up the rest of the agent. Mounting the
-bodies rolls every agent that has skills once.
+each attached skill whose body is not mounted and why (`DigestMismatch`, which also covers a missing
+file, `TooLarge`, `FetchFailed`, `SourceRefused`, `SourceUnavailable`), and `load()` answers 501 for
+those. A fetch that fails is retried on a backoff from 10 seconds to 10 minutes, shared by every agent
+attaching the same version, and an unreachable host is tried once per backoff window for the whole
+controller. A mismatch at a pinned git ref, a repository off github.com and a body too large are not
+retried; they wait for a new version. Fetching never holds up the rest of the agent.
 
-An uploaded version's `objectKey` must now be under `skills/<namespace>/`. The controller reads it
-with the platform's credential, so a key anywhere else would read another namespace's objects.
-`POST /api/skills/{ns}/{name}/versions` refuses such a key with 422, and the controller refuses a
-version stored with one before this release.
+Mounting the bodies rolls every agent that has skills once, and an agent with skills behind an
+approval gate is held until its new revision is approved again.
+
+`POST /api/skills/{ns}/{name}/versions` now refuses with 422 a digest that is not `sha256:` and 64
+lowercase hex characters (no body can hash to any other spelling), a repo over 512 characters, a ref
+over 255, a path or object key over 1024, and a ref or path with a `.` or `..` segment, a `?`, `#`,
+`%` or `\`. A request body over 16 KiB is refused with 413. The controller refuses a version stored
+with such a pointer before this release.
 
 **Fixed: creating an agent on a connection that does not exist made an agent that could never
 answer.** A model-first create (`POST /api/agents` with `model.connection`) naming a connection the

@@ -79,6 +79,33 @@ Upgrade one minor version at a time. Skipping versions is untested, and a schema
 migration that assumes the immediately previous shape has no way to tell you it was
 skipped.
 
+## Skill bodies are mounted, and the controller fetches them from github.com
+
+**What changed.** The controller fetches each attached skill's pinned version from a public github.com
+repository, checks it against the version's digest, and mounts it into the agent's pod, so `load()`
+returns the body (it answered 501 before). The agent's `SkillBodies` condition names any attached skill
+whose body is not mounted, and why.
+
+**During the upgrade** every agent with skills rolls one new revision, which carries the mounted bodies.
+An approval does **not** carry to it: the bodies change what the agent can read, so an agent with skills
+behind an approval gate keeps serving its approved revision and holds the new one until it is approved
+again. Agents without skills do not roll.
+
+**The controller now makes outbound requests** to `raw.githubusercontent.com:443`, once per skill version
+and not again while the body stays mounted. Where egress is restricted, allow it, or set `HTTPS_PROXY`
+(and `NO_PROXY` for in-cluster addresses) in the controller's environment; the fetch honours both.
+Without either, skills report `FetchFailed` and `load()` answers 501 for them; the agents otherwise run
+as before.
+
+**Only public repositories are read.** The controller sends no token, because whoever adds a skill
+version names the file it fetches. A version in a private repository reports `DigestMismatch`, the same
+as a file that is missing.
+
+**Version records are stricter.** `POST /api/skills/{ns}/{name}/versions` refuses a digest that is not
+`sha256:` and 64 lowercase hex characters, an over-long or unclean ref, path or object key, and an object
+key outside `skills/<namespace>/`. A version stored with one before the upgrade stays listed, and the
+controller reports it `SourceRefused` instead of fetching it.
+
 ## The controller labels what it creates, and caches only that
 
 **What changed.** The controller labels every ConfigMap, Service, ResourceQuota, Deployment, Job, CronJob,
