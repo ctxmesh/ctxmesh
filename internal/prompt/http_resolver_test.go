@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	agentsv1beta1 "github.com/ctxmesh/ctxmesh/api/v1beta1"
 )
@@ -139,4 +140,35 @@ func TestHTTPResolverResolve(t *testing.T) {
 			t.Fatalf("want ErrNotFound for unsupported host, got %v", err)
 		}
 	})
+}
+
+// A resolver with MaxBytes refuses a longer file instead of truncating it, sends no token, and keeps
+// the default transport's proxy settings.
+func TestHTTPResolverWithOptions(t *testing.T) {
+	src := agentsv1beta1.GitPromptSource{Repo: "https://github.com/acme/skills", Ref: "v1", Path: "a/SKILL.md"}
+	serving := func(body string, sawAuth *bool) *HTTPResolver {
+		h := NewHTTPResolverWithOptions(HTTPResolverOptions{MaxBytes: 4, DialTimeout: time.Second})
+		h.client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			*sawAuth = r.Header.Get("Authorization") != ""
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		})
+		return h
+	}
+
+	var sawAuth bool
+	got, err := serving("abcd", &sawAuth).Resolve(context.Background(), src)
+	if err != nil || got.Content != "abcd" {
+		t.Fatalf("a file at the limit resolves whole: %q, %v", got.Content, err)
+	}
+	if sawAuth {
+		t.Fatal("a resolver built with options sends no token")
+	}
+	if _, err := serving("abcde", &sawAuth).Resolve(context.Background(), src); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("a file over the limit is ErrTooLarge, not truncated: %v", err)
+	}
+
+	tr, ok := NewHTTPResolverWithOptions(HTTPResolverOptions{DialTimeout: time.Second}).client.Transport.(*http.Transport)
+	if !ok || tr.Proxy == nil {
+		t.Fatal("the transport keeps http.ProxyFromEnvironment, so HTTPS_PROXY is honoured")
+	}
 }

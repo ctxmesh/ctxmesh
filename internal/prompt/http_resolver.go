@@ -18,8 +18,10 @@ package prompt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,13 +46,50 @@ const maxPromptBytes = 1 << 20
 type HTTPResolver struct {
 	client *http.Client
 	token  string
+	// maxBytes, when set, refuses content longer than it with ErrTooLarge instead of truncating it.
+	maxBytes int64
 }
+
+// ErrTooLarge is returned by a resolver built with HTTPResolverOptions.MaxBytes for content longer
+// than that.
+var ErrTooLarge = errors.New("prompt: the file is larger than the resolver accepts")
 
 // NewHTTPResolver builds an HTTPResolver. token is optional (empty ⇒ public-repo only).
 func NewHTTPResolver(token string) *HTTPResolver {
 	return &HTTPResolver{
 		client: &http.Client{Timeout: 15 * time.Second},
 		token:  strings.TrimSpace(token),
+	}
+}
+
+// HTTPResolverOptions tunes an HTTPResolver for a caller that fetches inside a reconcile.
+type HTTPResolverOptions struct {
+	// MaxBytes refuses content longer than this with ErrTooLarge. Zero truncates at 1 MiB, as
+	// NewHTTPResolver does.
+	MaxBytes int64
+	// DialTimeout bounds connecting, and the TLS handshake and the wait for response headers each, so
+	// an unreachable host fails in seconds. Zero leaves the transport's defaults.
+	DialTimeout time.Duration
+	// Timeout bounds the whole request. Zero is 15 seconds.
+	Timeout time.Duration
+}
+
+// NewHTTPResolverWithOptions builds an HTTPResolver for public repositories only: it sends no token.
+// The transport honours HTTPS_PROXY and NO_PROXY like http.DefaultTransport.
+func NewHTTPResolverWithOptions(opts HTTPResolverOptions) *HTTPResolver {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if opts.DialTimeout > 0 {
+		transport.DialContext = (&net.Dialer{Timeout: opts.DialTimeout, KeepAlive: 30 * time.Second}).DialContext
+		transport.TLSHandshakeTimeout = opts.DialTimeout
+		transport.ResponseHeaderTimeout = opts.DialTimeout
+	}
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	return &HTTPResolver{
+		client:   &http.Client{Timeout: timeout, Transport: transport},
+		maxBytes: opts.MaxBytes,
 	}
 }
 
@@ -87,9 +126,16 @@ func (h *HTTPResolver) Resolve(ctx context.Context, src agentsv1beta1.GitPromptS
 		return Resolved{}, fmt.Errorf("prompt: fetch %s: unexpected status %d", rawURL, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxPromptBytes))
+	limit := int64(maxPromptBytes)
+	if h.maxBytes > 0 {
+		limit = h.maxBytes + 1 // one byte more tells a file at the limit from a longer one
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if err != nil {
 		return Resolved{}, fmt.Errorf("prompt: read %s: %w", rawURL, err)
+	}
+	if h.maxBytes > 0 && int64(len(body)) > h.maxBytes {
+		return Resolved{}, fmt.Errorf("%w: %s is over %d bytes", ErrTooLarge, rawURL, h.maxBytes)
 	}
 	content := string(body)
 	return Resolved{Content: content, Version: Version(src, content)}, nil
