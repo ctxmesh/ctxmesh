@@ -2,123 +2,161 @@ package ctxmesh
 
 import (
 	"context"
-	"net/http/httptest"
-	"net/url"
-	"strconv"
+	"encoding/json"
+	"errors"
 	"testing"
 )
 
-// Coverage is asserted against sdk/launcher-routes.json — generated from cmd/launcher — and the
-// fake 404s anything unregistered. The gate can no longer assert this itself: it used to grep the
-// SDK source for route substrings, which a COMMENT satisfied, so an SDK replaced by six lines of
-// comments passed.
+// The fake is generated from sdk/launcher-routes.json, whose goldens cmd/launcher proves against the
+// real handlers. It 404s anything the launcher does not serve and records every request that breaks
+// a route's schema, so a client calling the wrong path, or sending the wrong field, fails here.
 
-func TestEveryLauncherRouteIsExercised(t *testing.T) {
-	routes, err := loadRoutes()
-	if err != nil {
-		t.Fatalf("load launcher-routes.json: %v — the fixture is the contract, a missing one is a failure", err)
-	}
-	if len(routes) == 0 {
-		t.Fatal("the fixture is empty; this test would assert nothing")
-	}
+const testCapability = "probe-run-capability"
 
-	fake := newFakePlane(routes)
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
-	u, _ := url.Parse(srv.URL)
-	p, _ := strconv.Atoi(u.Port())
-
-	// One fake serves every listener, so a route sent to the wrong PORT still reaches it. Port
-	// correctness is covered by TestDelegateUsesItsOwnListener below.
-	c := NewWithConfig(FromConfig(Config{
+func clientFor(f *fakeLauncher) *Client {
+	p := f.port()
+	return NewWithConfig(FromConfig(Config{
 		MemoryPort: p, FeedbackPort: p, AMPPort: p, DelegatePort: p,
 		ConversationID: "conv-1", MemoryWired: true, FeedbackWired: true,
 		LongTermEnabled: true, KnowledgeEnabled: true,
 	}))
+}
+
+func TestEveryLauncherRouteIsExercised(t *testing.T) {
+	fake := newFakeLauncher(t)
+	c := clientFor(fake)
 	ctx := context.Background()
-	const cap = "cap-token"
 
-	// Every call the plane-client tier owes. A failure here is a real wire-contract break.
-	if _, err := c.Memory.Get(ctx, ""); err != nil {
-		t.Errorf("memory.Get: %v", err)
+	// Every call the plane-client tier owes. One fake serves every listener, so a route sent to the
+	// wrong PORT still reaches it; TestDelegateUsesItsOwnListener covers ports.
+	calls := map[string]func() error{
+		"GET /memory/{conversationId}": func() error { _, err := c.Memory.Get(ctx, ""); return err },
+		"POST /memory/{conversationId}/append": func() error {
+			return c.Memory.Append(ctx, Entry{Role: "user", Content: "hi"}, "")
+		},
+		"PUT /memory/{conversationId}": func() error {
+			return c.Memory.Put(ctx, []Entry{{Role: "user", Content: "hi"}}, "")
+		},
+		"GET /memory/{conversationId}/search": func() error {
+			_, err := c.Memory.Search(ctx, "metric", "", testCapability)
+			return err
+		},
+		"POST /memory/agent/remember": func() error {
+			return c.Memory.Remember(ctx, "The user prefers metric units.", map[string]string{"topic": "preferences"})
+		},
+		"POST /memory/agent/search": func() error { _, err := c.Memory.SearchAgent(ctx, "units", 3, 0); return err },
+		"POST /knowledge/search": func() error {
+			_, err := c.Knowledge.Search(ctx, "When do deploys go out?", "handbook", 3)
+			return err
+		},
+		"GET /skills":       func() error { _, err := c.Skills.List(ctx); return err },
+		"POST /skills/load": func() error { _, err := c.Skills.Load(ctx, "deploy"); return err },
+		"ANY /feedback": func() error {
+			return c.Feedback.Score(ctx, "0af7651916cd43dd8448eb211c80319c", "helpfulness", 0.9, "clear answer")
+		},
+		"POST /amp/{targetAgent}": func() error {
+			_, err := c.Mesh.Call(ctx, "peer-agent", map[string]any{"question": "ping"})
+			return err
+		},
+		"POST /a2a/{targetAgent}": func() error {
+			_, err := c.Mesh.CallLegacy(ctx, "peer-agent", map[string]any{"question": "ping"})
+			return err
+		},
+		"POST /delegate": func() error {
+			_, err := c.Runs.Delegate(ctx, "researcher", "1", "call-1", testCapability, "Summarise the quarterly report")
+			return err
+		},
+		"POST /handoff": func() error {
+			_, err := c.Runs.Handoff(ctx, "billing", testCapability, "The customer is asking about an invoice.", true)
+			return err
+		},
 	}
-	if err := c.Memory.Append(ctx, Entry{Role: "user", Content: "hi"}, ""); err != nil {
-		t.Errorf("memory.Append: %v", err)
-	}
-	if err := c.Memory.Put(ctx, []Entry{{Role: "user", Content: "hi"}}, ""); err != nil {
-		t.Errorf("memory.Put: %v", err)
-	}
-	if _, err := c.Memory.Search(ctx, "hi", "", cap); err != nil {
-		t.Errorf("memory.Search: %v", err)
-	}
-	if err := c.Memory.Remember(ctx, "a fact", nil); err != nil {
-		t.Errorf("remember: %v", err)
-	}
-	if _, err := c.Memory.SearchAgent(ctx, "q", 3, 0); err != nil {
-		t.Errorf("searchAgent: %v", err)
-	}
-	if _, err := c.Knowledge.Search(ctx, "q", "kb", 3); err != nil {
-		t.Errorf("knowledge: %v", err)
-	}
-	if _, err := c.Skills.List(ctx); err != nil {
-		t.Errorf("skills.List: %v", err)
-	}
-	if _, err := c.Skills.Load(ctx, "s"); err != nil {
-		t.Errorf("skills.Load: %v", err)
-	}
-	if err := c.Feedback.Score(ctx, "t1", "helpfulness", 1, "clear"); err != nil {
-		t.Errorf("feedback: %v", err)
-	}
-	if _, err := c.Mesh.Call(ctx, "other", map[string]any{"q": 1}); err != nil {
-		t.Errorf("amp: %v", err)
-	}
-	if _, err := c.Mesh.CallLegacy(ctx, "other", map[string]any{"q": 1}); err != nil {
-		t.Errorf("a2a: %v", err)
-	}
-	if _, err := c.Runs.Delegate(ctx, "sub", "step-1", "call-1", cap, map[string]any{"x": 1}); err != nil {
-		t.Errorf("delegate: %v", err)
-	}
-	if _, err := c.Runs.Handoff(ctx, "other", cap, "over to you", true); err != nil {
-		t.Errorf("handoff: %v", err)
-	}
-
-	for _, r := range routes {
-		if r.owedByPlaneClient() && !fake.covered(r.Path, r.Method) {
-			t.Errorf("launcher serves %s %s and no SDK call reached it (requests: %v)",
-				r.Method, r.Path, fake.requests())
+	for key, call := range calls {
+		if err := call(); err != nil {
+			t.Errorf("%s: %v", key, err)
 		}
 	}
+	for _, key := range fake.routeKeys() {
+		switch why := fake.waived(key); {
+		case why != "" && fake.isCovered(key):
+			t.Errorf("%s is waived for Go (%s) but the SDK reaches it now: delete the waiver", key, why)
+		case why == "" && !fake.isCovered(key):
+			t.Errorf("the launcher serves %s and no SDK call reached it", key)
+		}
+	}
+	fake.assertConforms(t)
+}
+
+func TestResponsesDecodeAsTheLauncherSendsThem(t *testing.T) {
+	fake := newFakeLauncher(t)
+	c := clientFor(fake)
+	ctx := context.Background()
+
+	entries, err := c.Memory.Get(ctx, "conv-1")
+	if err != nil || len(entries) != 2 || entries[1].Content != "You prefer metric units." {
+		t.Errorf("memory.Get = %+v, %v", entries, err)
+	}
+	facts, err := c.Memory.SearchAgent(ctx, "units", 3, 0)
+	if err != nil || len(facts) != 1 || facts[0].Content != "The user prefers metric units." || facts[0].Score != 0.91 {
+		t.Errorf("searchAgent = %+v, %v", facts, err)
+	}
+	chunks, err := c.Knowledge.Search(ctx, "When do deploys go out?", "handbook", 3)
+	if err != nil || len(chunks) != 1 || chunks[0].DocumentRef != "handbook/deploys.md" {
+		t.Errorf("knowledge = %+v, %v", chunks, err)
+	}
+	skills, err := c.Skills.List(ctx)
+	if err != nil || len(skills) != 1 || skills[0].Name != "deploy" || skills[0].Digest == "" {
+		t.Errorf("skills = %+v, %v", skills, err)
+	}
+	reply, err := c.Mesh.Call(ctx, "peer-agent", map[string]any{"question": "ping"})
+	if err != nil || reply["answer"] != "pong" {
+		t.Errorf("mesh.Call = %v, %v", reply, err)
+	}
+	h, err := c.Runs.Handoff(ctx, "billing", testCapability, "over to you", true)
+	if err != nil || !h.OK || h.RunID != "run-billing-1" || h.HandedOffTo != "billing" {
+		t.Errorf("handoff = %+v, %v", h, err)
+	}
+	fake.assertConforms(t)
 }
 
 func TestSkillsLoadReturnsTheBody(t *testing.T) {
 	// The launcher answers {"body": …}. Reading "content" returned "" with NO error, so a skill
-	// loaded as nothing and the model carried on without it — the worst failure mode available.
-	routes, err := loadRoutes()
+	// loaded as nothing and the model carried on without it.
+	fake := newFakeLauncher(t)
+	var want struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(fake.golden("POST /skills/load", "").Response.Body, &want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := clientFor(fake).Skills.Load(context.Background(), "deploy")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(newFakePlane(routes))
-	t.Cleanup(srv.Close)
-	u, _ := url.Parse(srv.URL)
-	p, _ := strconv.Atoi(u.Port())
-	c := NewWithConfig(FromConfig(Config{MemoryPort: p, ConversationID: "c", MemoryWired: true}))
+	if got == "" || got != want.Body {
+		t.Fatalf("skills.Load = %q, the launcher sends %q", got, want.Body)
+	}
+}
 
-	got, err := c.Skills.Load(context.Background(), "s")
-	if err != nil {
-		t.Fatal(err)
+func TestRefusalsSurfaceTheLauncherStatus(t *testing.T) {
+	fake := newFakeLauncher(t)
+	fake.useGolden("POST /knowledge/search", "refuses-a-knowledge-base-not-granted")
+	fake.useGolden("POST /skills/load", "refuses-a-skill-not-attached")
+	c := clientFor(fake)
+	ctx := context.Background()
+
+	var apiErr *APIError
+	if _, err := c.Knowledge.Search(ctx, "salaries", "payroll", 3); !errors.As(err, &apiErr) || apiErr.Status != 403 {
+		t.Errorf("an ungranted knowledge base must surface the launcher's 403, got %v", err)
 	}
-	if got == "" {
-		t.Fatal("skills.Load returned an empty body with no error")
-	}
-	if got != "the skill body" {
-		t.Fatalf("got %q", got)
+	if _, err := c.Skills.Load(ctx, "payroll"); !errors.As(err, &apiErr) || apiErr.Status != 403 {
+		t.Errorf("an unattached skill must surface the launcher's 403, got %v", err)
 	}
 }
 
 func TestDelegateRefusesWithoutItsRequiredFields(t *testing.T) {
-	// step, callId and the capability are hard-required by the handler. Sending a request without
-	// them is refused server-side, so refusing locally turns a confusing remote error into a clear
-	// one — and makes it impossible to ship an SDK that cannot delegate at all.
+	// step, callId and the capability are hard-required by the handler. Refusing locally turns a
+	// confusing remote refusal into a clear one.
 	c := NewWithConfig(FromConfig(Config{MemoryPort: 1, DelegatePort: 1, ConversationID: "c", MemoryWired: true}))
 	ctx := context.Background()
 	if _, err := c.Runs.Delegate(ctx, "sub", "", "call", "cap", nil); err == nil {
@@ -136,60 +174,64 @@ func TestDelegateRefusesWithoutItsRequiredFields(t *testing.T) {
 }
 
 func TestDelegateUsesItsOwnListener(t *testing.T) {
-	// /delegate and /handoff are served by a DIFFERENT listener. Sending them to the memory port
-	// was a 404 in all four SDKs, and the old gate could not see it because it had no port model.
-	routes, err := loadRoutes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	memory := newFakePlane(routes)
-	delegate := newFakePlane(routes)
-	ms := httptest.NewServer(memory)
-	ds := httptest.NewServer(delegate)
-	t.Cleanup(ms.Close)
-	t.Cleanup(ds.Close)
-	mu, _ := url.Parse(ms.URL)
-	du, _ := url.Parse(ds.URL)
-	mp, _ := strconv.Atoi(mu.Port())
-	dp, _ := strconv.Atoi(du.Port())
-
+	// /delegate and /handoff are served by a DIFFERENT listener. Sending them to the memory port was
+	// a 404 in all four plane-client SDKs.
+	memory, delegate := newFakeLauncher(t), newFakeLauncher(t)
 	c := NewWithConfig(FromConfig(Config{
-		MemoryPort: mp, DelegatePort: dp, ConversationID: "c", MemoryWired: true,
+		MemoryPort: memory.port(), DelegatePort: delegate.port(), ConversationID: "c", MemoryWired: true,
 	}))
-	if _, err := c.Runs.Delegate(context.Background(), "sub", "s", "c", "cap", nil); err != nil {
+	if _, err := c.Runs.Delegate(context.Background(), "researcher", "1", "call-1", testCapability, "x"); err != nil {
 		t.Fatalf("delegate: %v", err)
 	}
-	if !delegate.covered("/delegate", "POST") {
+	if !delegate.isCovered("POST /delegate") {
 		t.Error("/delegate did not reach the delegate listener")
 	}
-	if memory.covered("/delegate", "POST") {
-		t.Error("/delegate reached the MEMORY listener — the 404 bug is back")
+	if memory.isCovered("POST /delegate") {
+		t.Error("/delegate reached the MEMORY listener")
 	}
 }
 
-func TestDelegateRefusalIsNotSuccess(t *testing.T) {
-	// The launcher answers HTTP 200 for every outcome and signals success in "ok". Decoding
-	// {runId, accepted} made a refusal, a failure and a success indistinguishable — and dropped
-	// "answer", which is the entire point of delegating.
-	routes, err := loadRoutes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	fake := newFakePlane(routes)
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
-	u, _ := url.Parse(srv.URL)
-	p, _ := strconv.Atoi(u.Port())
-	c := NewWithConfig(FromConfig(Config{MemoryPort: p, DelegatePort: p, ConversationID: "c", MemoryWired: true}))
+func TestDelegateDecodesSuccessAndRefusal(t *testing.T) {
+	// The launcher answers 200 for every outcome and signals success in "ok", so a refusal decoded as
+	// a transport success would be silent data loss, and "answer" is the point of delegating.
+	fake := newFakeLauncher(t)
+	c := clientFor(fake)
+	ctx := context.Background()
 
-	d, err := c.Runs.Delegate(context.Background(), "sub", "s", "c", "cap", nil)
+	d, err := c.Runs.Delegate(ctx, "researcher", "1", "call-1", testCapability, "Summarise the quarterly report")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.OK {
-		t.Error("ok must be decoded")
+	if !d.OK || d.Answer != "The quarterly report is ready." || d.SubRun != "sub-run-1" {
+		t.Errorf("success decoded as %+v", d)
 	}
-	if d.Answer != "42" {
-		t.Errorf("answer must survive; got %q", d.Answer)
+	fake.useGolden("POST /delegate", "refuses-without-a-run-capability")
+	d, err = c.Runs.Delegate(ctx, "researcher", "1", "call-1", testCapability, "Summarise the quarterly report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.OK || d.Error == "" {
+		t.Errorf("a refusal must decode as ok=false with the reason, got %+v", d)
+	}
+	fake.assertConforms(t)
+}
+
+func TestTheFakeRefusesWhatTheLauncherRefuses(t *testing.T) {
+	// The fake is only worth generating if it catches the defects hand-written fakes let through.
+	fake := newFakeLauncher(t)
+	c := clientFor(fake)
+	ctx := context.Background()
+	_ = c.t.do(ctx, "POST", c.cfg.memoryBase()+"/memory/agent/remember", map[string]any{"text": "a fact"}, nil, nil)
+	if len(fake.violations()) == 0 {
+		t.Error("a remember body without content passed the fake")
+	}
+	err := c.t.do(ctx, "POST", c.cfg.memoryBase()+"/memory/agent/forget", map[string]any{}, nil, nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 404 {
+		t.Errorf("a path the launcher does not serve must 404, got %v", err)
+	}
+	err = c.t.do(ctx, "GET", c.cfg.memoryBase()+"/skills/load", nil, nil, nil)
+	if !errors.As(err, &apiErr) || apiErr.Status != 405 {
+		t.Errorf("a served path under the wrong method must 405, got %v", err)
 	}
 }
