@@ -1,25 +1,731 @@
 {
+  "description": "The launcher's agent-facing wire contract: every route an SDK calls, what it accepts, what it answers, and golden examples that are true of the real handlers in the world at the bottom. Route identity (method, path, listener, portEnv, defaultPort) is generated from cmd/launcher by hack/gen-launcher-routes.sh; the rest is written by hand and proven by cmd/launcher's TestSDKContractGoldens. Schemas use a JSON Schema subset (type, properties, required, additionalProperties, items, enum, minLength, maxLength, description) because every SDK's generated fake re-implements the validator. goldens[0] of each route is the success example the generated fakes serve and the probes compare against. tier names the SDK tier that owes a route (ADR 0139); absent means every SDK. Removing a route means deleting its entry, goldens included.",
   "routes": [
     {
       "method": "POST",
       "path": "/a2a/{targetAgent}",
       "listener": "amp",
       "portEnv": "A2A_PORT",
-      "defaultPort": 2997
+      "defaultPort": 2997,
+      "summary": "Call a peer agent in this agent's registry: the legacy spelling of /amp/{targetAgent}, served by the same handler.",
+      "request": {
+        "params": {
+          "targetAgent": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "description": "A DNS label: letters, digits and '-' only."
+          }
+        },
+        "query": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "async"
+            ],
+            "description": "async hands the call to the durable bus and answers 202."
+          }
+        },
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "Relayed to the peer so it acts for the same user."
+          },
+          "X-AMP-Envelope": {
+            "required": false,
+            "description": "The incoming envelope, echoed on a chained hop."
+          }
+        },
+        "body": {
+          "description": "The caller's payload, opaque to the platform: any JSON value."
+        },
+        "optionalBody": true
+      },
+      "responses": {
+        "200": {
+          "description": "The peer's reply, relayed verbatim with the peer's own status and content type.",
+          "contentType": "application/json",
+          "schema": {}
+        },
+        "202": {
+          "description": "?mode=async: the hop was durably accepted.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "accepted",
+              "messageId"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "accepted": {
+                "type": "boolean"
+              },
+              "messageId": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "400": {
+          "description": "A bad target name, a payload that is not JSON, or conflicting envelopes.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "403": {
+          "description": "A conversation guard tripped: depth, cycle or hop budget.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "404": {
+          "description": "The target does not resolve.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "413": {
+          "description": "The payload is over 1 MiB.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "501": {
+          "description": "?mode=async on a cluster with no async backend.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "502": {
+          "description": "The peer was unreachable or failed mid-call.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "503": {
+          "description": "This agent could not get its platform attestation, so nothing was sent.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "relays-the-peer-reply",
+          "request": {
+            "path": "/a2a/peer-agent",
+            "body": {
+              "question": "ping"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "answer": "pong",
+              "from": "peer-agent"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-target-that-is-not-a-dns-label",
+          "request": {
+            "path": "/a2a/peer_agent",
+            "body": {
+              "question": "ping"
+            }
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "bad_request",
+              "detail": "target agent name contains disallowed character '_' (DNS label chars only)"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-payload-that-is-not-json",
+          "violatesContract": true,
+          "request": {
+            "path": "/a2a/peer-agent",
+            "bodyText": "not json"
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "bad_request",
+              "detail": "payload must be valid JSON: invalid character 'o' in literal null (expecting 'u')"
+            }
+          }
+        }
+      ]
     },
     {
       "method": "POST",
       "path": "/amp/{targetAgent}",
       "listener": "amp",
       "portEnv": "A2A_PORT",
-      "defaultPort": 2997
+      "defaultPort": 2997,
+      "summary": "Call a peer agent in this agent's registry (ADR 0138).",
+      "request": {
+        "params": {
+          "targetAgent": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 63,
+            "description": "A DNS label: letters, digits and '-' only."
+          }
+        },
+        "query": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "async"
+            ],
+            "description": "async hands the call to the durable bus and answers 202."
+          }
+        },
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "Relayed to the peer so it acts for the same user."
+          },
+          "X-AMP-Envelope": {
+            "required": false,
+            "description": "The incoming envelope, echoed on a chained hop."
+          }
+        },
+        "body": {
+          "description": "The caller's payload, opaque to the platform: any JSON value."
+        },
+        "optionalBody": true
+      },
+      "responses": {
+        "200": {
+          "description": "The peer's reply, relayed verbatim with the peer's own status and content type.",
+          "contentType": "application/json",
+          "schema": {}
+        },
+        "202": {
+          "description": "?mode=async: the hop was durably accepted.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "accepted",
+              "messageId"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "accepted": {
+                "type": "boolean"
+              },
+              "messageId": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "400": {
+          "description": "A bad target name, a payload that is not JSON, or conflicting envelopes.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "403": {
+          "description": "A conversation guard tripped: depth, cycle or hop budget.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "404": {
+          "description": "The target does not resolve.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "413": {
+          "description": "The payload is over 1 MiB.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "501": {
+          "description": "?mode=async on a cluster with no async backend.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "502": {
+          "description": "The peer was unreachable or failed mid-call.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "503": {
+          "description": "This agent could not get its platform attestation, so nothing was sent.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "relays-the-peer-reply",
+          "request": {
+            "path": "/amp/peer-agent",
+            "body": {
+              "question": "ping"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "answer": "pong",
+              "from": "peer-agent"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-target-that-is-not-a-dns-label",
+          "request": {
+            "path": "/amp/peer_agent",
+            "body": {
+              "question": "ping"
+            }
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "bad_request",
+              "detail": "target agent name contains disallowed character '_' (DNS label chars only)"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-payload-that-is-not-json",
+          "violatesContract": true,
+          "request": {
+            "path": "/amp/peer-agent",
+            "bodyText": "not json"
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "bad_request",
+              "detail": "payload must be valid JSON: invalid character 'o' in literal null (expecting 'u')"
+            }
+          }
+        }
+      ],
+      "sdkWaivers": {
+        "python": "The mesh client posts to the legacy /a2a path, so no call reaches /amp yet; m184.51 moves it to /amp and retires /a2a.",
+        "typescript": "The mesh client posts to the legacy /a2a path, so no call reaches /amp yet; m184.51 moves it to /amp and retires /a2a."
+      }
     },
     {
       "method": "POST",
       "path": "/delegate",
       "listener": "delegate",
       "portEnv": "DELEGATE_PORT",
-      "defaultPort": 2994
+      "defaultPort": 2994,
+      "summary": "Run a sub-agent as a tool: spawn a sub-run, wait for it, return its answer. A refusal is an answer too.",
+      "request": {
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": true,
+            "description": "The run capability; the route refuses without it."
+          },
+          "X-Ctxmesh-Spawn-Root": {
+            "required": false,
+            "description": "The spawn tree's root run."
+          },
+          "X-Ctxmesh-Spawn-Depth": {
+            "required": false,
+            "description": "This run's depth in the spawn tree."
+          },
+          "X-Ctxmesh-Spawn-Path": {
+            "required": false,
+            "description": "Comma-separated agent ancestry, root first."
+          }
+        },
+        "body": {
+          "type": "object",
+          "required": [
+            "step",
+            "callId"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "subAgent": {
+              "type": "string",
+              "description": "The roster member to delegate to."
+            },
+            "capability": {
+              "type": "string",
+              "description": "Used when subAgent is empty: delegate to whoever advertises this."
+            },
+            "input": {
+              "description": "The sub-agent's task: any JSON value."
+            },
+            "step": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The supervisor's loop iteration; with callId, the idempotency key."
+            },
+            "callId": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The model's tool-call id."
+            },
+            "suspend": {
+              "type": "boolean",
+              "description": "Ask for a durable-suspend signal instead of a blocking spawn (ADR 0091)."
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The outcome, whether the delegation happened or not.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "description": "Every outcome is a 200: ok says whether the delegation happened.",
+            "required": [
+              "ok"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "subAgent": {
+                "type": "string"
+              },
+              "subRun": {
+                "type": "string"
+              },
+              "answer": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              },
+              "suspend": {
+                "type": "boolean"
+              },
+              "endpoint": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "delegates-and-returns-the-sub-run-answer",
+          "request": {
+            "path": "/delegate",
+            "headers": {
+              "X-Ctxmesh-Run-Capability": "probe-run-capability"
+            },
+            "body": {
+              "subAgent": "researcher",
+              "input": "Summarise the quarterly report",
+              "step": "1",
+              "callId": "call-1"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "ok": true,
+              "subAgent": "researcher",
+              "subRun": "sub-run-1",
+              "answer": "The quarterly report is ready."
+            }
+          }
+        },
+        {
+          "name": "suspends-without-spawning-when-asked",
+          "request": {
+            "path": "/delegate",
+            "headers": {
+              "X-Ctxmesh-Run-Capability": "probe-run-capability"
+            },
+            "body": {
+              "subAgent": "researcher",
+              "input": "Summarise the quarterly report",
+              "step": "1",
+              "callId": "call-1",
+              "suspend": true
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "ok": true,
+              "subAgent": "researcher",
+              "suspend": true,
+              "endpoint": "http://researcher.conformance.svc.cluster.local"
+            }
+          }
+        },
+        {
+          "name": "refuses-without-a-run-capability",
+          "violatesContract": true,
+          "request": {
+            "path": "/delegate",
+            "body": {
+              "subAgent": "researcher",
+              "input": "Summarise the quarterly report",
+              "step": "1",
+              "callId": "call-1"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "ok": false,
+              "error": "no run capability — delegation needs an authenticated run"
+            }
+          }
+        },
+        {
+          "name": "refuses-without-the-idempotency-key",
+          "violatesContract": true,
+          "request": {
+            "path": "/delegate",
+            "headers": {
+              "X-Ctxmesh-Run-Capability": "probe-run-capability"
+            },
+            "body": {
+              "subAgent": "researcher",
+              "input": "x"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "ok": false,
+              "error": "step and callId are required"
+            }
+          }
+        }
+      ]
     },
     {
       "method": "GET",
@@ -28,6 +734,31 @@
       "portEnv": null,
       "defaultPort": 2999,
       "tier": "authoring",
+      "summary": "Server-sent events, one per tool-manifest change, carrying the new version.",
+      "request": {},
+      "responses": {
+        "200": {
+          "description": "An event stream that stays open: one 'data: <version>' event per change.",
+          "contentType": "text/event-stream"
+        }
+      },
+      "goldens": [
+        {
+          "name": "announces-a-manifest-change",
+          "request": {
+            "path": "/events"
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache"
+            },
+            "stream": true,
+            "bodyText": "data: 3cc1e0d9\n\n"
+          }
+        }
+      ],
       "sdkWaivers": {
         "python": "No SDK subscribes to tool changes yet: the managed loop reads /tools when it starts a turn.",
         "typescript": "No SDK subscribes to tool changes yet: the managed loop reads /tools when it starts a turn."
@@ -38,77 +769,1378 @@
       "path": "/feedback",
       "listener": "feedback",
       "portEnv": "FEEDBACK_PORT",
-      "defaultPort": 2995
+      "defaultPort": 2995,
+      "summary": "Score a trace; the launcher relays it to Langfuse.",
+      "request": {
+        "method": "POST",
+        "body": {
+          "type": "object",
+          "required": [
+            "traceId",
+            "name",
+            "value"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "traceId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The score's name, e.g. helpfulness. Without it Langfuse records a nameless score."
+            },
+            "value": {
+              "type": "number"
+            },
+            "comment": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "responses": {
+        "202": {
+          "description": "Relayed to Langfuse. No body."
+        },
+        "400": {
+          "description": "No traceId, or a body that is not JSON.",
+          "contentType": "text/plain; charset=utf-8"
+        },
+        "405": {
+          "description": "Any method but POST.",
+          "contentType": "text/plain; charset=utf-8"
+        },
+        "502": {
+          "description": "Langfuse refused or was unreachable.",
+          "contentType": "text/plain; charset=utf-8"
+        }
+      },
+      "goldens": [
+        {
+          "name": "relays-a-score-to-langfuse",
+          "request": {
+            "path": "/feedback",
+            "body": {
+              "traceId": "0af7651916cd43dd8448eb211c80319c",
+              "name": "helpfulness",
+              "value": 0.9,
+              "comment": "clear answer"
+            }
+          },
+          "response": {
+            "status": 202
+          }
+        },
+        {
+          "name": "refuses-a-score-without-a-trace",
+          "violatesContract": true,
+          "request": {
+            "path": "/feedback",
+            "body": {
+              "name": "helpfulness",
+              "value": 1
+            }
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "text/plain; charset=utf-8"
+            },
+            "bodyText": "traceId is required\n"
+          }
+        },
+        {
+          "name": "refuses-any-method-but-post",
+          "violatesContract": true,
+          "request": {
+            "method": "GET",
+            "path": "/feedback"
+          },
+          "response": {
+            "status": 405,
+            "headers": {
+              "Content-Type": "text/plain; charset=utf-8"
+            },
+            "bodyText": "method not allowed\n"
+          }
+        }
+      ]
     },
     {
       "method": "POST",
       "path": "/handoff",
       "listener": "delegate",
       "portEnv": "DELEGATE_PORT",
-      "defaultPort": 2994
+      "defaultPort": 2994,
+      "summary": "Transfer the conversation to a roster member and end this run.",
+      "request": {
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": true,
+            "description": "The run capability; the route refuses without it."
+          }
+        },
+        "body": {
+          "type": "object",
+          "required": [
+            "targetAgent"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "targetAgent": {
+              "type": "string",
+              "minLength": 1
+            },
+            "message": {
+              "type": "string",
+              "description": "The receiver's opening note."
+            },
+            "includeHistory": {
+              "type": "boolean",
+              "description": "Absent means true."
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The outcome, whether the transfer happened or not.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "description": "Every outcome is a 200: ok says whether the transfer happened.",
+            "required": [
+              "ok"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "ok": {
+                "type": "boolean"
+              },
+              "runId": {
+                "type": "string"
+              },
+              "sourceRun": {
+                "type": "string"
+              },
+              "handedOffTo": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "hands-the-conversation-to-a-roster-member",
+          "request": {
+            "path": "/handoff",
+            "headers": {
+              "X-Ctxmesh-Run-Capability": "probe-run-capability"
+            },
+            "body": {
+              "targetAgent": "billing",
+              "message": "The customer is asking about an invoice.",
+              "includeHistory": true
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "ok": true,
+              "runId": "run-billing-1",
+              "sourceRun": "run-supervisor-1",
+              "handedOffTo": "billing"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-target-outside-the-roster",
+          "request": {
+            "path": "/handoff",
+            "headers": {
+              "X-Ctxmesh-Run-Capability": "probe-run-capability"
+            },
+            "body": {
+              "targetAgent": "stranger"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "ok": false,
+              "error": "handoff to \"stranger\" refused: not a member of this team's roster"
+            }
+          }
+        },
+        {
+          "name": "refuses-without-a-run-capability",
+          "violatesContract": true,
+          "request": {
+            "path": "/handoff",
+            "body": {
+              "targetAgent": "billing"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "ok": false,
+              "error": "no run capability — handoff needs an authenticated run"
+            }
+          }
+        }
+      ]
     },
     {
       "method": "POST",
       "path": "/knowledge/search",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "Retrieve ranked chunks, with provenance, from a knowledge base granted to this agent.",
+      "request": {
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "Required for a per-user knowledge base."
+          }
+        },
+        "body": {
+          "type": "object",
+          "required": [
+            "knowledgeBase",
+            "query"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "knowledgeBase": {
+              "type": "string",
+              "minLength": 1
+            },
+            "query": {
+              "type": "string"
+            },
+            "topK": {
+              "type": "integer"
+            },
+            "threshold": {
+              "type": "number"
+            },
+            "embeddingModel": {
+              "type": "string",
+              "description": "Used only when the roster entry names no embedding route."
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The token service's ranked chunks.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "results"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "results": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "content",
+                    "documentRef",
+                    "chunkIndex",
+                    "startOffset",
+                    "endOffset",
+                    "mimeType",
+                    "score"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "content": {
+                      "type": "string"
+                    },
+                    "documentRef": {
+                      "type": "string"
+                    },
+                    "chunkIndex": {
+                      "type": "integer"
+                    },
+                    "startOffset": {
+                      "type": "integer"
+                    },
+                    "endOffset": {
+                      "type": "integer"
+                    },
+                    "mimeType": {
+                      "type": "string"
+                    },
+                    "score": {
+                      "type": "number"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "description": "No knowledgeBase, or a body that is not JSON.",
+          "contentType": "text/plain; charset=utf-8"
+        },
+        "403": {
+          "description": "The knowledge base is not granted to this agent, or a per-user one has no verified user.",
+          "contentType": "text/plain; charset=utf-8"
+        },
+        "502": {
+          "description": "The token service failed.",
+          "contentType": "text/plain; charset=utf-8"
+        }
+      },
+      "goldens": [
+        {
+          "name": "returns-ranked-chunks-with-provenance",
+          "request": {
+            "path": "/knowledge/search",
+            "body": {
+              "knowledgeBase": "handbook",
+              "query": "When do deploys go out?",
+              "topK": 3
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "results": [
+                {
+                  "content": "Deploys go out every Tuesday after the change review.",
+                  "documentRef": "handbook/deploys.md",
+                  "chunkIndex": 3,
+                  "startOffset": 1200,
+                  "endOffset": 1254,
+                  "mimeType": "text/markdown",
+                  "score": 0.88
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "refuses-a-knowledge-base-not-granted",
+          "request": {
+            "path": "/knowledge/search",
+            "body": {
+              "knowledgeBase": "payroll",
+              "query": "salaries"
+            }
+          },
+          "response": {
+            "status": 403,
+            "headers": {
+              "Content-Type": "text/plain; charset=utf-8"
+            },
+            "bodyText": "knowledge base not granted to this agent\n"
+          }
+        },
+        {
+          "name": "requires-a-knowledge-base",
+          "violatesContract": true,
+          "request": {
+            "path": "/knowledge/search",
+            "body": {
+              "query": "When do deploys go out?"
+            }
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "text/plain; charset=utf-8"
+            },
+            "bodyText": "knowledgeBase is required\n"
+          }
+        }
+      ]
     },
     {
       "method": "POST",
       "path": "/memory/agent/remember",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "Write a fact to this agent's long-term memory. Accepted at once, stored in the background.",
+      "request": {
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "The run capability. Without it a per-user agent reads the agent-wide bucket."
+          },
+          "traceparent": {
+            "required": false,
+            "description": "Tags the fact with the run's trace id."
+          }
+        },
+        "body": {
+          "type": "object",
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": "string",
+              "minLength": 1
+            },
+            "tags": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "202": {
+          "description": "Accepted. No body."
+        },
+        "400": {
+          "description": "Empty content, a body that is not JSON, or per-user memory without a verified user.",
+          "contentType": "text/plain; charset=utf-8"
+        }
+      },
+      "goldens": [
+        {
+          "name": "accepts-a-fact",
+          "request": {
+            "path": "/memory/agent/remember",
+            "body": {
+              "content": "The user prefers metric units.",
+              "tags": {
+                "topic": "preferences"
+              }
+            }
+          },
+          "response": {
+            "status": 202
+          }
+        },
+        {
+          "name": "requires-content",
+          "request": {
+            "path": "/memory/agent/remember",
+            "body": {
+              "content": "  "
+            }
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "text/plain; charset=utf-8"
+            },
+            "bodyText": "content is required\n"
+          }
+        }
+      ]
     },
     {
       "method": "POST",
       "path": "/memory/agent/search",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "Retrieve ranked facts from this agent's long-term memory.",
+      "request": {
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "The run capability. Without it a per-user agent reads the agent-wide bucket."
+          }
+        },
+        "body": {
+          "type": "object",
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "topK": {
+              "type": "integer"
+            },
+            "threshold": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The token service's ranked facts.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "results"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "results": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "content",
+                    "score"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "content": {
+                      "type": "string"
+                    },
+                    "tags": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "score": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "description": "A body that is not JSON, or per-user memory without a verified user.",
+          "contentType": "text/plain; charset=utf-8"
+        },
+        "502": {
+          "description": "The token service failed.",
+          "contentType": "text/plain; charset=utf-8"
+        }
+      },
+      "goldens": [
+        {
+          "name": "returns-ranked-facts",
+          "request": {
+            "path": "/memory/agent/search",
+            "body": {
+              "query": "units",
+              "topK": 3
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "results": [
+                {
+                  "content": "The user prefers metric units.",
+                  "tags": {
+                    "topic": "preferences"
+                  },
+                  "score": 0.91
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "refuses-a-body-that-is-not-json",
+          "violatesContract": true,
+          "request": {
+            "path": "/memory/agent/search",
+            "bodyText": "{"
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "text/plain; charset=utf-8"
+            },
+            "bodyText": "invalid JSON body\n"
+          }
+        }
+      ]
     },
     {
       "method": "GET",
       "path": "/memory/{conversationId}",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "Read the conversation, oldest entry first. ETag is its version, for If-Match on PUT.",
+      "request": {
+        "params": {
+          "conversationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Printable, with no '/', ':' or whitespace."
+          }
+        },
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "The run capability. Without it a per-user agent reads the agent-wide bucket."
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The entries; [] for a conversation never written.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "array",
+            "items": {
+              "description": "One stored entry, verbatim. A message entry carries role and content, plus the agent, messageId and ts the launcher stamped on it."
+            }
+          }
+        },
+        "400": {
+          "description": "A conversation id with a separator, whitespace or control character, or over 128 characters.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "502": {
+          "description": "The memory backend failed.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "returns-the-conversation-in-order",
+          "request": {
+            "path": "/memory/conv-1"
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json",
+              "ETag": "2"
+            },
+            "body": [
+              {
+                "role": "user",
+                "content": "Which units do I prefer?",
+                "agent": "probe-agent",
+                "messageId": "m-seed-1",
+                "ts": 1760000000000
+              },
+              {
+                "role": "assistant",
+                "content": "You prefer metric units.",
+                "agent": "probe-agent",
+                "messageId": "m-seed-2",
+                "ts": 1760000001000
+              }
+            ]
+          }
+        },
+        {
+          "name": "returns-an-empty-list-for-an-unknown-conversation",
+          "request": {
+            "path": "/memory/conv-unknown"
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json",
+              "ETag": "0"
+            },
+            "body": []
+          }
+        },
+        {
+          "name": "refuses-an-id-with-a-separator",
+          "request": {
+            "path": "/memory/conv:1"
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "conversationId contains disallowed character ':'"
+            }
+          }
+        }
+      ]
     },
     {
       "method": "PUT",
       "path": "/memory/{conversationId}",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "Replace the conversation. With If-Match it is a compare-and-set against a prior ETag.",
+      "request": {
+        "params": {
+          "conversationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Printable, with no '/', ':' or whitespace."
+          }
+        },
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "The run capability. Without it a per-user agent reads the agent-wide bucket."
+          },
+          "If-Match": {
+            "required": false,
+            "description": "A prior ETag; a stale one is refused with 412."
+          }
+        },
+        "body": {
+          "type": "array",
+          "description": "The entries, each stored verbatim.",
+          "items": {}
+        }
+      },
+      "responses": {
+        "204": {
+          "description": "Replaced. ETag is the new version."
+        },
+        "400": {
+          "description": "A body that is not a JSON array, a bad If-Match, or a bad conversation id.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "412": {
+          "description": "If-Match is stale: the conversation changed since it was read.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "413": {
+          "description": "The body is over 1 MiB.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "502": {
+          "description": "The memory backend failed.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "replaces-the-conversation",
+          "request": {
+            "path": "/memory/conv-2",
+            "body": [
+              {
+                "role": "user",
+                "content": "Let's start over."
+              }
+            ]
+          },
+          "response": {
+            "status": 204,
+            "headers": {
+              "ETag": "1"
+            }
+          }
+        },
+        {
+          "name": "requires-a-json-array",
+          "violatesContract": true,
+          "request": {
+            "path": "/memory/conv-2",
+            "body": {
+              "role": "user",
+              "content": "Let's start over."
+            }
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "body must be a JSON array: json: cannot unmarshal object into Go value of type []json.RawMessage"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-stale-write",
+          "request": {
+            "path": "/memory/conv-1",
+            "headers": {
+              "If-Match": "5"
+            },
+            "body": []
+          },
+          "response": {
+            "status": 412,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "version conflict: the conversation changed since your read — re-read and retry"
+            }
+          }
+        }
+      ]
     },
     {
       "method": "POST",
       "path": "/memory/{conversationId}/append",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "Append one entry. A message entry gains the launcher's agent, messageId and ts.",
+      "request": {
+        "params": {
+          "conversationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Printable, with no '/', ':' or whitespace."
+          }
+        },
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "The run capability. Without it a per-user agent reads the agent-wide bucket."
+          },
+          "X-Message-Id": {
+            "required": false,
+            "description": "The per-hop message id; minted when absent."
+          }
+        },
+        "body": {
+          "description": "One entry: any JSON value."
+        }
+      },
+      "responses": {
+        "204": {
+          "description": "Appended. No body."
+        },
+        "400": {
+          "description": "A body that is not a single JSON value, or a bad conversation id.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "413": {
+          "description": "The body is over 1 MiB.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "502": {
+          "description": "The memory backend failed.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "appends-one-entry",
+          "request": {
+            "path": "/memory/conv-3/append",
+            "body": {
+              "role": "user",
+              "content": "And one more thing."
+            }
+          },
+          "response": {
+            "status": 204
+          }
+        },
+        {
+          "name": "refuses-a-body-that-is-not-json",
+          "violatesContract": true,
+          "request": {
+            "path": "/memory/conv-3/append",
+            "bodyText": "not json"
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "body must be a single valid JSON value: invalid character 'o' in literal null (expecting 'u')"
+            }
+          }
+        }
+      ]
     },
     {
       "method": "GET",
       "path": "/memory/{conversationId}/search",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "The entries whose stored JSON contains q, in order. An empty q matches everything.",
+      "request": {
+        "params": {
+          "conversationId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Printable, with no '/', ':' or whitespace."
+          }
+        },
+        "query": {
+          "q": {
+            "type": "string",
+            "description": "A substring of the stored entry."
+          }
+        },
+        "headers": {
+          "X-Ctxmesh-Run-Capability": {
+            "required": false,
+            "description": "The run capability. Without it a per-user agent reads the agent-wide bucket."
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The matching entries.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "array",
+            "items": {
+              "description": "One stored entry, verbatim. A message entry carries role and content, plus the agent, messageId and ts the launcher stamped on it."
+            }
+          }
+        },
+        "400": {
+          "description": "A conversation id with a separator, whitespace or control character, or over 128 characters.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "502": {
+          "description": "The memory backend failed.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "returns-entries-containing-the-query",
+          "request": {
+            "path": "/memory/conv-1/search",
+            "query": {
+              "q": "metric"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": [
+              {
+                "role": "assistant",
+                "content": "You prefer metric units.",
+                "agent": "probe-agent",
+                "messageId": "m-seed-2",
+                "ts": 1760000001000
+              }
+            ]
+          }
+        },
+        {
+          "name": "returns-an-empty-list-when-nothing-matches",
+          "request": {
+            "path": "/memory/conv-1/search",
+            "query": {
+              "q": "zebra"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": []
+          }
+        }
+      ]
     },
     {
       "method": "GET",
       "path": "/skills",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "The skills attached to this agent: names, digests and descriptions, never bodies.",
+      "request": {},
+      "responses": {
+        "200": {
+          "description": "The attached skills.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "skills"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "skills": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "digest",
+                    "description"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "digest": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "lists-the-attached-skills",
+          "request": {
+            "path": "/skills"
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "skills": [
+                {
+                  "name": "deploy",
+                  "digest": "sha256:641afbe10b79fadbeae77a9aaf1af023e6ccb4bc3d523a640f5717bc6ad5c15b",
+                  "description": "Deploy a service to the staging cluster."
+                }
+              ]
+            }
+          }
+        }
+      ]
     },
     {
       "method": "POST",
       "path": "/skills/load",
       "listener": "memory",
       "portEnv": "MEMORY_PORT",
-      "defaultPort": 2998
+      "defaultPort": 2998,
+      "summary": "One attached skill's body.",
+      "request": {
+        "body": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The skill's body.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "body"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "body": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "400": {
+          "description": "A body that is not JSON.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "403": {
+          "description": "The skill is not attached to this agent.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "500": {
+          "description": "The mounted body could not be read, or does not match its pinned digest, so it is not served.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "501": {
+          "description": "Skill bodies, or this skill's body, are not mounted on this agent.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "error"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "error": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "returns-the-skill-body",
+          "request": {
+            "path": "/skills/load",
+            "body": {
+              "name": "deploy"
+            }
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "body": "# Deploy\n\nRun make deploy, then watch the rollout.\n"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-skill-not-attached",
+          "request": {
+            "path": "/skills/load",
+            "body": {
+              "name": "payroll"
+            }
+          },
+          "response": {
+            "status": 403,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "skill payroll is not attached to this agent"
+            }
+          }
+        },
+        {
+          "name": "refuses-a-body-that-is-not-json",
+          "violatesContract": true,
+          "request": {
+            "path": "/skills/load",
+            "bodyText": "{"
+          },
+          "response": {
+            "status": 400,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "error": "invalid JSON body"
+            }
+          }
+        }
+      ]
     },
     {
       "method": "GET",
@@ -116,7 +2148,258 @@
       "listener": "discovery",
       "portEnv": null,
       "defaultPort": 2999,
-      "tier": "authoring"
+      "tier": "authoring",
+      "summary": "The agent's bound MCP tools, from the manifest the controller mounts. The port is fixed; no env names it.",
+      "request": {},
+      "responses": {
+        "200": {
+          "description": "The current manifest, tools sorted by name.",
+          "contentType": "application/json",
+          "schema": {
+            "type": "object",
+            "required": [
+              "version",
+              "tools"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "version": {
+                "type": "string",
+                "description": "A content hash: equal tool sets have equal versions."
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "name",
+                    "mode",
+                    "endpoint",
+                    "transport"
+                  ],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "mode": {
+                      "type": "string"
+                    },
+                    "endpoint": {
+                      "type": "string"
+                    },
+                    "transport": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "type": "string"
+                    },
+                    "inputSchema": {
+                      "description": "The tool's JSON Schema, when its binding declares one."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "goldens": [
+        {
+          "name": "serves-the-mounted-manifest",
+          "request": {
+            "path": "/tools"
+          },
+          "response": {
+            "status": 200,
+            "headers": {
+              "Content-Type": "application/json"
+            },
+            "body": {
+              "version": "cf33b988",
+              "tools": [
+                {
+                  "name": "word-count",
+                  "mode": "remote",
+                  "endpoint": "http://127.0.0.1:8899/word-count",
+                  "transport": "streamable-http",
+                  "description": "Count the words in a text."
+                }
+              ]
+            }
+          }
+        }
+      ]
     }
-  ]
+  ],
+  "world": {
+    "description": "The environment every golden is true in. The launcher is real; Valkey, the token service, the BFF, Langfuse and one AMP peer are stubs at the network edge answering with the canned bodies below.",
+    "capability": "probe-run-capability",
+    "conversationId": "conv-1",
+    "launcherEnv": {
+      "AGENT_NAME": "probe-agent",
+      "AGENT_VERSION": "v1",
+      "POD_NAMESPACE": "conformance",
+      "MEMORY_KEY_NAMESPACE": "conformance",
+      "MEMORY_BACKEND_ADDR": "${redis}",
+      "MEMORY_LONGTERM_ENABLED": "true",
+      "TOKEN_SERVICE_URL": "${tokenService}",
+      "TOKEN_SERVICE_TOKEN_PATH": "${podToken}",
+      "KNOWLEDGE_BASE_ENABLED": "true",
+      "KNOWLEDGE_BASES": "[{\"name\":\"handbook\",\"namespace\":\"conformance\",\"embeddingRoute\":\"text-embedding-3-small\"}]",
+      "SKILL_REFS": "deploy@sha256:641afbe10b79fadbeae77a9aaf1af023e6ccb4bc3d523a640f5717bc6ad5c15b",
+      "SKILL_DESCRIPTIONS": "{\"deploy\":\"Deploy a service to the staging cluster.\"}",
+      "SKILL_DIR": "${skillDir}",
+      "TOOLS_JSON_PATH": "${toolsJson}",
+      "LANGFUSE_HOST": "${langfuse}",
+      "LANGFUSE_SCORES_PUBLIC_KEY": "pk-conformance",
+      "LANGFUSE_SCORES_SECRET_KEY": "sk-conformance",
+      "AGENT_REGISTRY_ID": "conformance-registry",
+      "BFF_INTERNAL_URL": "${bff}",
+      "BFF_POD_TOKEN_PATH": "${podToken}",
+      "DELEGATE_ENABLED": "true",
+      "TENANT_QUOTA_ADDR": "${redis}",
+      "DELEGATE_ROSTER": "[{\"name\":\"researcher\",\"description\":\"Finds and summarises sources.\"},{\"name\":\"billing\",\"description\":\"Answers billing questions.\"}]"
+    },
+    "skills": {
+      "deploy": "# Deploy\n\nRun make deploy, then watch the rollout.\n"
+    },
+    "tools": {
+      "version": "cf33b988",
+      "tools": [
+        {
+          "name": "word-count",
+          "mode": "remote",
+          "endpoint": "http://127.0.0.1:8899/word-count",
+          "transport": "streamable-http",
+          "description": "Count the words in a text."
+        }
+      ]
+    },
+    "toolsAfterChange": {
+      "version": "3cc1e0d9",
+      "tools": [
+        {
+          "name": "summarise",
+          "mode": "remote",
+          "endpoint": "http://127.0.0.1:8899/summarise",
+          "transport": "streamable-http"
+        },
+        {
+          "name": "word-count",
+          "mode": "remote",
+          "endpoint": "http://127.0.0.1:8899/word-count",
+          "transport": "streamable-http",
+          "description": "Count the words in a text."
+        }
+      ]
+    },
+    "sessionMemory": {
+      "conv-1": [
+        {
+          "role": "user",
+          "content": "Which units do I prefer?",
+          "agent": "probe-agent",
+          "messageId": "m-seed-1",
+          "ts": 1760000000000
+        },
+        {
+          "role": "assistant",
+          "content": "You prefer metric units.",
+          "agent": "probe-agent",
+          "messageId": "m-seed-2",
+          "ts": 1760000001000
+        }
+      ]
+    },
+    "upstreams": {
+      "tokenService": {
+        "POST /v1/memory/remember": {
+          "status": 200,
+          "body": {}
+        },
+        "POST /v1/memory/search": {
+          "status": 200,
+          "body": {
+            "results": [
+              {
+                "content": "The user prefers metric units.",
+                "tags": {
+                  "topic": "preferences"
+                },
+                "score": 0.91
+              }
+            ]
+          }
+        },
+        "POST /v1/knowledge/search": {
+          "status": 200,
+          "body": {
+            "results": [
+              {
+                "content": "Deploys go out every Tuesday after the change review.",
+                "documentRef": "handbook/deploys.md",
+                "chunkIndex": 3,
+                "startOffset": 1200,
+                "endOffset": 1254,
+                "mimeType": "text/markdown",
+                "score": 0.88
+              }
+            ]
+          }
+        }
+      },
+      "bff": {
+        "POST /api/internal/spawn": {
+          "status": 202,
+          "body": {
+            "id": "sub-run-1",
+            "status": "queued"
+          }
+        },
+        "GET /api/internal/runs/{id}": {
+          "status": 200,
+          "body": {
+            "id": "sub-run-1",
+            "status": "succeeded",
+            "answer": "The quarterly report is ready."
+          }
+        },
+        "POST /api/internal/handoff": {
+          "status": 202,
+          "body": {
+            "runId": "run-billing-1",
+            "status": "queued",
+            "sourceRunId": "run-supervisor-1",
+            "handedOffTo": "billing"
+          }
+        },
+        "POST /api/internal/amp/attestation": {
+          "status": 200,
+          "body": {
+            "attestation": "attestation-for-the-peer",
+            "expiresIn": 300,
+            "endpoint": "${peer}"
+          }
+        }
+      },
+      "langfuse": {
+        "POST /api/public/scores": {
+          "status": 200,
+          "body": {
+            "id": "score-1"
+          }
+        }
+      },
+      "peer": {
+        "POST /invoke": {
+          "status": 200,
+          "body": {
+            "answer": "pong",
+            "from": "peer-agent"
+          }
+        }
+      }
+    }
+  }
 }
