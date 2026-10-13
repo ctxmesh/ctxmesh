@@ -96,13 +96,17 @@ api;^api/;tier0 tier1 helm-generate crd-version-parity ux-review
 # internal/controller/, and its config decides whether a run is visible at all -- the gap that hid a
 # trace-fragmentation defect and a memory path that emitted no spans.
 runtime;^internal/telemetry/;tier0 tier1 tier2
-runtime;^cmd/launcher/;tier0 tier1 sdk-live bff-route-callers
+runtime;^cmd/launcher/;tier0 tier1 sdk-conformance bff-route-callers
 runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
 runtime;^internal/(run|gateway|egress|pki|statelayer|deliveryclaim|toolpush)/;tier0 tier1
 # The run-capability wire format and proof-of-possession, ADR 0124: minted and bound by the BFF,
 # held and proven by the launcher, verified by the egress sidecar and the state-layer proxy.
-runtime;^internal/runcap/;tier0 tier1 tier2 sdk-live
-sdk;^sdk/;sdk-contract sdk-readme-truth tier0 bff-route-callers
+runtime;^internal/runcap/;tier0 tier1 tier2 sdk-conformance
+sdk;^sdk/;sdk-contract sdk-readme-truth sdk-conformance tier0 bff-route-callers
+# The SDK conformance suite itself: the contract checker, the fake generator and the probe runner.
+# sdk-conformance replaces sdk-live: it drives all six SDKs over every route and fails, rather than
+# skips, on a missing toolchain.
+sdk;^(test/sdkconformance/|hack/gen-sdk-fakes/|hack/sdk-conformance/|hack/gen-launcher-routes\.sh$);sdk-conformance sdk-contract tier0
 # The credential plane behind the token service: where an on-behalf-of grant is stored, sealed and
 # refreshed. A change here decides whether a tool call can authenticate at all, so it needs the e2e
 # credential flows, not only unit tests.

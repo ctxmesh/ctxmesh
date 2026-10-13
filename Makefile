@@ -462,6 +462,25 @@ flow-completability: ## Assert every caller-scoped BFF write is completable by a
 sdk-contract: ## Assert the SDKs track the product — every launcher route reachable, both languages at parity, one version (M155). Static.
 	./hack/sdk-contract.sh
 
+.PHONY: sdk-fakes
+sdk-fakes: ## Regenerate every SDK's test fake from sdk/launcher-routes.json.
+	go run ./hack/gen-sdk-fakes
+
+.PHONY: sdk-fakes-verify
+sdk-fakes-verify: ## Fail, naming the file, if a committed SDK fake is stale against sdk/launcher-routes.json.
+	go run ./hack/gen-sdk-fakes -check
+
+# The suite proves the contract three ways: its goldens against the launcher's real handlers, every
+# SDK's fake against the contract, and every SDK, through its public API, against a real launcher.
+# A missing toolchain fails the run naming it; nothing here skips.
+.PHONY: sdk-conformance
+sdk-conformance: py-venv sdk-ts-build ## Prove the SDK contract: goldens vs the real handlers, fake drift, and all six SDKs against a real launcher.
+	./hack/gen-launcher-routes.sh --check
+	go test ./test/sdkconformance/... -count=1
+	go test ./cmd/launcher -run '^TestSDKContractGoldens$$' -count=1
+	go run ./hack/gen-sdk-fakes -check
+	go run ./hack/sdk-conformance -python "$(abspath $(SDK_VENV_PY))" -node "$$($(SDK_TS_NODE) exec sh -c 'command -v node')"
+
 .PHONY: sdk-readme-truth
 sdk-readme-truth: ## Assert every SDK README links the repo and pins a version that resolves (M175). Add --live to ask the registries.
 	./hack/sdk-readme-truth.sh
