@@ -476,3 +476,34 @@ func TestScalingPolicy_AgentNotFound(t *testing.T) {
 	assert.Equal(t, metav1.ConditionFalse, readyCond.Status)
 	assert.Equal(t, "AgentNotFound", readyCond.Reason)
 }
+
+// TestScalingPolicy_QueueDepth_NATSAccount verifies that the scaler reads the
+// queue in the account the stream lives in, and that a broker the BFF reaches
+// with a credentials file, whose account is not given, gets no ScaledObject: KEDA
+// would look in $G, find no stream, and the policy would claim to scale while
+// nothing could.
+func TestScalingPolicy_QueueDepth_NATSAccount(t *testing.T) {
+	const ns = "default"
+
+	named := testJetStreamBackend
+	named.Account, named.CredentialsFile = "TEAM", "/etc/nats/creds"
+	createExecAgent(t, "account-q-agent", ns, "eventing", nil)
+	createQueueDepthPolicy(t, "account-q-scale", ns, "account-q-agent", nil)
+	reconcileScalingNN(t, newScalingReconcilerOn(named), "account-q-scale", ns)
+	so := getScaledObject(t, "account-q-scale", ns)
+	require.NotNil(t, so)
+	assert.Equal(t, "TEAM", so.Spec.Triggers[0].Metadata["account"])
+
+	guessing := testJetStreamBackend
+	guessing.CredentialsFile = "/etc/nats/creds"
+	createExecAgent(t, "creds-q-agent", ns, "eventing", nil)
+	policy := createQueueDepthPolicy(t, "creds-q-scale", ns, "creds-q-agent", nil)
+	reconcileScalingNN(t, newScalingReconcilerOn(guessing), "creds-q-scale", ns)
+	assert.Nil(t, getScaledObject(t, "creds-q-scale", ns))
+	backend, ready := policyReady(t, policy)
+	assert.Empty(t, backend)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, reasonQueueDepthNeedsNATSAccount, ready.Reason)
+	assert.Contains(t, ready.Message, "bff.natsAccount")
+}

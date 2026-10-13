@@ -56,9 +56,6 @@ const (
 	// kedaNATSJetStreamScalerType is KEDA's native JetStream scaler. It reads a durable consumer's
 	// num_pending + num_ack_pending from the NATS monitoring endpoint: the hops not yet acknowledged.
 	kedaNATSJetStreamScalerType = "nats-jetstream"
-	// natsGlobalAccount is the account a NATS server with no accounts configured, such as the bundled
-	// broker, puts every client in, and so the account the stream lives in.
-	natsGlobalAccount = "$G"
 	// queueDepthLagPerReplica is how many waiting hops one replica is sized for: KEDA runs
 	// ceil(waiting / queueDepthLagPerReplica) replicas, within min and max.
 	queueDepthLagPerReplica = "10"
@@ -69,8 +66,9 @@ const (
 
 // Reasons a queue-depth policy is not Ready for a cause the user fixes, not a transient one.
 const (
-	reasonQueueDepthNeedsJetStream = "QueueDepthNeedsJetStream"
-	reasonQueueDepthNeedsEventing  = "QueueDepthNeedsEventing"
+	reasonQueueDepthNeedsJetStream   = "QueueDepthNeedsJetStream"
+	reasonQueueDepthNeedsNATSAccount = "QueueDepthNeedsNATSAccount"
+	reasonQueueDepthNeedsEventing    = "QueueDepthNeedsEventing"
 )
 
 // defaultCooldownSeconds is applied when the policy's Cooldown field cannot be
@@ -201,8 +199,8 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 ) error {
 	log := logf.FromContext(ctx)
 
-	if why := r.AsyncBackend.queueDepthUnavailable(); why != "" {
-		return r.refuseQueueDepth(ctx, policy, reasonQueueDepthNeedsJetStream, fmt.Sprintf(
+	if reason, why := r.AsyncBackend.queueDepthUnavailable(); reason != "" {
+		return r.refuseQueueDepth(ctx, policy, reason, fmt.Sprintf(
 			"queue-depth scaling reads the hops waiting for agent %q in its JetStream consumer, and %s. "+
 				"No ScaledObject is created; the agent runs a fixed replica count kept between min "+
 				"(at least 1) and max", agent.Name, why))
@@ -234,7 +232,7 @@ func (r *AgentScalingPolicyReconciler) reconcileQueueDepth(
 			Namespace: policy.Namespace,
 		},
 	}
-	trigger := buildJetStreamTrigger(policy, monitoring)
+	trigger := buildJetStreamTrigger(policy, monitoring, r.AsyncBackend.natsAccount())
 
 	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, so, func() error {
 		so.Spec = kedatypes.ScaledObjectSpec{
@@ -319,13 +317,15 @@ func scaledObjectName(policy *agentsv1beta1.AgentScalingPolicy) string {
 // buildJetStreamTrigger is the KEDA nats-jetstream trigger for a queue-depth policy. It reads the durable
 // consumer the BFF's dispatcher delivers the agent's hops from, so its lag is the number of hops waiting
 // for that agent and for no other. spec.queueRef plays no part: the agent's queue is named by the agent.
-func buildJetStreamTrigger(policy *agentsv1beta1.AgentScalingPolicy, monitoringEndpoint string) kedatypes.ScaleTriggers {
+func buildJetStreamTrigger(
+	policy *agentsv1beta1.AgentScalingPolicy, monitoringEndpoint, account string,
+) kedatypes.ScaleTriggers {
 	return kedatypes.ScaleTriggers{
 		Type: kedaNATSJetStreamScalerType,
 		Name: "queue-depth",
 		Metadata: map[string]string{
 			"natsServerMonitoringEndpoint": monitoringEndpoint,
-			"account":                      natsGlobalAccount,
+			"account":                      account,
 			"stream":                       jsname.Stream,
 			"consumer":                     jsname.AgentDurable(policy.Namespace, policy.Spec.AgentRef),
 			"lagThreshold":                 queueDepthLagPerReplica,

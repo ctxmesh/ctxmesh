@@ -31,6 +31,10 @@ const (
 	// natsMonitoringPort is the NATS server's default HTTP monitoring port, which the bundled broker
 	// serves on and KEDA's nats-jetstream scaler reads.
 	natsMonitoringPort = "8222"
+
+	// natsGlobalAccount is the account a NATS server with no accounts configured, such as the bundled
+	// broker, puts every client in.
+	natsGlobalAccount = "$G"
 )
 
 // AsyncBackend is the install's async backend, read from the settings the BFF starts it from: the chart
@@ -41,35 +45,56 @@ type AsyncBackend struct {
 	Kind string
 	// NATSURL is NATS_URL, the broker the BFF publishes to and consumes from.
 	NATSURL string
+	// Account is NATS_ACCOUNT, the account the stream lives in. Empty means $G.
+	Account string
+	// CredentialsFile is NATS_CREDENTIALS_FILE, the BFF's credentials for the broker. The controller
+	// reads only whether it is set: a client that authenticates with one is in a named account.
+	CredentialsFile string
 }
 
 // AsyncBackendFromEnv reads the backend from ASYNC_BACKEND and NATS_URL, normalised as the BFF does.
 func AsyncBackendFromEnv(getenv func(string) string) AsyncBackend {
 	return AsyncBackend{
-		Kind:    strings.ToLower(strings.TrimSpace(getenv("ASYNC_BACKEND"))),
-		NATSURL: strings.TrimSpace(getenv("NATS_URL")),
+		Kind:            strings.ToLower(strings.TrimSpace(getenv("ASYNC_BACKEND"))),
+		NATSURL:         strings.TrimSpace(getenv("NATS_URL")),
+		Account:         strings.TrimSpace(getenv("NATS_ACCOUNT")),
+		CredentialsFile: strings.TrimSpace(getenv("NATS_CREDENTIALS_FILE")),
 	}
 }
 
-// queueDepthUnavailable says why this backend has no queue a queue-depth policy could scale on, naming the
-// setting that fixes it. Empty when the JetStream backend is configured.
-func (b AsyncBackend) queueDepthUnavailable() string {
+// queueDepthUnavailable says why this backend has no queue a queue-depth policy can scale on, as a
+// condition reason and a message naming the setting that fixes it. Both are empty when the JetStream
+// backend is configured completely.
+func (b AsyncBackend) queueDepthUnavailable() (reason, why string) {
 	switch {
 	case b.Kind == "":
-		return "this install has no JetStream async backend (bff.asyncBackend is unset), so async hops ride " +
-			"Knative Eventing, whose broker exposes no queue depth. Set bff.asyncBackend=jetstream and " +
-			"bff.natsURL to scale on queue depth"
+		return reasonQueueDepthNeedsJetStream, "this install has no JetStream async backend " +
+			"(bff.asyncBackend is unset), so async hops ride Knative Eventing, whose broker exposes no queue " +
+			"depth. Set bff.asyncBackend=jetstream and bff.natsURL to scale on queue depth"
 	case b.Kind != asyncBackendJetStream:
-		return fmt.Sprintf("the async backend %q is not one the platform runs, so there is no queue to read; "+
-			"set bff.asyncBackend=jetstream and bff.natsURL to scale on queue depth", b.Kind)
+		return reasonQueueDepthNeedsJetStream, fmt.Sprintf("the async backend %q is not one the platform runs, "+
+			"so there is no queue to read; set bff.asyncBackend=jetstream and bff.natsURL to scale on queue "+
+			"depth", b.Kind)
 	case b.NATSURL == "":
-		return "bff.asyncBackend is jetstream but bff.natsURL is unset, so the BFF starts no async backend " +
-			"and no queue exists; set bff.natsURL"
+		return reasonQueueDepthNeedsJetStream, "bff.asyncBackend is jetstream but bff.natsURL is unset, so " +
+			"the BFF starts no async backend and no queue exists; set bff.natsURL"
+	case b.CredentialsFile != "" && b.Account == "":
+		return reasonQueueDepthNeedsNATSAccount, "the BFF authenticates to NATS with bff.natsCredentialsFile, " +
+			"so the stream lives in a named NATS account, and KEDA would look for it in $G and find nothing. " +
+			"Set bff.natsAccount to that account"
 	}
 	if _, err := b.natsMonitoringEndpoint(); err != nil {
-		return err.Error()
+		return reasonQueueDepthNeedsJetStream, err.Error()
 	}
-	return ""
+	return "", ""
+}
+
+// natsAccount is the account KEDA reads the stream's consumers under.
+func (b AsyncBackend) natsAccount() string {
+	if b.Account != "" {
+		return b.Account
+	}
+	return natsGlobalAccount
 }
 
 // natsMonitoringEndpoint is the host:port KEDA reads JetStream consumer state from: the host of the first

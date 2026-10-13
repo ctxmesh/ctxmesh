@@ -140,8 +140,11 @@ type AgentScalingPolicyStatus struct {
 	// Ready=True means the target AgentDeployment exists and the chosen backend
 	// resource has been created or updated successfully.
 	// Known failure reasons: AgentNotFound, InvalidTrigger, BackendError,
-	// QueueDepthNeedsJetStream (the install has no queue to read) and
-	// QueueDepthNeedsEventing (the agent is not an eventing agent).
+	// QueueDepthNeedsJetStream (the install has no queue to read),
+	// QueueDepthNeedsNATSAccount (the BFF authenticates to NATS with a
+	// credentials file and bff.natsAccount is unset, so the account the queue is
+	// in is unknown) and QueueDepthNeedsEventing (the agent is not an eventing
+	// agent).
 	// +listType=map
 	// +listMapKey=type
 	// +optional
