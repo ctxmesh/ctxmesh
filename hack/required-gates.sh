@@ -98,7 +98,7 @@ api;^api/;tier0 tier1 helm-generate crd-version-parity ux-review
 runtime;^internal/telemetry/;tier0 tier1 tier2
 runtime;^cmd/launcher/;tier0 tier1 sdk-live bff-route-callers
 runtime;^internal/controller/;tier0 tier1 tier2 prereqs-are-real
-runtime;^internal/(run|gateway|egress|pki|statelayer)/;tier0 tier1
+runtime;^internal/(run|gateway|egress|pki|statelayer|deliveryclaim|toolpush)/;tier0 tier1
 # The run-capability wire format and proof-of-possession, ADR 0124: minted and bound by the BFF,
 # held and proven by the launcher, verified by the egress sidecar and the state-layer proxy.
 runtime;^internal/runcap/;tier0 tier1 tier2 sdk-live
