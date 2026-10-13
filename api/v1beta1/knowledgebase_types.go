@@ -36,7 +36,7 @@ type KnowledgeBaseSource struct {
 
 	// objectStorePrefix is the durable object-store prefix from which documents are fetched when
 	// type="objectStorePrefix". The ObjectStore SPI resolves this against the configured store
-	// (MinIO in dev, BYO-S3 in prod). Must be set when type="objectStorePrefix"; ignored otherwise.
+	// (the bundled SeaweedFS in dev, BYO-S3 in prod). Must be set when type="objectStorePrefix"; ignored otherwise.
 	// +optional
 	ObjectStorePrefix string `json:"objectStorePrefix,omitempty"`
 }
