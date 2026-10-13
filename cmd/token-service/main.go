@@ -52,7 +52,7 @@ import (
 	"github.com/ctxmesh/ctxmesh/internal/credplane"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve"
 	"github.com/ctxmesh/ctxmesh/internal/credresolve/secretbackend"
-	"github.com/ctxmesh/ctxmesh/internal/credstore"
+	"github.com/ctxmesh/ctxmesh/internal/credresolve/storage"
 	"github.com/ctxmesh/ctxmesh/internal/runtimelimit"
 )
 
@@ -180,7 +180,7 @@ func run(log logr.Logger) error {
 	credentialNS := strings.TrimSpace(os.Getenv("MCP_CREDENTIAL_NAMESPACE"))
 	// Parsed before anything waits on the network, so a bad CREDENTIAL_BACKEND* value refuses to
 	// start at once, naming the variable (ADR 0152 §1).
-	backendCfg, err := credstore.ConfigFromEnv(os.Environ())
+	backendCfg, err := storage.ConfigFromEnv(os.Environ())
 	if err != nil {
 		return fmt.Errorf("credential backend configuration: %w", err)
 	}
@@ -243,7 +243,7 @@ func run(log logr.Logger) error {
 	auditFn := func(e credresolve.AuditEvent) {
 		log.Info("grant use", "action", string(e.Action), "server", e.Server, "user", e.UserHash, "class", string(e.Class))
 	}
-	resolver, migrated, err := credentialResolver(logr.NewContext(context.Background(), log), backendCfg, credstore.Deps{
+	resolver, migrated, err := credentialResolver(logr.NewContext(context.Background(), log), backendCfg, storage.Deps{
 		Client:                     k8sClient,
 		DefaultCredentialNamespace: credentialNS,
 		Exchanger:                  &credresolve.HTTPTokenExchanger{},
@@ -422,10 +422,10 @@ func serverTLS(certFile, keyFile, caFile string, requireClient bool) (*tls.Confi
 // §1). migrated is true when TOKEN_SERVICE_MIGRATE_GRANTS ran the one-time backfill; the process then
 // exits without serving.
 func credentialResolver(
-	ctx context.Context, cfg credstore.Config, deps credstore.Deps,
+	ctx context.Context, cfg storage.Config, deps storage.Deps,
 ) (resolver credresolve.CredentialResolver, migrated bool, err error) {
 	log := logr.FromContextOrDiscard(ctx)
-	backend, err := credstore.BackendFor(ctx, cfg, deps)
+	backend, err := storage.BackendFor(ctx, cfg, deps)
 	if err != nil {
 		return nil, false, fmt.Errorf("build the %s credential backend: %w", cfg.Backend(), err)
 	}
@@ -449,7 +449,7 @@ func credentialResolver(
 		if !ok {
 			return nil, false, fmt.Errorf("migrate grants: the %s credential backend does not support writes", cfg.Backend())
 		}
-		n, mErr := credstore.Migrate(ctx, k8sBackend, writer)
+		n, mErr := storage.Migrate(ctx, k8sBackend, writer)
 		if mErr != nil {
 			return nil, false, fmt.Errorf("migrate grants: %w", mErr)
 		}
@@ -461,7 +461,7 @@ func credentialResolver(
 	// k8s backend on a miss, so a cutover to a non-kubernetes backend loses no connected account.
 	if envTrue("TOKEN_SERVICE_DUAL_READ") {
 		log.Info("dual-read enabled: legacy k8s grants still resolve during the migration window")
-		return credstore.NewDualRead(backend, k8sBackend), false, nil
+		return storage.NewDualRead(backend, k8sBackend), false, nil
 	}
 	return backend, false, nil
 }

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credstore
+package storage
 
 import (
 	"context"
@@ -46,7 +46,7 @@ const (
 // never a plaintext dial to a credential provider.
 func buildRemoteBackend(ctx context.Context, spec *RemoteProvider, deps Deps) (credresolve.CredentialResolver, error) {
 	if spec.MTLS == nil {
-		return nil, fmt.Errorf("credstore: remote backend %q requires mtls (a remote credential provider must be mutually authenticated)", spec.Endpoint)
+		return nil, fmt.Errorf("credential store: remote backend %q requires mtls (a remote credential provider must be mutually authenticated)", spec.Endpoint)
 	}
 	httpClient, err := remoteHTTPClient(ctx, spec.Endpoint, spec.MTLS, deps.Client, deps.DefaultCredentialNamespace)
 	if err != nil {
@@ -60,15 +60,15 @@ func buildRemoteBackend(ctx context.Context, spec *RemoteProvider, deps Deps) (c
 func remoteHTTPClient(ctx context.Context, endpoint string, mtls *MTLSClientConfig, reader client.Reader, credNS string) (*http.Client, error) {
 	caPEM, err := secretValue(ctx, reader, credNS, mtls.CASecretRef.Name, mtls.CASecretRef.Key)
 	if err != nil {
-		return nil, fmt.Errorf("credstore: load remote CA: %w", err)
+		return nil, fmt.Errorf("credential store: load remote CA: %w", err)
 	}
 	certPEM, err := secretValue(ctx, reader, credNS, mtls.ClientTLSSecretName, tlsCertKey)
 	if err != nil {
-		return nil, fmt.Errorf("credstore: load remote client cert: %w", err)
+		return nil, fmt.Errorf("credential store: load remote client cert: %w", err)
 	}
 	keyPEM, err := secretValue(ctx, reader, credNS, mtls.ClientTLSSecretName, tlsKeyKey)
 	if err != nil {
-		return nil, fmt.Errorf("credstore: load remote client key: %w", err)
+		return nil, fmt.Errorf("credential store: load remote client key: %w", err)
 	}
 
 	serverName := ""
@@ -77,7 +77,7 @@ func remoteHTTPClient(ctx context.Context, endpoint string, mtls *MTLSClientConf
 	}
 	tlsCfg, err := credplane.ClientTLSConfig(certPEM, keyPEM, caPEM, serverName)
 	if err != nil {
-		return nil, fmt.Errorf("credstore: build remote mTLS config: %w", err)
+		return nil, fmt.Errorf("credential store: build remote mTLS config: %w", err)
 	}
 	return &http.Client{
 		Timeout:   remoteTimeout,

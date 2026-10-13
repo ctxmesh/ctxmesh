@@ -55,7 +55,7 @@ var errRunConflict = errors.New("run: optimistic-concurrency conflict")
 // runStoreMaxRetries bounds the Update read-modify-write retry loop under contention.
 const runStoreMaxRetries = 8
 
-// runSchemaDDL creates the two run tables. Applied idempotently at open (matches the credstore
+// runSchemaDDL creates the two run tables. Applied idempotently at open (matches the credpostgres
 // pattern). runs holds one row per run (the checkpoint: status + messages + pending action);
 // run_events is the append-only event log the SSE stream replays.
 const runSchemaDDL = `
@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS spawn_counters (
 );`
 
 // NewPostgresStore opens a durable Postgres-backed run store over an open *sql.DB, applying the
-// schema idempotently. The caller owns the DB's lifecycle (open/close), matching credstore.
+// schema idempotently. The caller owns the DB's lifecycle (open/close), matching credpostgres.
 func NewPostgresStore(ctx context.Context, db *sql.DB) (Store, error) {
 	if _, err := db.ExecContext(ctx, runSchemaDDL); err != nil {
 		return nil, fmt.Errorf("run: apply schema: %w", err)

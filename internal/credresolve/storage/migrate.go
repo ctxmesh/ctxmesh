@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credstore
+package storage
 
 import (
 	"context"
@@ -41,7 +41,7 @@ func Migrate(ctx context.Context, source GrantLister, target credresolve.GrantWr
 	migrated := 0
 	for _, mg := range grants {
 		if err := target.StoreGrant(ctx, mg.Namespace, mg.Boundary, mg.Server, mg.UserHash, mg.Grant); err != nil {
-			return migrated, fmt.Errorf("credstore: migrate grant %s/%s: %w", mg.Namespace, mg.Server, err)
+			return migrated, fmt.Errorf("credential store: migrate grant %s/%s: %w", mg.Namespace, mg.Server, err)
 		}
 		migrated++
 	}
@@ -90,7 +90,7 @@ func (d *DualRead) Revoke(ctx context.Context, ns, boundary, server, userHash st
 func (d *DualRead) StoreGrant(ctx context.Context, ns, boundary, server, userHash string, g credresolve.Grant) error {
 	w, ok := d.primary.(credresolve.GrantWriter)
 	if !ok {
-		return fmt.Errorf("credstore: dual-read primary backend does not support writes")
+		return fmt.Errorf("credential store: dual-read primary backend does not support writes")
 	}
 	return w.StoreGrant(ctx, ns, boundary, server, userHash, g)
 }

@@ -28,8 +28,9 @@ limitations under the License.
 //   - the central token service (runs secretbackend.Backend, which reads the grant Secrets),
 //   - the BFF (delegates its grant schema + OAuth refresh here, no duplication).
 //
-// The Kubernetes-backed store lives in the secretbackend subpackage so the sidecar's import
-// graph stays free of client-go (cmd/egress-sidecar has a test for it).
+// Grants are stored by its subpackages: secretbackend keeps them in Kubernetes Secrets, and storage
+// builds whichever backend the token service is configured with. They are subpackages so the
+// sidecar's import graph stays free of client-go (cmd/egress-sidecar has a test for it).
 //
 // Design invariants (ADR 0029 §5/§7, ADR 0030):
 //

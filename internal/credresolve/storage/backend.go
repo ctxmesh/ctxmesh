@@ -14,11 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package credstore builds the token service's credential backend from its own configuration
-// (ADR 0032, ADR 0152 §1). It is the config layer over internal/credresolve: the backend is a
-// config choice, not a rebuild. The token service builds exactly one backend at startup and every
-// delegating sidecar shares it, so the cache + singleflight stay global (ADR 0030 §1).
-package credstore
+package storage
 
 import (
 	"context"
@@ -74,6 +70,6 @@ func BackendFor(ctx context.Context, cfg Config, deps Deps) (credresolve.Credent
 	case p.Postgres != nil:
 		return buildPostgresBackend(ctx, p.Postgres, deps)
 	default:
-		return nil, errors.New("credstore: no credential backend is configured")
+		return nil, errors.New("credential store: no credential backend is configured")
 	}
 }

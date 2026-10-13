@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credstore
+package storage
 
 import (
 	"context"
@@ -45,11 +45,11 @@ import (
 // not a crash loop.
 func buildPostgresBackend(ctx context.Context, spec *PostgresProvider, deps Deps) (credresolve.CredentialResolver, error) {
 	if spec.Encryption == nil {
-		return nil, fmt.Errorf("credstore: postgres backend requires encryption (a Postgres store must not persist plaintext tokens)")
+		return nil, fmt.Errorf("credential store: postgres backend requires encryption (a Postgres store must not persist plaintext tokens)")
 	}
 	dsn, err := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, spec.DSNSecretRef.Name, spec.DSNSecretRef.Key)
 	if err != nil {
-		return nil, fmt.Errorf("credstore: load postgres DSN: %w", err)
+		return nil, fmt.Errorf("credential store: load postgres DSN: %w", err)
 	}
 	sealer, err := buildSealer(ctx, spec.Encryption, deps)
 	if err != nil {
@@ -59,17 +59,17 @@ func buildPostgresBackend(ctx context.Context, spec *PostgresProvider, deps Deps
 	// sql.Open does not parse the DSN, so parse it here: a malformed one is configuration and must
 	// refuse now, not be retried as an unreachable server. The parse error redacts the password.
 	if _, err := pgx.ParseConfig(string(dsn)); err != nil {
-		return nil, fmt.Errorf("credstore: the postgres DSN in Secret %s/%s is not usable: %w",
+		return nil, fmt.Errorf("credential store: the postgres DSN in Secret %s/%s is not usable: %w",
 			deps.DefaultCredentialNamespace, spec.DSNSecretRef.Name, err)
 	}
 	db, err := sql.Open("pgx", string(dsn))
 	if err != nil {
-		return nil, fmt.Errorf("credstore: open postgres: %w", err)
+		return nil, fmt.Errorf("credential store: open postgres: %w", err)
 	}
 	dbpool.Apply(db, "CREDSTORE_MAX_OPEN_CONNS", 5) // F-8: bound the pool (ADR 0097)
 	if err := controlplane.PingWaiting(ctx, db, deps.StoreRetry); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("credstore: reach the credential postgres: %w", err)
+		return nil, fmt.Errorf("credential store: reach the credential postgres: %w", err)
 	}
 	store, err := credpostgres.NewStore(ctx, db)
 	if err != nil {
@@ -93,7 +93,7 @@ func buildSealer(ctx context.Context, enc *EnvelopeEncryption, deps Deps) (credp
 	case enc.LocalKEKSecretRef != nil:
 		kek, err := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, enc.LocalKEKSecretRef.Name, enc.LocalKEKSecretRef.Key)
 		if err != nil {
-			return nil, fmt.Errorf("credstore: load local KEK: %w", err)
+			return nil, fmt.Errorf("credential store: load local KEK: %w", err)
 		}
 		return credpostgres.NewLocalSealer(kek)
 	case enc.OpenBaoTransit != nil:
@@ -101,7 +101,7 @@ func buildSealer(ctx context.Context, enc *EnvelopeEncryption, deps Deps) (credp
 	case enc.KMSv2 != nil:
 		return credpostgres.NewKMSv2Sealer(enc.KMSv2.Endpoint)
 	default:
-		return nil, fmt.Errorf("credstore: postgres encryption has no KEK custodian")
+		return nil, fmt.Errorf("credential store: postgres encryption has no KEK custodian")
 	}
 }
 
@@ -110,17 +110,17 @@ func buildSealer(ctx context.Context, enc *EnvelopeEncryption, deps Deps) (credp
 func buildTransitSealer(ctx context.Context, cfg *OpenBaoTransitKMS, deps Deps) (credpostgres.Sealer, error) {
 	token, err := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, cfg.TokenSecretRef.Name, cfg.TokenSecretRef.Key)
 	if err != nil {
-		return nil, fmt.Errorf("credstore: load openbao token: %w", err)
+		return nil, fmt.Errorf("credential store: load openbao token: %w", err)
 	}
 	httpClient := &http.Client{Timeout: remoteTimeout}
 	if cfg.CASecretRef != nil {
 		caPEM, cErr := secretValue(ctx, deps.Client, deps.DefaultCredentialNamespace, cfg.CASecretRef.Name, cfg.CASecretRef.Key)
 		if cErr != nil {
-			return nil, fmt.Errorf("credstore: load openbao CA: %w", cErr)
+			return nil, fmt.Errorf("credential store: load openbao CA: %w", cErr)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(caPEM) {
-			return nil, fmt.Errorf("credstore: openbao CA is not valid PEM")
+			return nil, fmt.Errorf("credential store: openbao CA is not valid PEM")
 		}
 		httpClient.Transport = &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}}
 	}

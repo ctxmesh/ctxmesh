@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package credstore
+package storage
 
 import (
 	"maps"
@@ -34,7 +34,7 @@ func environ(kv map[string]string) []string {
 
 var pgBase = map[string]string{
 	EnvBackend:               "postgres",
-	EnvPostgresDSNSecretName: "credstore-dsn",
+	EnvPostgresDSNSecretName: "cred-dsn",
 	EnvPostgresDSNSecretKey:  "dsn",
 }
 
@@ -72,10 +72,10 @@ func TestConfigFromEnv_EachBackendParses(t *testing.T) {
 		want Config
 	}{
 		{"postgres + local KEK", with(pgBase, map[string]string{
-			EnvPostgresLocalKEKSecretName: "credstore-kek", EnvPostgresLocalKEKSecretKey: "kek",
+			EnvPostgresLocalKEKSecretName: "cred-kek", EnvPostgresLocalKEKSecretKey: "kek",
 		}), Config{Provider: Provider{Postgres: &PostgresProvider{
-			DSNSecretRef: SecretKeyRef{Name: "credstore-dsn", Key: "dsn"},
-			Encryption:   &EnvelopeEncryption{LocalKEKSecretRef: &SecretKeyRef{Name: "credstore-kek", Key: "kek"}},
+			DSNSecretRef: SecretKeyRef{Name: "cred-dsn", Key: "dsn"},
+			Encryption:   &EnvelopeEncryption{LocalKEKSecretRef: &SecretKeyRef{Name: "cred-kek", Key: "kek"}},
 		}}}},
 		{"postgres + openbao transit", with(pgBase, map[string]string{
 			EnvPostgresTransitAddress:         "https://openbao.cred.svc:8200",
@@ -86,7 +86,7 @@ func TestConfigFromEnv_EachBackendParses(t *testing.T) {
 			EnvPostgresTransitCASecretName:    "openbao-ca",
 			EnvPostgresTransitCASecretKey:     "ca.crt",
 		}), Config{Provider: Provider{Postgres: &PostgresProvider{
-			DSNSecretRef: SecretKeyRef{Name: "credstore-dsn", Key: "dsn"},
+			DSNSecretRef: SecretKeyRef{Name: "cred-dsn", Key: "dsn"},
 			Encryption: &EnvelopeEncryption{OpenBaoTransit: &OpenBaoTransitKMS{
 				Address:        "https://openbao.cred.svc:8200",
 				TokenSecretRef: SecretKeyRef{Name: "openbao-token", Key: "token"},
@@ -98,7 +98,7 @@ func TestConfigFromEnv_EachBackendParses(t *testing.T) {
 		{"postgres + kms v2", with(pgBase, map[string]string{
 			EnvPostgresKMSv2Endpoint: "unix:///var/run/kms/socket",
 		}), Config{Provider: Provider{Postgres: &PostgresProvider{
-			DSNSecretRef: SecretKeyRef{Name: "credstore-dsn", Key: "dsn"},
+			DSNSecretRef: SecretKeyRef{Name: "cred-dsn", Key: "dsn"},
 			Encryption:   &EnvelopeEncryption{KMSv2: &KMSv2Provider{Endpoint: "unix:///var/run/kms/socket"}},
 		}}}},
 		{"remote", map[string]string{

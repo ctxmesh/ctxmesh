@@ -106,7 +106,7 @@ sdk;^sdk/;sdk-contract sdk-readme-truth tier0 bff-route-callers
 # The credential plane behind the token service: where an on-behalf-of grant is stored, sealed and
 # refreshed. A change here decides whether a tool call can authenticate at all, so it needs the e2e
 # credential flows, not only unit tests.
-credentials;^internal/(credplane|credpostgres|credprovider|credresolve|credstore)/;tier0 tier1 tier2
+credentials;^internal/(credplane|credpostgres|credprovider|credresolve)/;tier0 tier1 tier2
 # The Postgres-backed control-plane stores the BFF serves to the console (registries, skills, knowledge,
 # datasets, shared runs). The two sub-packages mapped above keep their stricter rows.
 console;^internal/controlplane/;ux-review tier0 tier1
