@@ -154,6 +154,35 @@ controller cache it. Knative copies a Knative Service's labels onto the Configur
 from it, and the Route's onto the Kubernetes Services it creates, so those carry the label too. See
 [Upgrading](docs/upgrading.md).
 
+**Fixed: a queue-depth `AgentScalingPolicy` never scaled anything.** Its ScaledObject used KEDA's
+generic `metrics-api` scaler, pointed at `http://<agent>-eventing.<namespace>.svc.cluster.local/metrics`,
+which nothing serves, so KEDA held the agent at its minimum. On an install whose async backend is NATS
+JetStream (`bff.asyncBackend: jetstream`), the policy now emits KEDA's `nats-jetstream` scaler, which
+reads the hops waiting for the agent: about one replica for every 10 waiting, and one waiting hop wakes
+an agent scaled to zero. For that count to mean one agent, every registry member now has a durable
+consumer of its own, `agent_<namespace>_<agent>`, and the BFF publishes a hop on
+`ctxmesh.a2a.<registry>.<namespace>.<agent>`. Hops published before the upgrade are still delivered.
+A hop to an agent in no registry now waits in the stream until the agent joins one, or until the
+stream's retention drops it, and the BFF logs it when it is published; before, it was retried for about
+six minutes and dropped. Without the JetStream backend, including when async hops ride Knative
+Eventing, there is no queue to read: the policy creates no ScaledObject, deletes one it created before, reports
+`Ready=False` with reason `QueueDepthNeedsJetStream`, and the agent runs a fixed replica count kept
+between the policy's `min` (at least 1) and `max`. A queue-depth policy for a serving or job agent
+reports `QueueDepthNeedsEventing` and creates none. `spec.queueRef` is no longer used. A policy whose
+trigger changes from queue-depth, or whose agent is deleted, now deletes its ScaledObject. The
+controller reads `ASYNC_BACKEND` and `NATS_URL`, which the chart sets from `bff.asyncBackend` and
+`bff.natsURL`; KEDA reads the NATS monitoring port, 8222, on the `bff.natsURL` host, and the bundled
+NATS now admits the KEDA operator (namespace `keda`, label `app=keda-operator`) to that port only.
+Nothing changes on an install without these values.
+
+**Fixed: the controller reset an eventing agent's replicas on every reconcile.** It wrote
+`spec.replicas` on the agent's Deployment each time, so any scale-up by KEDA was undone at the next
+reconcile, which the scale-up itself triggered. While a queue-depth ScaledObject is in effect the
+controller now sets the count only when it creates the Deployment. The `executionModel` field
+description, which said an eventing agent is a Knative Service with a Trigger, now says what the
+controller renders: a Deployment and an `<agent>-eventing` Service, a Trigger on the registry's broker
+when Knative Eventing is installed, and deliveries from the agent's JetStream queue on that backend.
+
 **Changed: before its first agent, a workspace's sidebar shows Home, Agents and Providers.** With no
 agent the other pages have nothing to show: no runs, no cost, nothing waiting for approval, nothing
 to stop. The sidebar now lists only the destinations Home's first-run checklist walks through, says

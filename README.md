@@ -30,7 +30,9 @@ may need newer. That is all the default install needs: agents run as Knative Ser
 are needed only for the features that use them:
 
 - **Knative Eventing**, only for agents with `executionModel: eventing`;
-- **KEDA**, only for queue-depth or custom-metric scaling (`AgentScalingPolicy`).
+- **KEDA**, only for scaling with an `AgentScalingPolicy`. Its queue-depth trigger also needs the
+  NATS JetStream async backend (`bff.asyncBackend: jetstream` and `bff.natsURL`), whose per-agent
+  queues are what it scales on.
 
 ctxmesh does not bundle any of them.
 
