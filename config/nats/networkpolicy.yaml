@@ -13,6 +13,10 @@
 #
 # :8222 (monitoring) is restricted alongside :4222 rather than left open: it exposes
 # stream and consumer topology, which is a tenancy leak even though it is read-only.
+# One reader outside the namespace is admitted on purpose, and only to :8222: the KEDA
+# operator, whose nats-jetstream scaler reads an agent's queue there for a queue-depth
+# AgentScalingPolicy. It is selected by namespace `keda` and label app=keda-operator,
+# which both KEDA's release manifests and its Helm chart set.
 # The kubelet's httpGet probe against :8222 comes from the NODE, not from a pod, and
 # Kubernetes does not apply NetworkPolicy to kubelet health probes — verified live after
 # applying this policy: the pod stays Ready.
@@ -66,5 +70,15 @@ spec:
       ports:
         - protocol: TCP
           port: 4222
+        - protocol: TCP
+          port: 8222
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: keda
+          podSelector:
+            matchLabels:
+              app: keda-operator
+      ports:
         - protocol: TCP
           port: 8222

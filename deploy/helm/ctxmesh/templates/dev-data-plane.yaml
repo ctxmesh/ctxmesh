@@ -629,6 +629,16 @@ spec:
       protocol: TCP
     - port: 8222
       protocol: TCP
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: keda
+      podSelector:
+        matchLabels:
+          app: keda-operator
+    ports:
+    - port: 8222
+      protocol: TCP
   podSelector:
     matchLabels:
       control-plane: nats
