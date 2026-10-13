@@ -61,9 +61,13 @@ func TestControllerStartsWithoutKnativeEventing(t *testing.T) {
 	// because of the capability check, not because the type is unknown to it.
 	require.NoError(t, eventingv1.AddToScheme(scheme))
 
+	// Wired as cmd/main.go wires it: the cache scope must not ask the API about a kind it does not serve.
+	scope := controller.CacheScope{}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:  scheme,
-		Metrics: metricsserver.Options{BindAddress: "0"},
+		Scheme:    scheme,
+		Metrics:   metricsserver.Options{BindAddress: "0"},
+		NewCache:  scope.NewCache,
+		NewClient: scope.NewClient,
 	})
 	require.NoError(t, err)
 
