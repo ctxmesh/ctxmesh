@@ -135,7 +135,11 @@ func TestSoak_NoBleed_Plane(t *testing.T) {
 	capabilities := make([]string, users)
 	for i := range users {
 		capabilities[i], err = signer.Mint(runcap.MintRequest{
-			User: userHash(i), Agent: ns + "/" + agent, Boundary: boundary, RunID: fmt.Sprintf("run-%03d", i), TTL: 10 * time.Minute,
+			User:     userHash(i),
+			Agent:    ns + "/" + agent,
+			Boundary: boundary,
+			RunID:    fmt.Sprintf("run-%03d", i),
+			TTL:      10 * time.Minute,
 		})
 		if err != nil {
 			t.Fatalf("mint capability %d: %v", i, err)
